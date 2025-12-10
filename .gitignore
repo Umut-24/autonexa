@@ -1,0 +1,42 @@
+# Build artifacts
+build/
+install/
+log/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# ROS2 specific
+*.bag
+*.db3
+
+# Temporary files
+*.tmp
+*.bak
+*.pdf
+*.gv
+
+# External dependencies (build from source separately)
+src/csm/
+src/ros2_laser_scan_matcher/
+
+# Large map data files
+maps/*.data
+maps/*.posegraph
+
+# Temp scripts
+*.sh
+force_initial_pose.py
+test_slam_transform.py
+

@@ -1,0 +1,76 @@
+slam_toolbox:
+  ros__parameters:
+    # ============================================
+    # MAPPING MODE - START FRESH (NO OLD MAPS)
+    # ============================================
+    mode: mapping                    # MAPPING mode, not localization
+    map_file_name: ''                # EMPTY = don't load any map
+    map_start_pose: [0.0, 0.0, 0.0]  # Start at origin
+    map_start_at_dock: false         # Don't try to find dock position
+    
+    # ============================================
+    # BASIC FRAME CONFIGURATION
+    # ============================================
+    base_frame: base_link
+    odom_frame: odom
+    map_frame: map
+    scan_topic: /scan
+    
+    # ============================================
+    # CRITICAL: Use external odometry from laser_scan_matcher
+    # ============================================
+    provide_odom_frame: false  # Let laser_scan_matcher provide odom->base_link
+    publish_tf: true
+    use_sim_time: false  # Real hardware, not simulation
+    
+    # ============================================
+    # HIGH RESPONSIVENESS SETTINGS
+    # ============================================
+    # Lower thresholds = more frequent map updates
+    minimum_travel_distance: 0.05  # Update every 5cm
+    minimum_travel_heading: 0.05   # Update every tiny rotation (~3 degrees)
+    map_update_interval: 1.0       # Try to update map every second
+    
+    # ============================================
+    # TF TOLERANCE SETTINGS (prevent extrapolation errors)
+    # ============================================
+    transform_timeout: 0.5         # Wait up to 0.5s for transforms
+    tf_buffer_duration: 30.0       # Keep 30s of transform history
+    scan_buffer_size: 20           # Buffer 20 scans for matching
+    
+    # ============================================
+    # SCAN MATCHING (trust the scan matcher)
+    # ============================================
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_time_interval: 0.0     # Process every scan immediately
+    
+    # ============================================
+    # MAP PARAMETERS - HIGH RESOLUTION FOR SMALL SPACES
+    # ============================================
+    # CRITICAL: For 1x1m or 2x2m testbeds, use 2cm resolution!
+    # 5cm resolution causes "quantization jitter" in AMCL
+    resolution: 0.02               # 2cm per pixel (was 5cm)
+    max_laser_range: 12.0          # Full LIDAR range
+    
+    # ============================================
+    # CORRELATION PARAMETERS
+    # ============================================
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.03
+    
+    # ============================================
+    # LOOP CLOSURE
+    # ============================================
+    do_loop_closing: true
+    loop_search_space_dimension: 3.0
+    loop_search_space_resolution: 0.05
+    loop_search_space_smear_deviation: 0.03
+    loop_search_maximum_distance: 3.0
+    
+    # ============================================
+    # MAP PUBLISHING
+    # ============================================
+    publish_map_updates: true
+    enable_interactive_mode: false

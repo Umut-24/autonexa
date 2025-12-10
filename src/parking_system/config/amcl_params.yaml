@@ -1,0 +1,77 @@
+amcl:
+  ros__parameters:
+    # ============================================
+    # BASIC PARAMETERS
+    # ============================================
+    use_sim_time: False
+    base_frame_id: "base_link"
+    global_frame_id: "map"
+    odom_frame_id: "odom"
+    scan_topic: "/scan_filtered"  # Use filtered scan for better quality
+    
+    # ============================================
+    # PARTICLE FILTER PARAMETERS (Optimized for 2m x 2m)
+    # ============================================
+    # For small 2m x 2m environment, we need fewer particles but higher quality
+    min_particles: 1000  # Minimum particles (increased from 500 for better coverage)
+    max_particles: 5000  # Maximum particles (increased from 2000 for better accuracy)
+    pf_err: 0.01  # Particle filter error threshold (reduced from 0.05 for tighter convergence)
+    pf_z: 0.99  # Particle filter z-score (99% confidence)
+    resample_interval: 1  # Resample every update (keeps particles fresh)
+    
+    # ============================================
+    # LASER MODEL PARAMETERS (Optimized for indoor 2m x 2m)
+    # ============================================
+    laser_model_type: "likelihood_field"  # Best for indoor environments
+    laser_max_range: 4.0  # Match SLAM max_laser_range (4m for 2m x 2m)
+    laser_min_range: 0.05  # Minimum range: 5cm (filter too-close readings)
+    laser_max_beams: 60  # Use 60 beams for good coverage without excessive computation
+    laser_likelihood_max_dist: 2.0  # Maximum distance for likelihood field (2m for 2m x 2m)
+    
+    # Laser model weights (must sum to ~1.0)
+    z_hit: 0.95  # Weight for correct hits (increased for better accuracy)
+    z_short: 0.01  # Weight for short readings (reduced)
+    z_max: 0.01  # Weight for max range readings (reduced)
+    z_rand: 0.03  # Weight for random readings (reduced)
+    sigma_hit: 0.15  # Standard deviation for hit model (reduced from 0.2 for tighter matching)
+    lambda_short: 0.1  # Exponential decay for short readings
+    
+    # ============================================
+    # ODOMETRY MODEL PARAMETERS (Reduce drift)
+    # ============================================
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    # Alpha parameters control odometry noise (lower = more trust in odometry)
+    # For scan-matching odometry (SLAM Toolbox), we can trust it more
+    alpha1: 0.1  # Rotation noise from rotation (reduced from 0.2)
+    alpha2: 0.1  # Rotation noise from translation (reduced from 0.2)
+    alpha3: 0.1  # Translation noise from translation (reduced from 0.2)
+    alpha4: 0.1  # Translation noise from rotation (reduced from 0.2)
+    alpha5: 0.05  # Additional rotation noise (reduced from 0.2)
+    
+    # ============================================
+    # UPDATE PARAMETERS (Optimized for responsiveness)
+    # ============================================
+    update_min_d: 0.1  # Minimum distance to trigger update (reduced from 0.25 for 2m x 2m)
+    update_min_a: 0.1  # Minimum angle to trigger update (reduced from 0.2 for 2m x 2m)
+    
+    # ============================================
+    # RECOVERY PARAMETERS (For localization failures)
+    # ============================================
+    recovery_alpha_slow: 0.001  # Slow recovery rate (increased from 0.0)
+    recovery_alpha_fast: 0.1  # Fast recovery rate (increased from 0.0)
+    
+    # ============================================
+    # BEAM SKIP PARAMETERS (Reduce computational load)
+    # ============================================
+    do_beamskip: false  # Disable beam skipping for better accuracy
+    beam_skip_distance: 0.5
+    beam_skip_threshold: 0.3
+    beam_skip_error_threshold: 0.9
+    
+    # ============================================
+    # TRANSFORM PARAMETERS
+    # ============================================
+    tf_broadcast: true
+    transform_tolerance: 0.5  # Transform tolerance (reduced from 1.0 for tighter timing)
+    save_pose_rate: 0.5  # Save pose every 0.5s
+

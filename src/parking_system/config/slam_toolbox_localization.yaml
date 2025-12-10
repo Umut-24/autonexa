@@ -1,0 +1,72 @@
+slam_toolbox:
+  ros__parameters:
+    # ============================================
+    # BASIC PARAMETERS
+    # ============================================
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan_filtered  # Use filtered scan for better quality
+    
+    # ============================================
+    # MODE: LOCALIZATION ONLY (using existing map)
+    # ============================================
+    mode: localization
+    map_file_name: /home/autonexa/intelligent_parking_ws/maps/parking_map
+    
+    # ============================================
+    # TRANSFORM PUBLISHING (CRITICAL for localization)
+    # ============================================
+    provide_odom_frame: true  # SLAM provides odometry from scan matching
+    publish_tf: true  # Must be true for transforms to be published
+    transform_publish_period: 0.02  # 50Hz transform publishing for smooth tracking
+    
+    # ============================================
+    # RESOLUTION (MUST MATCH MAPPING RESOLUTION)
+    # ============================================
+    resolution: 0.02  # Must match slam_toolbox_mapping.yaml (2cm per pixel for 2m x 2m)
+    
+    # ============================================
+    # LOCALIZATION PARAMETERS (Optimized for 2m x 2m)
+    # ============================================
+    max_laser_range: 4.0  # Match mapping max_laser_range (4m for 2m x 2m)
+    scan_buffer_size: 30  # Larger buffer for better matching
+    scan_buffer_maximum_scan_distance: 3.0  # For 2m x 2m map
+    link_match_minimum_response_fine: 0.25  # Higher threshold for better matches (reduces false matches)
+    link_scan_maximum_distance: 1.5  # Maximum distance for linking scans
+    loop_search_maximum_distance: 2.5  # For 2m x 2m map
+    
+    # ============================================
+    # CORRELATION PARAMETERS (Tuned for stability)
+    # ============================================
+    correlation_search_space_dimension: 0.3  # Search space for scan matching (30cm)
+    correlation_search_space_resolution: 0.01  # 1cm resolution for precise matching
+    correlation_search_space_smear_deviation: 0.015  # Smear deviation (range: 0.001-0.02)
+    
+    # ============================================
+    # DISTANCE/ANGLE VARIANCE PARAMETERS (Reduce drift)
+    # ============================================
+    distance_variance_penalty: 1.2  # Higher penalty = more stable
+    angle_variance_penalty: 1.8  # Higher penalty = better angle consistency
+    
+    # ============================================
+    # FINE SEARCH PARAMETERS (Tuned for precision)
+    # ============================================
+    fine_search_angle_offset: 0.00175  # 0.1 degree fine search
+    coarse_search_angle_offset: 0.1745  # 10 degree coarse search
+    coarse_angle_resolution: 0.01745  # 1 degree angle resolution
+    
+    # ============================================
+    # MINIMUM PENALTIES
+    # ============================================
+    minimum_angle_penalty: 0.9
+    minimum_distance_penalty: 0.5
+    
+    # ============================================
+    # SCAN MATCHING SETTINGS (Prevent jitter when stationary)
+    # ============================================
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_time_interval: 0.1  # Process scans every 100ms (10Hz) - reduces processing load
+    minimum_travel_distance: 0.02  # Only process if moved 2cm (prevents noise when stationary)
+    minimum_travel_heading: 0.0349  # Only process if rotated 2 degrees (prevents noise when stationary)

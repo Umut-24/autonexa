@@ -1,0 +1,29 @@
+scan_to_scan_filter_chain:
+  ros__parameters:
+    filter1:
+      name: range
+      type: laser_filters/LaserScanRangeFilter
+      params:
+        lower_threshold: 0.05
+        upper_threshold: 4.0
+        use_message_range_limits: false
+    filter2:
+      name: shadow
+      type: laser_filters/ScanShadowsFilter
+      params:
+        min_angle: 10.0
+        max_angle: 170.0
+        neighbors: 20
+        window: 0
+    filter3:
+      name: median
+      type: laser_filters/MedianFilter
+      params:
+        number_of_observations: 5
+        max_queue_size: 10
+    filter4:
+      name: outlier
+      type: laser_filters/LaserScanOutlierFilter
+      params:
+        outlier_threshold: 0.5
+        neighbor_window: 5

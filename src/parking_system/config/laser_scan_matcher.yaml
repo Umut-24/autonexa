@@ -1,0 +1,65 @@
+laser_scan_matcher:
+  ros__parameters:
+    # ============================================
+    # BASIC PARAMETERS
+    # ============================================
+    base_frame: base_link
+    odom_frame: odom
+    laser_frame: laser_link  # CRITICAL: Must match the frame_id of the LIDAR scans
+    # Note: map_frame is not needed - laser_scan_matcher only provides odometry
+    # scan_topic is set via remapping in launch file - don't set here
+    
+    # ============================================
+    # PUBLISHING PARAMETERS
+    # ============================================
+    publish_odom: /odom  # Publish odometry on /odom topic (must be topic name string, not boolean!)
+    publish_tf: true  # Publish odom->base_link transform
+    publish_pose: false  # Don't publish pose separately
+    publish_pose_stamped: false  # Don't publish pose stamped
+    
+    # ============================================
+    # SCAN MATCHING PARAMETERS (Optimized for manual LIDAR movement)
+    # ============================================
+    # ICP (Iterative Closest Point) parameters
+    use_icp: true  # Use ICP for scan matching
+    use_odom: false  # No wheel odometry available
+    use_imu: false  # No IMU available
+    
+    # Scan matching thresholds
+    kf_dist_linear: 0.1  # Keyframe distance (10cm) - create keyframe every 10cm
+    kf_dist_angular: 0.1745  # Keyframe angular distance (10 degrees)
+    
+    # ICP parameters
+    max_iterations: 30  # Maximum ICP iterations
+    max_correspondence_distance: 0.3  # Maximum correspondence distance (30cm)
+    max_angular_correction_deg: 45.0  # Maximum angular correction (degrees)
+    max_linear_correction: 0.5  # Maximum linear correction (50cm)
+    
+    # ============================================
+    # FREQUENCY AND TIMING (High frequency for manual movement)
+    # ============================================
+    scan_queue_size: 10  # Queue size for scans
+    odom_queue_size: 10  # Queue size for odometry
+    
+    # ============================================
+    # NOISE PARAMETERS (For manual movement)
+    # ============================================
+    # Odometry noise model (since we have no wheel encoders, trust scan matching)
+    odom_alpha1: 0.1  # Rotation noise from rotation
+    odom_alpha2: 0.1  # Rotation noise from translation
+    odom_alpha3: 0.1  # Translation noise from translation
+    odom_alpha4: 0.1  # Translation noise from rotation
+    
+    # ============================================
+    # SCAN PROCESSING
+    # ============================================
+    use_cloud_input: false  # Use LaserScan, not PointCloud
+    cloud_range_min: 0.05  # Minimum range (5cm)
+    cloud_range_max: 4.0  # Maximum range (4m)
+    
+    # ============================================
+    # DEBUGGING
+    # ============================================
+    do_compute_covariance: true  # Compute covariance for odometry
+    debug: false  # Disable debug output for performance
+
