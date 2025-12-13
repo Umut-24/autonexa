@@ -12,12 +12,9 @@ find_package(rclcpp REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
-find_package(tf2 REQUIRED)
-find_package(tf2_ros REQUIRED)
 
 # Install Python scripts
 ament_python_install_package(parking_system
@@ -45,14 +42,6 @@ install(PROGRAMS
   scripts/diagnose_localization.py
   scripts/diagnose_tf_tree.py
   scripts/print_robot_position.py
-  scripts/parking_system/parking_coordinator.py
-  scripts/parking_system/parking_slot_selector.py
-  scripts/parking_system/path_monitor.py
-  scripts/parking_system/path_analyzer.py
-  scripts/parking_system/aruco_detector.py
-  scripts/parking_system/sensor_fusion.py
-  scripts/parking_system/aruco_navigation.py
-  scripts/parking_system/marker_selector.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
