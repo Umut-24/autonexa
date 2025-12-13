@@ -11,6 +11,11 @@ Panels:
         - /Costmap2D1
         - /Path1
         - /PoseArray1
+        - /Movement Commands1
+        - /ArUco Target Pose1
+        - /All ArUco Markers1
+        - /Marker Map1
+        - /Fused Pose1
       Splitter Ratio: 0.5
     Tree Height: 527
   - Class: rviz_common/Selection
@@ -186,6 +191,48 @@ Visualization Manager:
             base_link:
               {}
       Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Movement Commands
+      Namespaces:
+        movement_commands: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /movement_markers
+      Value: true
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: ArUco Target Pose
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aruco_marker_pose
+      Value: true
+    - Class: rviz_default_plugins/PoseArray
+      Enabled: true
+      Name: Marker Map
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /marker_map
+      Value: true
+    - Class: rviz_default_plugins/PoseWithCovariance
+      Enabled: true
+      Name: Fused Pose
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /fused_pose
       Value: true
   Enabled: true
   Global Options:
