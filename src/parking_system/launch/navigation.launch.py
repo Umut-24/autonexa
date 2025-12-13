@@ -173,6 +173,46 @@ def generate_launch_description():
         output='screen'
     )
     
+    # Path Analyzer Node
+    path_analyzer = Node(
+        package='parking_system',
+        executable='path_analyzer.py',
+        name='path_analyzer',
+        output='screen'
+    )
+    
+    # ArUco Detector Node
+    aruco_detector = Node(
+        package='parking_system',
+        executable='aruco_detector.py',
+        name='aruco_detector',
+        output='screen'
+    )
+    
+    # Sensor Fusion Node
+    sensor_fusion = Node(
+        package='parking_system',
+        executable='sensor_fusion.py',
+        name='sensor_fusion',
+        output='screen'
+    )
+    
+    # ArUco Navigation Node
+    aruco_navigation = Node(
+        package='parking_system',
+        executable='aruco_navigation.py',
+        name='aruco_navigation',
+        output='screen'
+    )
+    
+    # Marker Selector Node
+    marker_selector = Node(
+        package='parking_system',
+        executable='marker_selector.py',
+        name='marker_selector',
+        output='screen'
+    )
+    
     # Parking Coordinator Node
     parking_coordinator = Node(
         package='parking_system',
@@ -206,6 +246,11 @@ def generate_launch_description():
         lifecycle_manager,
         parking_slot_selector,
         path_monitor,
+        path_analyzer,
+        aruco_detector,
+        sensor_fusion,
+        aruco_navigation,
+        marker_selector,
         parking_coordinator,
         rviz_node,
     ])
