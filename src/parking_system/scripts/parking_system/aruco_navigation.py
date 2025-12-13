@@ -28,6 +28,13 @@ class ArucoNavigation(Node):
             10
         )
         
+        self.marker_map_sub = self.create_subscription(
+            PoseStamped,
+            '/marker_map/poses',
+            self.marker_pose_callback,
+            10
+        )
+        
         self.fused_pose_sub = self.create_subscription(
             PoseStamped,
             '/fused_pose',
@@ -38,14 +45,8 @@ class ArucoNavigation(Node):
         # Publishers
         self.status_pub = self.create_publisher(String, '/navigation_status', 10)
         
-        # Marker positions (should match sensor_fusion.py)
-        self.marker_positions = {
-            0: {'x': 1.0, 'y': 0.5, 'yaw': 0.0},
-            1: {'x': 1.8, 'y': 0.5, 'yaw': 1.57},  # 90 degrees
-            2: {'x': 1.8, 'y': 1.8, 'yaw': 3.14},  # 180 degrees
-            3: {'x': 0.5, 'y': 1.8, 'yaw': -1.57}, # -90 degrees
-            # Add more markers as needed
-        }
+        # Marker positions (will be updated from marker map)
+        self.marker_positions = {}  # {id: {'x': float, 'y': float, 'yaw': float}}
         
         self.current_goal = None
         self.target_id = None
@@ -68,6 +69,34 @@ class ArucoNavigation(Node):
         """Monitor current pose for status updates"""
         # Could add logic to check if we've reached the goal
         pass
+    
+    def marker_pose_callback(self, msg):
+        """Update marker position from individual pose message"""
+        # Extract marker ID from frame_id (format: marker_X)
+        frame_id = msg.header.frame_id
+        if not frame_id.startswith('marker_'):
+            self.get_logger().warn(f'Invalid frame_id format: {frame_id}')
+            return
+        
+        try:
+            marker_id = int(frame_id.split('_')[1])
+        except (IndexError, ValueError):
+            self.get_logger().warn(f'Could not parse marker ID from {frame_id}')
+            return
+        
+        # Extract yaw from quaternion
+        import tf_transformations
+        quaternion = [msg.pose.orientation.x, msg.pose.orientation.y, 
+                     msg.pose.orientation.z, msg.pose.orientation.w]
+        _, _, yaw = tf_transformations.euler_from_quaternion(quaternion)
+        
+        self.marker_positions[marker_id] = {
+            'x': msg.pose.position.x,
+            'y': msg.pose.position.y,
+            'yaw': yaw
+        }
+        
+        self.get_logger().debug(f'Updated position for marker {marker_id}: ({msg.pose.position.x:.2f}, {msg.pose.position.y:.2f})')
     
     def navigate_to_marker(self, marker_id):
         """Send navigation goal to the specified marker"""

@@ -16,6 +16,8 @@ import numpy as np
 import threading
 import time
 from collections import deque
+import tf2_ros
+import geometry_msgs.msg as gm
 
 
 class ArucoDetector(Node):
@@ -31,9 +33,13 @@ class ArucoDetector(Node):
         
         # Publishers
         self.marker_pose_pub = self.create_publisher(PoseStamped, '/aruco_marker_pose', 10)
+        self.marker_update_pub = self.create_publisher(PoseStamped, '/aruco/marker_pose_update', 10)
         self.all_markers_pub = self.create_publisher(PoseArray, '/aruco_all_markers', 10)
         self.image_pub = self.create_publisher(Image, '/aruco_debug_image', 10)
         self.telemetry_pub = self.create_publisher(String, '/aruco_telemetry', 10)
+        
+        # TF Broadcaster
+        self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         
         # Subscribers
         self.target_id_sub = self.create_subscription(
@@ -198,6 +204,16 @@ class ArucoDetector(Node):
                             cv2.putText(frame, f"Bearing: {bearing:.1f}°", 
                                       (center[0]-50, center[1]+10),
                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+                        
+                        # Broadcast TF transform for this marker
+                        self.broadcast_marker_tf(marker_id, pose, pose_array.header.stamp)
+                        
+                        # Publish marker update for map manager
+                        update_pose = PoseStamped()
+                        update_pose.header.frame_id = f"marker_{marker_id}"
+                        update_pose.header.stamp = pose_array.header.stamp
+                        update_pose.pose = pose
+                        self.marker_update_pub.publish(update_pose)
         
         # Publish target pose if available
         if target_pose:
@@ -256,6 +272,23 @@ class ArucoDetector(Node):
         pose.orientation.z = float(qz)
         
         return pose
+    
+    def broadcast_marker_tf(self, marker_id, pose, timestamp):
+        """Broadcast TF transform for detected marker"""
+        transform = gm.TransformStamped()
+        transform.header.stamp = timestamp
+        transform.header.frame_id = "camera_link"  # Marker pose is relative to camera
+        transform.child_frame_id = f"marker_{marker_id}"
+        
+        # Set translation
+        transform.transform.translation.x = float(pose.position.x)
+        transform.transform.translation.y = float(pose.position.y)
+        transform.transform.translation.z = float(pose.position.z)
+        
+        # Set rotation
+        transform.transform.rotation = pose.orientation
+        
+        self.tf_broadcaster.sendTransform(transform)
     
     def __del__(self):
         if self.cap:

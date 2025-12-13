@@ -105,6 +105,19 @@ def generate_launch_description():
     )
     
     # ============================================
+    # NODE 4: MARKER MAPPER (records markers during SLAM)
+    # ============================================
+    marker_mapper = Node(
+        package='parking_system',
+        executable='marker_mapper.py',
+        name='marker_mapper',
+        output='screen',
+        parameters=[{
+            'map_name': 'parking_map',  # Will create maps/parking_map_markers.yaml
+        }]
+    )
+    
+    # ============================================
     # LIDAR DRIVER
     # ============================================
     lidar = IncludeLaunchDescription(
@@ -151,6 +164,7 @@ def generate_launch_description():
         lidar,
         laser_scan_matcher,
         slam_toolbox,
+        marker_mapper,
         lifecycle_manager,
         rviz,
     ])

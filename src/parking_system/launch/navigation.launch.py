@@ -189,11 +189,23 @@ def generate_launch_description():
         output='screen'
     )
     
-    # Sensor Fusion Node
-    sensor_fusion = Node(
+    # Marker Map Manager Node
+    marker_map_manager = Node(
         package='parking_system',
-        executable='sensor_fusion.py',
-        name='sensor_fusion',
+        executable='marker_map_manager.py',
+        name='marker_map_manager',
+        output='screen',
+        parameters=[{
+            'map_name': 'parking_map',
+            'auto_load_map_markers': True,
+        }]
+    )
+    
+    # Enhanced Sensor Fusion Node
+    enhanced_sensor_fusion = Node(
+        package='parking_system',
+        executable='enhanced_sensor_fusion.py',
+        name='enhanced_sensor_fusion',
         output='screen'
     )
     
@@ -248,7 +260,8 @@ def generate_launch_description():
         path_monitor,
         path_analyzer,
         aruco_detector,
-        sensor_fusion,
+        marker_map_manager,
+        enhanced_sensor_fusion,
         aruco_navigation,
         marker_selector,
         parking_coordinator,

@@ -14,6 +14,7 @@ Panels:
         - /Movement Commands1
         - /ArUco Target Pose1
         - /All ArUco Markers1
+        - /Marker Map1
         - /Fused Pose1
       Splitter Ratio: 0.5
     Tree Height: 527
@@ -215,13 +216,13 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/PoseArray
       Enabled: true
-      Name: All ArUco Markers
+      Name: Marker Map
       Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /aruco_all_markers
+        Value: /marker_map
       Value: true
     - Class: rviz_default_plugins/PoseWithCovariance
       Enabled: true
