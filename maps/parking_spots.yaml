@@ -1,0 +1,39 @@
+# Parking Spots Definition File
+# Format: spot_id: {x, y, yaw (radians), description}
+# These positions are in the MAP frame
+# Use the spot_recorder tool to add new spots
+
+parking_spots:
+  spot_1:
+    x: -1.538
+    y: -0.148
+    yaw: -0.101
+    description: First parking spot
+  spot_2:
+    x: -1.525
+    y: -0.415
+    yaw: 0.031
+    description: Second spot
+  spot_3:
+    x: 1.5
+    y: 0.5
+    yaw: 0.0
+    description: Parking spot 3
+waypoints:
+  entrance:
+    x: 0.0
+    y: 0.0
+    description: Map entrance/start
+  junction_1:
+    x: 0.5
+    y: 0.0
+    description: First junction
+roads:
+- from: entrance
+  to: junction_1
+- from: junction_1
+  to: spot_1
+- from: junction_1
+  to: spot_2
+- from: junction_1
+  to: spot_3
