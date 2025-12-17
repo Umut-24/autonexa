@@ -20,6 +20,7 @@
   <depend>visualization_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>nav2_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>tf_transformations</depend>
 

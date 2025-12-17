@@ -165,6 +165,15 @@ source install/setup.bash
 ros2 launch parking_system navigation.launch.py map_file:=maps/parking_map.yaml
 ```
 
+#### Recommended (Safest) Navigation Bringup
+If you want the simplest, least error-prone Nav2 setup (no ArUco / custom nodes), use:
+
+```bash
+cd ~/intelligent_parking_ws
+source install/setup.bash
+ros2 launch parking_system nav2_only.launch.py map_file:=/full/path/to/parking_map.yaml
+```
+
 **Instructions:**
 1. **Set Initial Pose**: In RViz, use "2D Pose Estimate" to set robot's current pose
 2. **Select Parking Slot**: 

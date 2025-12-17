@@ -29,6 +29,24 @@ def generate_launch_description():
         default_value='/home/autonexa/intelligent_parking_ws/maps/parking_map.yaml',
         description='Path to the map yaml file'
     )
+
+    use_lidar_arg = DeclareLaunchArgument(
+        'use_lidar',
+        default_value='true',
+        description='Whether to launch the LIDAR driver and laser odometry'
+    )
+
+    serial_port_arg = DeclareLaunchArgument(
+        'serial_port',
+        default_value='/dev/ttyUSB0',
+        description='Serial port for Slamtec C1'
+    )
+
+    serial_baudrate_arg = DeclareLaunchArgument(
+        'serial_baudrate',
+        default_value='460800',
+        description='Serial baudrate for Slamtec C1'
+    )
     
     nav2_params_path = PathJoinSubstitution([
         pkg_dir,
@@ -59,6 +77,61 @@ def generate_launch_description():
             'robot_description': robot_description_content
         }]
     )
+
+    # Temporary map->odom until AMCL publishes
+    map_bootstrap_node = Node(
+        package='parking_system',
+        executable='map_bootstrap.py',
+        name='map_bootstrap',
+        output='screen'
+    )
+
+    # LIDAR driver (Slamtec C1 via sllidar_ros2)
+    lidar_node = Node(
+        package='sllidar_ros2',
+        executable='sllidar_node',
+        name='sllidar_node',
+        output='screen',
+        parameters=[{
+            'channel_type': 'serial',
+            'serial_port': LaunchConfiguration('serial_port'),
+            'serial_baudrate': LaunchConfiguration('serial_baudrate'),
+            'frame_id': 'laser_link',
+            'inverted': 'false',
+            'angle_compensate': 'true',
+            'scan_mode': 'Standard',
+        }],
+        condition=IfCondition(LaunchConfiguration('use_lidar'))
+    )
+
+    # Laser scan matcher (provides /odom and odom->base_link)
+    laser_odom_config_path = PathJoinSubstitution([
+        pkg_dir,
+        'config',
+        'laser_scan_matcher.yaml'
+    ])
+
+    laser_scan_matcher_node = Node(
+        package='ros2_laser_scan_matcher',
+        executable='laser_scan_matcher',
+        name='laser_scan_matcher',
+        output='screen',
+        parameters=[
+            laser_odom_config_path,
+            {
+                'use_sim_time': False,
+                'publish_tf': True,
+                'publish_odom': '/odom',
+                'base_frame': 'base_link',
+                'odom_frame': 'odom',
+                'laser_frame': 'laser_link',
+            }
+        ],
+        remappings=[
+            ('scan', '/scan'),
+        ],
+        condition=IfCondition(LaunchConfiguration('use_lidar'))
+    )
     
     # Map server
     map_server_node = Node(
@@ -77,6 +150,15 @@ def generate_launch_description():
         package='nav2_amcl',
         executable='amcl',
         name='amcl',
+        output='screen',
+        parameters=[nav2_params_path]
+    )
+
+    # Nav2 Smoother Server (required by default BT)
+    smoother_server = Node(
+        package='nav2_smoother',
+        executable='smoother_server',
+        name='smoother_server',
         output='screen',
         parameters=[nav2_params_path]
     )
@@ -99,11 +181,11 @@ def generate_launch_description():
         parameters=[nav2_params_path]
     )
     
-    # Nav2 Recovery Server
-    recovery_server = Node(
-        package='nav2_recoveries',
-        executable='recoveries_server',
-        name='recoveries_server',
+    # Nav2 Behavior Server (recovery behaviors used by the BT)
+    behavior_server = Node(
+        package='nav2_behaviors',
+        executable='behavior_server',
+        name='behavior_server',
         output='screen',
         parameters=[nav2_params_path]
     )
@@ -148,8 +230,9 @@ def generate_launch_description():
                 'map_server',
                 'amcl',
                 'planner_server',
+                'smoother_server',
                 'controller_server',
-                'recovery_server',
+                'behavior_server',
                 'bt_navigator',
                 'waypoint_follower',
                 'velocity_smoother'
@@ -245,13 +328,20 @@ def generate_launch_description():
     
     return LaunchDescription([
         use_rviz_arg,
+        use_lidar_arg,
+        serial_port_arg,
+        serial_baudrate_arg,
         map_file_arg,
         robot_state_publisher,
+        map_bootstrap_node,
+        lidar_node,
+        laser_scan_matcher_node,
         map_server_node,
         amcl_node,
         planner_server,
+        smoother_server,
         controller_server,
-        recovery_server,
+        behavior_server,
         bt_navigator,
         waypoint_follower,
         velocity_smoother,

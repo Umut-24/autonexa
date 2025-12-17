@@ -109,5 +109,4 @@ def main(args=None):
 
 
 if __name__ == '__main__':
-    main()</content>
-<parameter name="filePath">c:\Users\Anıl\OneDrive\Belgeler\GitHub\autonexa\src\parking_system\scripts\parking_system\marker_selector.py
+    main()

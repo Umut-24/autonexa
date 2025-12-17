@@ -6,10 +6,11 @@ Allows selecting parking slots and commanding the robot to navigate to them
 
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionClient
 from geometry_msgs.msg import PoseStamped, Pose
-from nav_msgs.srv import GetPlan
 from std_srvs.srv import SetBool
 from std_msgs.msg import String
+from nav2_msgs.action import NavigateToPose
 import math
 
 
@@ -37,13 +38,8 @@ class ParkingSlotSelector(Node):
         # Publisher for goal pose
         self.goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
         
-        # Service client for path planning (Nav2 planner server)
-        self.nav2_client = self.create_client(GetPlan, '/planner_server/compute_path_to_pose')
-        
-        # Try to wait for service, but don't block forever
-        self.get_logger().info('Waiting for Nav2 planning service...')
-        if not self.nav2_client.wait_for_service(timeout_sec=5.0):
-            self.get_logger().warn('Nav2 planning service not available yet. Will retry when needed.')
+        # Action client for navigation (Nav2 BT Navigator)
+        self.nav_to_pose_client = ActionClient(self, NavigateToPose, 'navigate_to_pose')
         
         # Status publisher
         self.status_pub = self.create_publisher(String, '/parking_status', 10)
@@ -78,8 +74,8 @@ class ParkingSlotSelector(Node):
             # Publish goal pose
             self.goal_pub.publish(goal_pose)
             
-            # Request path plan
-            self.request_path_plan(goal_pose)
+            # Send Nav2 goal
+            self.send_nav_goal(goal_pose)
             
             self.current_slot = slot_name
             response.success = True
@@ -114,39 +110,51 @@ class ParkingSlotSelector(Node):
         
         return pose
     
-    def request_path_plan(self, goal_pose):
-        """Request a path plan from Nav2"""
-        # Wait for service if not available
-        if not self.nav2_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().warn('Nav2 planning service still not available')
+    def send_nav_goal(self, goal_pose: PoseStamped):
+        """Send a navigation goal to Nav2."""
+        if not self.nav_to_pose_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().error('Nav2 action server (navigate_to_pose) not available')
+            self.status_pub.publish(String(data='ERROR: Nav2 navigate_to_pose unavailable'))
             return
-        
-        request = GetPlan.Request()
-        request.start.header.frame_id = 'map'
-        request.start.header.stamp = self.get_clock().now().to_msg()
-        # Start pose will be filled by nav2 from current robot pose
-        request.goal = goal_pose
-        request.tolerance = 0.05  # 5cm tolerance as per requirements
-        
-        future = self.nav2_client.call_async(request)
-        future.add_done_callback(self.plan_response_callback)
-    
-    def plan_response_callback(self, future):
-        """Handle path plan response"""
-        try:
-            response = future.result()
-            if response.plan.poses:
-                self.get_logger().info(f'Path planned with {len(response.plan.poses)} waypoints')
-                status_msg = String()
-                status_msg.data = f'PATH_PLANNED: {len(response.plan.poses)} waypoints'
-                self.status_pub.publish(status_msg)
-            else:
-                self.get_logger().warn('No path found to goal')
-                status_msg = String()
-                status_msg.data = 'PATH_FAILED'
-                self.status_pub.publish(status_msg)
-        except Exception as e:
-            self.get_logger().error(f'Failed to get path plan: {str(e)}')
+
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose = goal_pose
+
+        self.get_logger().info(
+            f'Sending Nav2 goal to ({goal_pose.pose.position.x:.2f}, {goal_pose.pose.position.y:.2f})'
+        )
+        self.status_pub.publish(String(data='NAV_GOAL_SENT'))
+
+        future = self.nav_to_pose_client.send_goal_async(goal_msg)
+        future.add_done_callback(self._goal_response_callback)
+
+    def _goal_response_callback(self, future):
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self.get_logger().error('Nav2 goal rejected')
+            self.status_pub.publish(String(data='ERROR: NAV_GOAL_REJECTED'))
+            return
+
+        self.get_logger().info('Nav2 goal accepted')
+        self.status_pub.publish(String(data='NAV_GOAL_ACCEPTED'))
+
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._result_callback)
+
+    def _result_callback(self, future):
+        status = future.result().status
+        if status == 4:  # SUCCEEDED
+            self.get_logger().info('Nav2 goal succeeded')
+            self.status_pub.publish(String(data='NAV_SUCCEEDED'))
+        elif status == 5:  # CANCELED
+            self.get_logger().warn('Nav2 goal canceled')
+            self.status_pub.publish(String(data='NAV_CANCELED'))
+        elif status == 6:  # ABORTED
+            self.get_logger().error('Nav2 goal aborted')
+            self.status_pub.publish(String(data='NAV_ABORTED'))
+        else:
+            self.get_logger().warn(f'Nav2 goal finished with status {status}')
+            self.status_pub.publish(String(data=f'NAV_STATUS: {status}'))
 
 
 def main(args=None):
