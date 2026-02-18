@@ -1,0 +1,10 @@
+free_thresh: 0.25
+image: emre_roads.pgm
+mode: trinary
+negate: 0
+occupied_thresh: 0.65
+origin:
+- -1.564
+- -1.573
+- 0
+resolution: 0.02
