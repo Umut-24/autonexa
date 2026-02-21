@@ -218,8 +218,9 @@ global_costmap:
       robot_radius: 0.1
       resolution: 0.02  # Match map resolution
       track_unknown_space: true
-      # Plugins: static map, road mask (keepout), obstacles, inflation
-      plugins: ["static_layer", "keepout_filter", "obstacle_layer", "inflation_layer"]
+      # Default plugins: static map + live obstacles + inflation
+      # Keepout/road mask is optional and can be enabled with a dedicated params file
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
