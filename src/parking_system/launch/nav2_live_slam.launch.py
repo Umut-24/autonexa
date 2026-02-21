@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-Parking Navigation Launch File
-Read-only Nav2 navigation stack that reuses an existing map.
+Live Nav2 + SLAM launch (LiDAR-only)
 
-This launch file intentionally avoids any SLAM mapping node so stored maps are
-never modified while navigating.
+What this provides:
+- Start RViz + Nav2 directly
+- Build map online while driving/exploring (no pre-saved map required)
+- Click goal in RViz and navigate to it
+- Obstacle avoidance through Nav2 costmaps + controller
+
 TF Tree: map -> odom -> base_link -> laser_link
 """
-
-import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -23,83 +24,22 @@ from nav2_common.launch import RewrittenYaml
 def generate_launch_description():
     pkg_dir = FindPackageShare('parking_system').find('parking_system')
 
-    # Configuration files
     nav2_params_file = PathJoinSubstitution([pkg_dir, 'config', 'nav2_navigation_params.yaml'])
+    slam_params_file = PathJoinSubstitution([pkg_dir, 'config', 'slam_toolbox_mapping.yaml'])
     rviz_config = PathJoinSubstitution([pkg_dir, 'rviz', 'navigation.rviz'])
 
-    default_map_yaml = os.path.join(os.getcwd(), 'maps', 'parking_map.yaml')
-    default_road_mask_yaml = os.path.join(os.getcwd(), 'maps', 'parking_map_roads.yaml')
-    default_spots_yaml = os.path.join(os.getcwd(), 'maps', 'parking_spots.yaml')
+    serial_port_arg = DeclareLaunchArgument('serial_port', default_value='/dev/ttyUSB0')
+    serial_baudrate_arg = DeclareLaunchArgument('serial_baudrate', default_value='460800')
+    use_rviz_arg = DeclareLaunchArgument('use_rviz', default_value='true')
 
-    # ============================================
-    # ARGUMENTS
-    # ============================================
-    serial_port_arg = DeclareLaunchArgument(
-        'serial_port',
-        default_value='/dev/ttyUSB0',
-        description='LiDAR serial port'
-    )
-
-    serial_baudrate_arg = DeclareLaunchArgument(
-        'serial_baudrate',
-        default_value='460800',
-        description='LiDAR baud rate'
-    )
-
-    map_yaml_arg = DeclareLaunchArgument(
-        'map_yaml',
-        default_value=default_map_yaml,
-        description='Full path to existing map YAML file (read-only in navigation mode)'
-    )
-
-    road_mask_yaml_arg = DeclareLaunchArgument(
-        'road_mask_yaml',
-        default_value=default_road_mask_yaml,
-        description='Full path to road mask YAML file'
-    )
-
-    spots_file_arg = DeclareLaunchArgument(
-        'spots_file',
-        default_value=default_spots_yaml,
-        description='Full path to parking spots YAML file'
-    )
-
-    use_rviz_arg = DeclareLaunchArgument(
-        'use_rviz',
-        default_value='true',
-        description='Launch RViz for visualization'
-    )
-
-    use_road_mask_arg = DeclareLaunchArgument(
-        'use_road_mask',
-        default_value='false',
-        description='Enable road mask constraints in global costmap'
-    )
-
-    use_spot_navigator_arg = DeclareLaunchArgument(
-        'use_spot_navigator',
-        default_value='false',
-        description='Enable optional parking-spot navigator helper node'
-    )
-
-    # Keepout layer must be disabled when road mask is not used.
+    # In live SLAM mode there is no road-mask topic by default.
     configured_nav2_params = RewrittenYaml(
         source_file=nav2_params_file,
         root_key='',
         param_rewrites={
-            'global_costmap.global_costmap.ros__parameters.keepout_filter.enabled': LaunchConfiguration('use_road_mask'),
+            'global_costmap.global_costmap.ros__parameters.keepout_filter.enabled': False,
         },
         convert_types=True,
-    )
-
-    # ============================================
-    # TF SETUP
-    # ============================================
-    map_bootstrap = Node(
-        package='parking_system',
-        executable='map_bootstrap.py',
-        name='map_bootstrap',
-        output='screen'
     )
 
     static_tf_base_to_laser = Node(
@@ -111,9 +51,6 @@ def generate_launch_description():
         output='screen'
     )
 
-    # ============================================
-    # SENSORS
-    # ============================================
     lidar = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             '/home/autonexa/ws_lidar/install/sllidar_ros2/share/sllidar_ros2/launch/sllidar_c1_launch.py'
@@ -125,9 +62,6 @@ def generate_launch_description():
         }.items()
     )
 
-    # ============================================
-    # ODOMETRY
-    # ============================================
     laser_scan_matcher = Node(
         package='ros2_laser_scan_matcher',
         executable='laser_scan_matcher',
@@ -144,28 +78,20 @@ def generate_launch_description():
         remappings=[('scan', '/scan')]
     )
 
-    # ============================================
-    # NAV2 STACK (READ-ONLY LOCALIZATION + NAVIGATION)
-    # ============================================
-    map_server = Node(
-        package='nav2_map_server',
-        executable='map_server',
-        name='map_server',
+    slam_toolbox = Node(
+        package='slam_toolbox',
+        executable='async_slam_toolbox_node',
+        name='slam_toolbox',
         output='screen',
-        parameters=[{
-            'yaml_filename': LaunchConfiguration('map_yaml'),
-            'topic_name': 'map',
-            'frame_id': 'map',
-            'use_sim_time': False,
-        }]
-    )
-
-    amcl = Node(
-        package='nav2_amcl',
-        executable='amcl',
-        name='amcl',
-        output='screen',
-        parameters=[configured_nav2_params, {'use_sim_time': False}]
+        parameters=[
+            slam_params_file,
+            {
+                'mode': 'mapping',
+                'map_file_name': '',
+                'map_start_at_dock': False,
+                'use_sim_time': False,
+            }
+        ]
     )
 
     planner_server = Node(
@@ -224,6 +150,18 @@ def generate_launch_description():
         parameters=[configured_nav2_params]
     )
 
+    lifecycle_manager_slam = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager_slam',
+        output='screen',
+        parameters=[{
+            'use_sim_time': False,
+            'autostart': True,
+            'node_names': ['slam_toolbox']
+        }]
+    )
+
     lifecycle_manager_navigation = Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
@@ -234,8 +172,6 @@ def generate_launch_description():
             'autostart': True,
             'bond_timeout': 10.0,
             'node_names': [
-                'map_server',
-                'amcl',
                 'planner_server',
                 'controller_server',
                 'smoother_server',
@@ -247,34 +183,6 @@ def generate_launch_description():
         }]
     )
 
-    # ============================================
-    # OPTIONAL PARKING HELPERS
-    # ============================================
-    road_mask_publisher = Node(
-        package='parking_system',
-        executable='road_mask_publisher.py',
-        name='road_mask_publisher',
-        output='screen',
-        condition=IfCondition(LaunchConfiguration('use_road_mask')),
-        parameters=[{
-            'mask_yaml': LaunchConfiguration('road_mask_yaml')
-        }]
-    )
-
-    spot_navigator = Node(
-        package='parking_system',
-        executable='spot_navigator.py',
-        name='spot_navigator',
-        output='screen',
-        condition=IfCondition(LaunchConfiguration('use_spot_navigator')),
-        parameters=[{
-            'spots_file': LaunchConfiguration('spots_file')
-        }]
-    )
-
-    # ============================================
-    # VISUALIZATION
-    # ============================================
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -287,18 +195,12 @@ def generate_launch_description():
     return LaunchDescription([
         serial_port_arg,
         serial_baudrate_arg,
-        map_yaml_arg,
-        road_mask_yaml_arg,
-        spots_file_arg,
         use_rviz_arg,
-        use_road_mask_arg,
-        use_spot_navigator_arg,
-        map_bootstrap,
         static_tf_base_to_laser,
         lidar,
         laser_scan_matcher,
-        map_server,
-        amcl,
+        slam_toolbox,
+        lifecycle_manager_slam,
         planner_server,
         controller_server,
         smoother_server,
@@ -307,7 +209,5 @@ def generate_launch_description():
         waypoint_follower,
         velocity_smoother,
         lifecycle_manager_navigation,
-        road_mask_publisher,
-        spot_navigator,
         rviz,
     ])
