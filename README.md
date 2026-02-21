@@ -103,6 +103,26 @@ source install/setup.bash
 
 ## Usage
 
+
+## Live Nav2 (No Pre-Saved Map Needed)
+
+If you want everything Nav2-based with LiDAR only (explore + map + click-to-goal + obstacle avoidance), use:
+
+```bash
+cd ~/intelligent_parking_ws
+source install/setup.bash
+ros2 launch parking_system nav2_live_slam.launch.py
+```
+
+### Live workflow
+1. Start launch (RViz + Nav2 + SLAM Toolbox)
+2. Move robot to explore; SLAM builds map online from `/scan`
+3. In RViz, set initial pose once (`2D Pose Estimate`) if needed
+4. Click `2D Goal Pose` anywhere reachable; Nav2 plans and navigates there
+5. Nav2 local/global costmaps + controller provide obstacle avoidance while moving
+
+> This mode does not require a pre-existing map file.
+
 ### 1. Start LIDAR Driver
 
 First, ensure your Slamtec C1 LIDAR is connected and start the driver:
