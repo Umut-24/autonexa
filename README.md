@@ -137,53 +137,56 @@ ros2 launch parking_system mapping.launch.py
   ros2 run nav2_map_server map_saver_cli -f maps/parking_map
   ```
 
-### 3. Localization (Feature 2)
+### 3. Navigation (Localization Happens Inside Nav2)
 
-After saving the map, test localization:
+You are correct: for the final workflow, you do **not** need to run a separate localization launch first.
+`parking_navigation.launch.py` already starts AMCL and performs localization while navigating.
 
-```bash
-cd ~/intelligent_parking_ws
-source install/setup.bash
-ros2 launch parking_system localization.launch.py map_file:=maps/parking_map.yaml
-```
-
-**Instructions:**
-- Place the robot at a random location in the mapped area
-- In RViz, use "2D Pose Estimate" tool to provide initial pose estimate
-- The robot should localize itself and show correct pose on the map
-- You can verify localization by checking:
-  - `/amcl_pose` topic for robot pose
-  - `/particlecloud` topic for AMCL particles (shown in RViz)
-
-### 4. Navigation and Path Planning (Features 3 & 4)
-
-Launch navigation mode with path planning and monitoring:
+Launch navigation mode (read-only map + AMCL + Nav2):
 
 ```bash
 cd ~/intelligent_parking_ws
 source install/setup.bash
-ros2 launch parking_system navigation.launch.py map_file:=maps/parking_map.yaml
+ros2 launch parking_system parking_navigation.launch.py \
+  map_yaml:=/home/autonexa/intelligent_parking_ws/maps/parking_map.yaml \
+  use_rviz:=true
+```
+
+Optional parking/road tools:
+
+```bash
+# Enable parking spots helper and road-mask constraints only if you need them
+ros2 launch parking_system parking_navigation.launch.py \
+  map_yaml:=/home/autonexa/intelligent_parking_ws/maps/parking_map.yaml \
+  use_parking_spots:=true \
+  spots_file:=/home/autonexa/intelligent_parking_ws/maps/parking_spots.yaml \
+  use_road_mask:=true \
+  road_mask_yaml:=/home/autonexa/intelligent_parking_ws/maps/parking_map_roads.yaml
 ```
 
 **Instructions:**
-1. **Set Initial Pose**: In RViz, use "2D Pose Estimate" to set robot's current pose
-2. **Select Parking Slot**: 
-   - Use RViz "2D Goal Pose" tool to click on a parking slot, OR
-   - Use service call:
-     ```bash
-     ros2 service call /select_parking_slot std_srvs/srv/SetBool "{data: true}"  # Selects slot_1
-     ```
-3. **Path Planning**: The system will compute a path to the selected parking slot
-4. **Path Monitoring**: 
-   - The path will be displayed in RViz (green line)
-   - Check feedback on topics:
-     - `/path_feedback` - Text feedback about path following
-     - `/path_distance_error` - Distance error from path
-     - `/path_angular_error` - Angular error from path
-5. **Manual Movement**: Move the robot by hand following the path
-   - The system continuously checks if robot is on the planned path
-   - Feedback is published to `/path_feedback` topic
+1. **Set Initial Pose once** in RViz using "2D Pose Estimate".
+2. **Choose any target pose** with RViz "2D Goal Pose" (this is the default and required behavior).
+3. **Parking spots are optional**: enable `use_parking_spots:=true` only if you want spot-based commands.
+4. **Mapping safety**: this launch uses `map_server + AMCL` only (no SLAM mapping node), so saved maps are not modified.
 
+### 4. End-to-End Test Flow (Mapping -> Navigation)
+
+1. Run mapping and create map:
+   ```bash
+   ros2 launch parking_system mapping.launch.py
+   ```
+2. Save the map:
+   ```bash
+   ros2 run nav2_map_server map_saver_cli -f /home/autonexa/intelligent_parking_ws/maps/parking_map
+   ```
+3. Run navigation on saved map:
+   ```bash
+   ros2 launch parking_system parking_navigation.launch.py \
+     map_yaml:=/home/autonexa/intelligent_parking_ws/maps/parking_map.yaml
+   ```
+4. In RViz set initial pose and send one or more `2D Goal Pose` goals.
+5. Verify robot can move to arbitrary user-selected goals (not only parking slots).
 ### Viewing Feedback
 
 Monitor path following feedback in real-time:
