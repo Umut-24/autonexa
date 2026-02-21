@@ -137,9 +137,23 @@ ros2 launch parking_system mapping.launch.py
   ros2 run nav2_map_server map_saver_cli -f maps/parking_map
   ```
 
-### 3. Localization (Feature 2)
+### 3. Navigation-Time Localization + Navigation (Features 2, 3 & 4)
 
-After saving the map, test localization:
+You are correct: there is no separate localization launch required for normal operation.
+`parking_navigation.launch.py` already runs AMCL, so localization is done while navigating.
+
+```bash
+cd ~/intelligent_parking_ws
+source install/setup.bash
+ros2 launch parking_system parking_navigation.launch.py \
+  map_yaml:=$PWD/maps/parking_map.yaml \
+  use_road_mask:=false \
+  use_spot_navigator:=false
+```
+
+### 4. Optional: Standalone Localization Check
+
+If you want to validate localization only (without planner/controller), you can still run:
 
 ```bash
 cd ~/intelligent_parking_ws
@@ -147,42 +161,34 @@ source install/setup.bash
 ros2 launch parking_system localization.launch.py map_file:=maps/parking_map.yaml
 ```
 
-**Instructions:**
-- Place the robot at a random location in the mapped area
-- In RViz, use "2D Pose Estimate" tool to provide initial pose estimate
-- The robot should localize itself and show correct pose on the map
-- You can verify localization by checking:
-  - `/amcl_pose` topic for robot pose
-  - `/particlecloud` topic for AMCL particles (shown in RViz)
+### 5. Navigation and Goal Sending
 
-### 4. Navigation and Path Planning (Features 3 & 4)
-
-Launch navigation mode with path planning and monitoring:
+Navigation mode with optional road constraints:
 
 ```bash
 cd ~/intelligent_parking_ws
 source install/setup.bash
-ros2 launch parking_system navigation.launch.py map_file:=maps/parking_map.yaml
+ros2 launch parking_system parking_navigation.launch.py \
+  map_yaml:=$PWD/maps/parking_map.yaml \
+  use_road_mask:=true \
+  road_mask_yaml:=$PWD/maps/parking_map_roads.yaml \
+  use_spot_navigator:=false
 ```
 
 **Instructions:**
-1. **Set Initial Pose**: In RViz, use "2D Pose Estimate" to set robot's current pose
-2. **Select Parking Slot**: 
-   - Use RViz "2D Goal Pose" tool to click on a parking slot, OR
-   - Use service call:
+1. **Set Initial Pose**: In RViz, use "2D Pose Estimate" to set robot's current pose.
+2. **Choose a Goal (parking slot is optional)**:
+   - Use RViz "2D Goal Pose" tool to click any desired reachable position, OR
+   - Send a direct Nav2 goal from terminal:
      ```bash
-     ros2 service call /select_parking_slot std_srvs/srv/SetBool "{data: true}"  # Selects slot_1
+     ros2 action send_goal /navigate_to_pose nav2_msgs/action/NavigateToPose \
+       "{pose: {header: {frame_id: map}, pose: {position: {x: 1.0, y: 1.0, z: 0.0}, orientation: {w: 1.0}}}}"
      ```
-3. **Path Planning**: The system will compute a path to the selected parking slot
-4. **Path Monitoring**: 
-   - The path will be displayed in RViz (green line)
-   - Check feedback on topics:
-     - `/path_feedback` - Text feedback about path following
-     - `/path_distance_error` - Distance error from path
-     - `/path_angular_error` - Angular error from path
-5. **Manual Movement**: Move the robot by hand following the path
-   - The system continuously checks if robot is on the planned path
-   - Feedback is published to `/path_feedback` topic
+   - Optional parking flow: set `use_spot_navigator:=true` and provide `spots_file`.
+3. **Path Planning + Control**: Nav2 plans and controls motion toward the selected goal.
+4. **Mapping Safety**: This launch uses `map_server + AMCL` only (no SLAM node), so your saved map is not modified during navigation.
+
+> Note: `use_road_mask:=false` now disables the keepout layer in Nav2, so planning still works even when no road mask is published.
 
 ### Viewing Feedback
 
