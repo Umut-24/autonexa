@@ -25,6 +25,7 @@ def generate_launch_description():
 
     # Configuration files
     nav2_params_file = PathJoinSubstitution([pkg_dir, 'config', 'nav2_navigation_params.yaml'])
+    ekf_params_file = PathJoinSubstitution([pkg_dir, 'config', 'ekf.yaml'])
     rviz_config = PathJoinSubstitution([pkg_dir, 'rviz', 'navigation.rviz'])
 
     default_map_yaml = os.path.join(os.getcwd(), 'maps', 'parking_map.yaml')
@@ -137,11 +138,19 @@ def generate_launch_description():
             'base_frame': 'base_link',
             'odom_frame': 'odom',
             'laser_frame': 'laser_link',
-            'publish_tf': True,
-            'publish_odom': '/odom',
+            'publish_tf': False,  # EKF publishes odom -> base_link
+            'publish_odom': '/laser_odom',
             'use_sim_time': False,
         }],
         remappings=[('scan', '/scan')]
+    )
+
+    ekf_filter_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        parameters=[ekf_params_file]
     )
 
     # ============================================
@@ -297,6 +306,7 @@ def generate_launch_description():
         static_tf_base_to_laser,
         lidar,
         laser_scan_matcher,
+        ekf_filter_node,
         map_server,
         amcl,
         planner_server,
