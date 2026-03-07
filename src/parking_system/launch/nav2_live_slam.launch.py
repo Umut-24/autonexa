@@ -37,7 +37,7 @@ def generate_launch_description():
         source_file=nav2_params_file,
         root_key='',
         param_rewrites={
-            'global_costmap.global_costmap.ros__parameters.keepout_filter.enabled': False,
+            'global_costmap.global_costmap.ros__parameters.keepout_filter.enabled': 'false',
         },
         convert_types=True,
     )
@@ -158,6 +158,7 @@ def generate_launch_description():
         parameters=[{
             'use_sim_time': False,
             'autostart': True,
+            'bond_timeout': 0.0,
             'node_names': ['slam_toolbox']
         }]
     )
