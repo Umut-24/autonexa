@@ -40,3 +40,4 @@ maps/*.posegraph
 force_initial_pose.py
 test_slam_transform.py
 
+.DS_Store
