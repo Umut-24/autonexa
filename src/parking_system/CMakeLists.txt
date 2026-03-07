@@ -47,6 +47,8 @@ install(PROGRAMS
   scripts/road_mask_editor.py
   scripts/road_mask_publisher.py
   scripts/nav2_activator.py
+  scripts/cmd_vel_to_pico_bridge.py
+  scripts/pico_joint_feedback_to_odom.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
