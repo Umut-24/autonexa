@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow cleartext (HTTP) for the app so local HTTP servers can be loaded in WebView.
+         For production, consider restricting to specific domains or using HTTPS. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

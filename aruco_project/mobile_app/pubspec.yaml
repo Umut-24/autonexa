@@ -1,0 +1,19 @@
+name: autonnexa_mobile
+description: A minimal Flutter wrapper to control AutoNexa server and view its video/telemetry.
+publish_to: 'none'
+version: 0.0.1
+environment:
+  sdk: ">=2.18.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+  http: ^1.1.0
+  webview_flutter: ^4.0.7
+  google_fonts: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/logo.png
