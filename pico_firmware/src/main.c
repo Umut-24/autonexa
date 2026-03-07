@@ -19,6 +19,7 @@
 
 #include "pico/stdlib.h"
 #include "hardware/timer.h"
+#include "hardware/i2c.h"
 
 #include "config.h"
 #include "servo.h"
