@@ -17,8 +17,12 @@ from launch_ros.actions import Node
 def generate_launch_description():
     cmd_vel_topic_arg = DeclareLaunchArgument('cmd_vel_topic', default_value='/cmd_vel')
     control_cmd_topic_arg = DeclareLaunchArgument('control_cmd_topic', default_value='/pico/control_cmd')
+    control_cmd_json_topic_arg = DeclareLaunchArgument('control_cmd_json_topic', default_value='/pico/control_cmd_json')
     joint_feedback_topic_arg = DeclareLaunchArgument('joint_feedback_topic', default_value='/pico/joint_feedback')
     odom_topic_arg = DeclareLaunchArgument('odom_topic', default_value='/pico/odom')
+    
+    serial_port_arg = DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0', description='USB serial port of Pico')
+    baud_rate_arg = DeclareLaunchArgument('baud_rate', default_value='115200', description='Baud rate for Pico serial')
 
     bridge = Node(
         package='parking_system',
@@ -45,16 +49,33 @@ def generate_launch_description():
         parameters=[{
             'joint_feedback_topic': LaunchConfiguration('joint_feedback_topic'),
             'odom_topic': LaunchConfiguration('odom_topic'),
-            'wheel_radius_m': 0.0325,
-            'wheelbase_m': 0.20,
+            'wheel_radius_m': 0.033,  # updated to match config.h 66mm diameter
+            'wheelbase_m': 0.25,      # updated to match config.h 0.25m
+        }],
+    )
+
+    transceiver = Node(
+        package='parking_system',
+        executable='pico_serial_transceiver.py',
+        name='pico_serial_transceiver',
+        output='screen',
+        parameters=[{
+            'serial_port': LaunchConfiguration('serial_port'),
+            'baud_rate': LaunchConfiguration('baud_rate'),
+            'control_cmd_json_topic': LaunchConfiguration('control_cmd_json_topic'),
+            'joint_feedback_topic': LaunchConfiguration('joint_feedback_topic'),
         }],
     )
 
     return LaunchDescription([
         cmd_vel_topic_arg,
         control_cmd_topic_arg,
+        control_cmd_json_topic_arg,
         joint_feedback_topic_arg,
         odom_topic_arg,
+        serial_port_arg,
+        baud_rate_arg,
         bridge,
+        transceiver,
         feedback_to_odom,
     ])
