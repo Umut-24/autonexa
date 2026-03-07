@@ -286,3 +286,37 @@ MIT License
 
 Final Year Project Team
 
+
+## Team-B (RPi5/Nav2) Integration Pipeline (New)
+
+This repository now includes an initial RPi5-side control pipeline so Nav2 outputs can be forwarded to Pico in a deterministic and testable way.
+
+### New nodes
+- `cmd_vel_to_pico_bridge.py`
+  - Subscribes: `/cmd_vel` (Nav2 output)
+  - Publishes: `/pico/control_cmd` (`geometry_msgs/TwistStamped`)
+  - Publishes mirror JSON for transport: `/pico/control_cmd_json` (`std_msgs/String`)
+  - Publishes heartbeat: `/pico/heartbeat` (`std_msgs/Bool`)
+  - Features: rate limiting, acceleration limiting, timeout-to-safe-stop.
+
+- `pico_joint_feedback_to_odom.py`
+  - Subscribes: `/pico/joint_feedback` (`sensor_msgs/JointState`)
+  - Publishes: `/pico/odom` (`nav_msgs/Odometry`)
+  - Implements Ackermann-compatible odometry using rear wheel speed and steering angle.
+
+### Launch
+```bash
+cd ~/intelligent_parking_ws
+source install/setup.bash
+ros2 launch parking_system rpi5_pico_bridge.launch.py
+```
+
+### Expected JointState contract from Pico
+- `name`: must include
+  - `left_wheel_joint`
+  - `right_wheel_joint`
+  - `steering_joint`
+- `velocity`: rad/s for left and right wheels
+- `position`: rad for steering joint
+
+You can remap topic and names through launch/node parameters.
