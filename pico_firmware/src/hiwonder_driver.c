@@ -31,17 +31,12 @@
  * below after testing with an I2C scan and protocol analysis.
  * ═══════════════════════════════════════════════════════════════ */
 
-/* Register addresses (may need calibration) */
-#define REG_MOTOR1_SPEED     0x01
-#define REG_MOTOR2_SPEED     0x02
-#define REG_MOTOR3_SPEED     0x03
-#define REG_MOTOR4_SPEED     0x04
-#define REG_STOP_ALL         0x10
-
-#define REG_ENCODER1_COUNT   0x11
-#define REG_ENCODER2_COUNT   0x12
-#define REG_ENCODER3_COUNT   0x13
-#define REG_ENCODER4_COUNT   0x14
+/* Register addresses (Hiwonder YX-4055AM 4-Channel Controller) */
+#define REG_MOTOR_TYPE       0x14
+#define REG_ENCODER_POLARITY 0x15
+#define REG_OPEN_LOOP_PWM    0x1F    /* 4 bytes (M1, M2, M3, M4) -100 to 100 */
+#define REG_CLOSED_LOOP_SPD  0x33    /* 4 bytes (M1, M2, M3, M4) speed cmd */
+#define REG_ENCODER_READ     0x3C    /* 16 bytes (4x 32-bit little-endian) */
 
 /* I2C timeout */
 #define I2C_TIMEOUT_US       10000
@@ -78,28 +73,6 @@ static bool i2c_read_reg(uint8_t reg, uint8_t *data, uint8_t len)
     return (ret == (int)len);
 }
 
-static uint8_t channel_to_speed_reg(uint8_t channel)
-{
-    switch (channel) {
-        case 1: return REG_MOTOR1_SPEED;
-        case 2: return REG_MOTOR2_SPEED;
-        case 3: return REG_MOTOR3_SPEED;
-        case 4: return REG_MOTOR4_SPEED;
-        default: return REG_MOTOR1_SPEED;
-    }
-}
-
-static uint8_t channel_to_encoder_reg(uint8_t channel)
-{
-    switch (channel) {
-        case 1: return REG_ENCODER1_COUNT;
-        case 2: return REG_ENCODER2_COUNT;
-        case 3: return REG_ENCODER3_COUNT;
-        case 4: return REG_ENCODER4_COUNT;
-        default: return REG_ENCODER1_COUNT;
-    }
-}
-
 /* ── Public API ──────────────────────────────────────────────── */
 
 bool hiwonder_driver_init(void)
@@ -132,52 +105,60 @@ bool hiwonder_driver_init(void)
 
 bool hiwonder_set_speed(uint8_t channel, int8_t speed)
 {
-    /* Clamp */
-    if (speed > MOTOR_SPEED_MAX)  speed = MOTOR_SPEED_MAX;
-    if (speed < MOTOR_SPEED_MIN)  speed = MOTOR_SPEED_MIN;
-
-    uint8_t reg = channel_to_speed_reg(channel);
-    uint8_t data = (uint8_t)speed; /* signed → unsigned byte for I2C */
-    return i2c_write_reg(reg, &data, 1);
+    /* Not used directly anymore, use set_speeds for bulk transfer */
+    return false;
 }
 
 bool hiwonder_set_speeds(int8_t speed_left, int8_t speed_right)
 {
-    bool ok1 = hiwonder_set_speed(MOTOR_CHANNEL_LEFT,  speed_left);
-    bool ok2 = hiwonder_set_speed(MOTOR_CHANNEL_RIGHT, speed_right);
-    return ok1 && ok2;
+    /* Clamp speeds */
+    if (speed_left > MOTOR_SPEED_MAX)  speed_left = MOTOR_SPEED_MAX;
+    if (speed_left < MOTOR_SPEED_MIN)  speed_left = MOTOR_SPEED_MIN;
+    if (speed_right > MOTOR_SPEED_MAX) speed_right = MOTOR_SPEED_MAX;
+    if (speed_right < MOTOR_SPEED_MIN) speed_right = MOTOR_SPEED_MIN;
+
+    /* The payload expects 4 bytes for M1, M2, M3, M4 */
+    /* Hardware wiring: M2 = Left, M4 = Right */
+    uint8_t p[4] = {0, 0, 0, 0};
+    p[MOTOR_CHANNEL_LEFT - 1]  = (uint8_t)speed_left;
+    p[MOTOR_CHANNEL_RIGHT - 1] = (uint8_t)speed_right;
+
+    return i2c_write_reg(REG_OPEN_LOOP_PWM, p, 4);
 }
 
 bool hiwonder_read_encoder(uint8_t channel, int32_t *count)
 {
-    uint8_t reg = channel_to_encoder_reg(channel);
-    uint8_t buf[4] = {0};
-
-    if (!i2c_read_reg(reg, buf, 4)) {
-        return false;
-    }
-
-    /* Little-endian int32 */
-    *count = (int32_t)(buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24));
-    return true;
+    /* Not used directly anymore, use read_encoders for bulk transfer */
+    return false;
 }
 
 bool hiwonder_read_encoders(int32_t *left_count, int32_t *right_count)
 {
-    bool ok1 = hiwonder_read_encoder(MOTOR_CHANNEL_LEFT,  left_count);
-    bool ok2 = hiwonder_read_encoder(MOTOR_CHANNEL_RIGHT, right_count);
-    return ok1 && ok2;
+    uint8_t buf[16] = {0};
+    if (!i2c_read_reg(REG_ENCODER_READ, buf, 16)) {
+        return false;
+    }
+
+    /* 16 bytes = 4x 32-bit little-endian sequences */
+    /* Index for M2: (2-1)*4 = 4 */
+    /* Index for M4: (4-1)*4 = 12 */
+    
+    int l_idx = (MOTOR_CHANNEL_LEFT - 1) * 4;
+    int r_idx = (MOTOR_CHANNEL_RIGHT - 1) * 4;
+
+    *left_count = (int32_t)(buf[l_idx] | (buf[l_idx+1] << 8) | 
+                            (buf[l_idx+2] << 16) | (buf[l_idx+3] << 24));
+                            
+    *right_count = (int32_t)(buf[r_idx] | (buf[r_idx+1] << 8) | 
+                             (buf[r_idx+2] << 16) | (buf[r_idx+3] << 24));
+                             
+    return true;
 }
 
 bool hiwonder_stop_all(void)
 {
-    bool ok = true;
-    for (uint8_t ch = 1; ch <= 4; ch++) {
-        if (!hiwonder_set_speed(ch, 0)) {
-            ok = false;
-        }
-    }
-    return ok;
+    uint8_t p[4] = {0, 0, 0, 0};
+    return i2c_write_reg(REG_OPEN_LOOP_PWM, p, 4);
 }
 
 bool hiwonder_is_connected(void)

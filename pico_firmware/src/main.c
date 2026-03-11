@@ -139,6 +139,32 @@ static void process_serial_command(const char *cmd)
         hiwonder_read_encoders(&l, &r);
         printf("ENC L=%ld R=%ld\n", (long)l, (long)r);
     }
+    
+    /* === RAW PWM INJECTION (M1, M2, M3, M4) === */
+    else if (strncmp(cmd, "RAW_PWM ", 8) == 0) {
+        int m1, m2, m3, m4;
+        if (sscanf(cmd + 8, "%d %d %d %d", &m1, &m2, &m3, &m4) == 4) {
+            uint8_t buf[5] = {0x1F, (uint8_t)m1, (uint8_t)m2, (uint8_t)m3, (uint8_t)m4};
+            int ret = i2c_write_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, 
+                                           buf, 5, false, 5000);
+            printf("OK RAW_PWM %d %d %d %d (ret=%d)\n", m1, m2, m3, m4, ret);
+        } else {
+            printf("ERR RAW_PWM usage: RAW_PWM <m1> <m2> <m3> <m4>\n");
+        }
+    }
+
+    /* === RAW PID INJECTION (M1, M2, M3, M4) === */
+    else if (strncmp(cmd, "RAW_PID ", 8) == 0) {
+        int m1, m2, m3, m4;
+        if (sscanf(cmd + 8, "%d %d %d %d", &m1, &m2, &m3, &m4) == 4) {
+            uint8_t buf[5] = {0x33, (uint8_t)m1, (uint8_t)m2, (uint8_t)m3, (uint8_t)m4};
+            int ret = i2c_write_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, 
+                                           buf, 5, false, 5000);
+            printf("OK RAW_PID %d %d %d %d (ret=%d)\n", m1, m2, m3, m4, ret);
+        } else {
+            printf("ERR RAW_PID usage: RAW_PID <m1> <m2> <m3> <m4>\n");
+        }
+    }
 
     /* === I2C SCAN === */
     else if (strcmp(cmd, "I2C_SCAN") == 0) {
@@ -152,6 +178,28 @@ static void process_serial_command(const char *cmd)
             }
         }
         printf("Scan complete.\n");
+    }
+    /* === I2C RAW DEBUG === */
+    else if (strncmp(cmd, "I2C_WRITE ", 10) == 0) {
+        int reg, val;
+        if (sscanf(cmd + 10, "%d %d", &reg, &val) == 2) {
+            uint8_t buf[2] = {(uint8_t)reg, (uint8_t)val};
+            int ret = i2c_write_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, buf, 2, false, 5000);
+            printf("I2C_WRITE reg=%d val=%d ret=%d\n", reg, val, ret);
+        }
+    }
+    else if (strncmp(cmd, "I2C_READ ", 9) == 0) {
+        int reg, len;
+        if (sscanf(cmd + 9, "%d %d", &reg, &len) == 2) {
+            uint8_t reg_u8 = (uint8_t)reg;
+            i2c_write_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, &reg_u8, 1, true, 5000);
+            uint8_t buf[16] = {0};
+            if (len > 16) len = 16;
+            int ret = i2c_read_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, buf, len, false, 5000);
+            printf("I2C_READ reg=%d len=%d ret=%d data=", reg, len, ret);
+            for(int i=0; i<len; i++) printf("%02X ", buf[i]);
+            printf("\n");
+        }
     }
 
     /* === SAFETY === */
@@ -274,6 +322,17 @@ int main(void)
 {
     /* ── Init Pico stdlib (USB serial) ───────────────────────── */
     stdio_init_all();
+    
+    /* Pre-init Heartbeat LED to verify power and boot */
+    gpio_init(HEARTBEAT_LED_PIN);
+    gpio_set_dir(HEARTBEAT_LED_PIN, GPIO_OUT);
+    for(int i=0; i<4; i++) {
+        gpio_put(HEARTBEAT_LED_PIN, 1);
+        sleep_ms(100);
+        gpio_put(HEARTBEAT_LED_PIN, 0);
+        sleep_ms(100);
+    }
+    
     sleep_ms(2000);  /* wait for USB serial */
 
     printf("\n");

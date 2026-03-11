@@ -26,7 +26,6 @@ def generate_launch_description():
 
     nav2_params_file = PathJoinSubstitution([pkg_dir, 'config', 'nav2_navigation_params.yaml'])
     slam_params_file = PathJoinSubstitution([pkg_dir, 'config', 'slam_toolbox_mapping.yaml'])
-    ekf_params_file = PathJoinSubstitution([pkg_dir, 'config', 'ekf.yaml'])
     rviz_config = PathJoinSubstitution([pkg_dir, 'rviz', 'navigation.rviz'])
 
     serial_port_arg = DeclareLaunchArgument('serial_port', default_value='/dev/ttyUSB0')
@@ -72,19 +71,11 @@ def generate_launch_description():
             'base_frame': 'base_link',
             'odom_frame': 'odom',
             'laser_frame': 'laser_link',
-            'publish_tf': False,  # EKF will publish the odom -> base_link TF now
-            'publish_odom': '/laser_odom',
+            'publish_tf': True,
+            'publish_odom': '/odom',
             'use_sim_time': False,
         }],
         remappings=[('scan', '/scan')]
-    )
-
-    ekf_filter_node = Node(
-        package='robot_localization',
-        executable='ekf_node',
-        name='ekf_filter_node',
-        output='screen',
-        parameters=[ekf_params_file]
     )
 
     slam_toolbox = Node(
@@ -209,7 +200,6 @@ def generate_launch_description():
         static_tf_base_to_laser,
         lidar,
         laser_scan_matcher,
-        ekf_filter_node,
         slam_toolbox,
         lifecycle_manager_slam,
         planner_server,

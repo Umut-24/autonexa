@@ -23,14 +23,14 @@
 
 /* ---------- Hiwonder Motor Driver Board (I2C) ---------- */
 #define I2C_PORT             i2c0
-#define I2C_SDA_PIN          4
-#define I2C_SCL_PIN          5
+#define I2C_SDA_PIN          0
+#define I2C_SCL_PIN          1
 #define I2C_FREQ_HZ          100000  /* 100 kHz standard mode              */
 #define MOTOR_DRIVER_ADDR    0x34    /* Hiwonder 4-ch driver I2C address   */
 
 /* Motor channel mapping on driver board */
-#define MOTOR_CHANNEL_LEFT   1       /* M1 = left rear                     */
-#define MOTOR_CHANNEL_RIGHT  3       /* M3 = right rear                    */
+#define MOTOR_CHANNEL_LEFT   2       /* M2 = left rear                     */
+#define MOTOR_CHANNEL_RIGHT  4       /* M4 = right rear                    */
 
 /* Speed range for driver board commands */
 #define MOTOR_SPEED_MAX      100     /* max forward speed value            */

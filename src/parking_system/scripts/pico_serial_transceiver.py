@@ -52,11 +52,8 @@ class PicoSerialTransceiver(Node):
 
         self.get_logger().info(f"Connecting to Pico on {self.port} at {self.baud} baud...")
 
-        try:
-            self.ser = serial.Serial(self.port, self.baud, timeout=self.read_timeout)
-        except serial.SerialException as e:
-            self.get_logger().error(f"Failed to open serial port {self.port}: {e}")
-            self.ser = None
+        self.ser = None
+        self.connect_serial()
 
         # State tracking
         self.was_enabled = False
@@ -71,13 +68,24 @@ class PicoSerialTransceiver(Node):
         # Poll serial at ~50Hz (Pico sends TEL at 10Hz, but we want to flush buffers fast)
         self.timer = self.create_timer(0.02, self.poll_serial)
 
+    def connect_serial(self) -> None:
+        if self.ser is not None and self.ser.is_open:
+            self.ser.close()
+        try:
+            self.ser = serial.Serial(self.port, self.baud, timeout=self.read_timeout)
+            self.get_logger().info(f"Successfully connected to Pico on {self.port}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to open serial port {self.port}: {e}")
+            self.ser = None
+
     def send_cmd(self, cmd_str: str) -> None:
         if self.ser is None or not self.ser.is_open:
             return
         try:
             self.ser.write((cmd_str + '\n').encode('utf-8'))
-        except serial.SerialException as e:
-            self.get_logger().error(f"Serial write error: {e}")
+        except (serial.SerialException, OSError) as e:
+            self.get_logger().error(f"Serial write error: {e}. Reconnecting...")
+            self.connect_serial()
 
     def on_cmd_json(self, msg: String) -> None:
         """Parses the bridge JSON output and sends ASCII CLI commands to the Pico."""
@@ -113,15 +121,22 @@ class PicoSerialTransceiver(Node):
     def poll_serial(self) -> None:
         """Reads lines from the Pico and publishes telemetry back to ROS2."""
         if self.ser is None or not self.ser.is_open:
+            # Try to reconnect occasionally if disconnected
+            if self.get_clock().now().nanoseconds % 2000000000 < 20000000:
+                self.connect_serial()
             return
 
         try:
             while self.ser.in_waiting > 0:
-                line = self.ser.readline().decode('utf-8').strip()
-                if line.startswith("TEL "):
-                    self.parse_telemetry(line[4:])
-        except serial.SerialException as e:
-            self.get_logger().error(f"Serial read error: {e}")
+                try:
+                    line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                    if line.startswith("TEL "):
+                        self.parse_telemetry(line[4:])
+                except Exception as e:
+                    self.get_logger().error(f"Error parsing line: {e}")
+        except (serial.SerialException, OSError) as e:
+            self.get_logger().error(f"Serial read error: {e}. Reconnecting...")
+            self.connect_serial()
 
     def parse_telemetry(self, data_str: str) -> None:
         """
