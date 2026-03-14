@@ -19,7 +19,20 @@
       "Bash(ls:*)",
       "Bash(source:*)",
       "Bash(python3:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Read(//dev/**)",
+      "Bash(ros2 pkg:*)",
+      "Bash(for d:*)",
+      "Bash(do echo:*)",
+      "Read(//home/autonexa/intelligent_parking_ws/aruco_project/mobile_app/$d/**)",
+      "Bash(done)",
+      "Bash(find:*)",
+      "Bash(sleep:*)",
+      "Bash(chmod:*)",
+      "Bash(echo:*)",
+      "Bash(arm-none-eabi-gcc:*)",
+      "Bash(cmake:*)",
+      "Bash(pkill:*)"
     ]
   }
 }
