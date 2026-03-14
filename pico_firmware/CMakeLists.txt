@@ -49,7 +49,15 @@ pico_add_extra_outputs(autonexa_pico)
 
 # ── micro-ROS target (optional) ─────────────────────────────
 if(USE_MICRO_ROS)
-    include(micro_ros_sdk/micro_ros_raspberrypi_pico_sdk.cmake)
+    # Prefer bundled static lib setup from micro_ros_sdk to avoid relying on
+    # an external helper cmake file that may not exist in this repo snapshot.
+    set(MICROROS_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/micro_ros_sdk/libmicroros)
+    set(MICROROS_LIB ${MICROROS_LIB_DIR}/libmicroros.a)
+    set(MICROROS_INCLUDE_DIR ${MICROROS_LIB_DIR}/include)
+
+    if(NOT EXISTS ${MICROROS_LIB})
+        message(FATAL_ERROR "micro-ROS static library not found: ${MICROROS_LIB}")
+    endif()
 
     add_executable(autonexa_pico_uros
         ${COMMON_SOURCES}
@@ -60,6 +68,11 @@ if(USE_MICRO_ROS)
 
     target_include_directories(autonexa_pico_uros PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${MICROROS_INCLUDE_DIR}
+    )
+
+    target_link_directories(autonexa_pico_uros PRIVATE
+        ${MICROROS_LIB_DIR}
     )
 
     target_link_libraries(autonexa_pico_uros

@@ -1,61 +1,66 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'package:http/http.dart' as http;
 
-/// Telemetry data received from the Pico W.
+/// Telemetry data received from the RPi5 bridge (Pico via ROS2).
 class PicoTelemetry {
-  final double leftRPM;
-  final double rightRPM;
-  final double battery;
-  final double pidErrorL;
-  final double pidErrorR;
-  final double servoAngle;
+  final double leftVel;
+  final double rightVel;
+  final double steerPos;
+  final double odomVx;
+  final double odomWz;
+  final double odomX;
+  final double odomY;
+  final double odomYaw;
   final bool connected;
 
   const PicoTelemetry({
-    this.leftRPM = 0,
-    this.rightRPM = 0,
-    this.battery = 0,
-    this.pidErrorL = 0,
-    this.pidErrorR = 0,
-    this.servoAngle = 90,
+    this.leftVel = 0,
+    this.rightVel = 0,
+    this.steerPos = 0,
+    this.odomVx = 0,
+    this.odomWz = 0,
+    this.odomX = 0,
+    this.odomY = 0,
+    this.odomYaw = 0,
     this.connected = false,
   });
 
   factory PicoTelemetry.fromJson(Map<String, dynamic> json) {
     return PicoTelemetry(
-      leftRPM: (json['lr'] ?? 0).toDouble(),
-      rightRPM: (json['rr'] ?? 0).toDouble(),
-      battery: (json['bat'] ?? 0).toDouble(),
-      pidErrorL: (json['el'] ?? 0).toDouble(),
-      pidErrorR: (json['er'] ?? 0).toDouble(),
-      servoAngle: (json['sa'] ?? 90).toDouble(),
+      leftVel: (json['left_wheel_vel'] ?? 0).toDouble(),
+      rightVel: (json['right_wheel_vel'] ?? 0).toDouble(),
+      steerPos: (json['steering_pos'] ?? 0).toDouble(),
+      odomVx: (json['odom_vx'] ?? 0).toDouble(),
+      odomWz: (json['odom_wz'] ?? 0).toDouble(),
+      odomX: (json['odom_x'] ?? 0).toDouble(),
+      odomY: (json['odom_y'] ?? 0).toDouble(),
+      odomYaw: (json['odom_yaw'] ?? 0).toDouble(),
       connected: true,
     );
   }
 }
 
-/// UDP service for communicating with the Raspberry Pi Pico WH.
+/// HTTP service for communicating with the RPi5 ROS2 bridge.
 ///
-/// Sends joystick commands as JSON and receives telemetry responses.
-/// Includes a safety heartbeat: sends zero command if idle, and a
-/// watchdog concept where the Pico stops motors if no packet arrives.
+/// Sends joystick commands as HTTP POST to /api/control and polls
+/// /api/telemetry for Pico motor/encoder data routed through the RPi5.
+/// Includes a safety watchdog: the RPi5 bridge auto-zeros cmd_vel
+/// if no command arrives within 500ms.
 class PicoUdpService {
-  RawDatagramSocket? _socket;
-  InternetAddress? _picoAddress;
-  int _picoPort = 4210;
+  String? _baseUrl;
   Timer? _sendTimer;
-  Timer? _heartbeatTimer;
-  Timer? _timeoutTimer;
+  Timer? _telemetryTimer;
+  Timer? _healthTimer;
 
   double _lastX = 0;
   double _lastY = 0;
-  double _speedLimit = 1.0; // 0.0 to 1.0
+  double _speedLimit = 1.0;
   bool _emergencyStop = false;
   bool _isConnected = false;
-  DateTime? _lastReceived;
+  int _consecutiveFailures = 0;
 
-  /// Current telemetry from Pico.
+  /// Current telemetry from Pico (via RPi5).
   PicoTelemetry telemetry = const PicoTelemetry();
 
   /// Callback when telemetry is updated.
@@ -67,58 +72,51 @@ class PicoUdpService {
   bool get isConnected => _isConnected;
   double get speedLimit => _speedLimit;
 
-  /// Connect to the Pico W at the given IP and port.
-  Future<bool> connect(String ip, {int port = 4210}) async {
+  /// Connect to the RPi5 bridge at the given URL.
+  /// [url] should be like "http://192.168.1.5:5000"
+  Future<bool> connect(String url) async {
     try {
       await disconnect();
 
-      _picoAddress = InternetAddress(ip);
-      _picoPort = port;
+      // Normalize URL
+      var normalized = url.trim();
+      if (!normalized.startsWith('http')) {
+        normalized = 'http://$normalized';
+      }
+      normalized = normalized.replaceAll(RegExp(r'/*$'), '');
+      _baseUrl = normalized;
 
-      // Bind to any available port for receiving
-      _socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      _socket!.broadcastEnabled = true;
+      // Health check
+      final resp = await http.get(
+        Uri.parse('$_baseUrl/api/status'),
+      ).timeout(const Duration(seconds: 3));
 
-      // Listen for incoming telemetry
-      _socket!.listen((event) {
-        if (event == RawSocketEvent.read) {
-          final datagram = _socket!.receive();
-          if (datagram != null) {
-            _handleIncoming(datagram);
-          }
-        }
-      });
+      if (resp.statusCode != 200) {
+        _baseUrl = null;
+        return false;
+      }
 
-      // Start periodic command sending at 20Hz (every 50ms)
+      // Start periodic command sending at 20Hz (50ms)
       _sendTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
         _sendCommand();
       });
 
-      // Heartbeat: send zero command every 200ms even if idle
-      _heartbeatTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
-        // The regular send timer handles this, but heartbeat ensures
-        // the Pico knows we're still alive
+      // Poll telemetry at 5Hz (200ms)
+      _telemetryTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+        _fetchTelemetry();
       });
 
-      // Connection timeout checker
-      _timeoutTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (_lastReceived != null) {
-          final elapsed = DateTime.now().difference(_lastReceived!);
-          if (elapsed.inSeconds > 2 && _isConnected) {
-            _isConnected = false;
-            telemetry = const PicoTelemetry(connected: false);
-            onConnectionChanged?.call(false);
-            onTelemetryUpdate?.call(telemetry);
-          }
-        }
+      // Health check every 2s
+      _healthTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+        _checkHealth();
       });
 
-      // Send an initial ping
-      _sendCommand();
       _isConnected = true;
+      _consecutiveFailures = 0;
       onConnectionChanged?.call(true);
       return true;
     } catch (e) {
+      _baseUrl = null;
       _isConnected = false;
       onConnectionChanged?.call(false);
       return false;
@@ -128,25 +126,25 @@ class PicoUdpService {
   /// Disconnect and clean up resources.
   Future<void> disconnect() async {
     _sendTimer?.cancel();
-    _heartbeatTimer?.cancel();
-    _timeoutTimer?.cancel();
+    _telemetryTimer?.cancel();
+    _healthTimer?.cancel();
     _sendTimer = null;
-    _heartbeatTimer = null;
-    _timeoutTimer = null;
+    _telemetryTimer = null;
+    _healthTimer = null;
 
     // Send stop command before disconnecting
-    if (_socket != null && _picoAddress != null) {
+    if (_baseUrl != null) {
       _emergencyStop = true;
       _sendCommand();
       await Future.delayed(const Duration(milliseconds: 100));
     }
 
-    _socket?.close();
-    _socket = null;
+    _baseUrl = null;
     _isConnected = false;
     _emergencyStop = false;
     _lastX = 0;
     _lastY = 0;
+    _consecutiveFailures = 0;
     telemetry = const PicoTelemetry();
     onConnectionChanged?.call(false);
   }
@@ -162,12 +160,18 @@ class PicoUdpService {
     _speedLimit = limit.clamp(0.0, 1.0);
   }
 
-  /// Trigger emergency stop — sends zero and locks controls.
+  /// Trigger emergency stop.
   void emergencyStop() {
     _emergencyStop = true;
     _lastX = 0;
     _lastY = 0;
     _sendCommand();
+    // Also hit the dedicated estop endpoint
+    if (_baseUrl != null) {
+      http.post(Uri.parse('$_baseUrl/api/estop'))
+          .timeout(const Duration(seconds: 1))
+          .catchError((_) => http.Response('', 500));
+    }
   }
 
   /// Release emergency stop.
@@ -176,39 +180,67 @@ class PicoUdpService {
   }
 
   void _sendCommand() {
-    if (_socket == null || _picoAddress == null) return;
-
-    double x = _emergencyStop ? 0 : _lastX;
-    double y = _emergencyStop ? 0 : (_lastY * _speedLimit);
+    if (_baseUrl == null) return;
 
     final data = jsonEncode({
-      'x': double.parse(x.toStringAsFixed(3)),
-      'y': double.parse(y.toStringAsFixed(3)),
+      'x': double.parse((_emergencyStop ? 0.0 : _lastX).toStringAsFixed(3)),
+      'y': double.parse((_emergencyStop ? 0.0 : _lastY).toStringAsFixed(3)),
       'e': _emergencyStop ? 1 : 0,
+      'speed_limit': double.parse(_speedLimit.toStringAsFixed(2)),
     });
 
+    http.post(
+      Uri.parse('$_baseUrl/api/control'),
+      headers: {'Content-Type': 'application/json'},
+      body: data,
+    ).timeout(const Duration(milliseconds: 200)).catchError((_) {
+      return http.Response('', 500);
+    });
+  }
+
+  void _fetchTelemetry() async {
+    if (_baseUrl == null) return;
     try {
-      _socket!.send(
-        utf8.encode(data),
-        _picoAddress!,
-        _picoPort,
-      );
+      final resp = await http.get(
+        Uri.parse('$_baseUrl/api/telemetry'),
+      ).timeout(const Duration(milliseconds: 500));
+
+      if (resp.statusCode == 200) {
+        final json = jsonDecode(resp.body) as Map<String, dynamic>;
+        telemetry = PicoTelemetry.fromJson(json);
+        onTelemetryUpdate?.call(telemetry);
+      }
     } catch (_) {}
   }
 
-  void _handleIncoming(Datagram datagram) {
+  void _checkHealth() async {
+    if (_baseUrl == null) return;
     try {
-      final raw = utf8.decode(datagram.data);
-      final json = jsonDecode(raw) as Map<String, dynamic>;
-      telemetry = PicoTelemetry.fromJson(json);
-      _lastReceived = DateTime.now();
+      final resp = await http.get(
+        Uri.parse('$_baseUrl/api/status'),
+      ).timeout(const Duration(seconds: 2));
 
-      if (!_isConnected) {
-        _isConnected = true;
-        onConnectionChanged?.call(true);
+      if (resp.statusCode == 200) {
+        _consecutiveFailures = 0;
+        if (!_isConnected) {
+          _isConnected = true;
+          onConnectionChanged?.call(true);
+        }
+      } else {
+        _onHealthFailure();
       }
+    } catch (_) {
+      _onHealthFailure();
+    }
+  }
 
+  void _onHealthFailure() {
+    _consecutiveFailures++;
+    if (_consecutiveFailures >= 3 && _isConnected) {
+      _isConnected = false;
+      telemetry = const PicoTelemetry(connected: false);
+      onConnectionChanged?.call(false);
       onTelemetryUpdate?.call(telemetry);
-    } catch (_) {}
+    }
   }
 }

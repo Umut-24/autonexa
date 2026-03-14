@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
+from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Twist, TwistStamped
 from std_msgs.msg import Bool
 
@@ -126,11 +127,17 @@ def main(args=None) -> None:
     node = CmdVelToPicoBridge()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        # Tests often stop this node using timeout/signals; guard shutdown to avoid
+        # "rcl_shutdown already called" exceptions on repeated runs.
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

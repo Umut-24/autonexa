@@ -6,8 +6,10 @@ import 'joystick_widget.dart';
 import 'pico_udp_service.dart';
 
 /// The Control Tab for driving the Ackermann chassis via a virtual joystick.
+/// Sends joystick commands to the RPi5 bridge via HTTP, which forwards them
+/// through ROS2 /cmd_vel to the Pico.
 /// Has two modes:
-///   - Normal mode: fixed layout (NO scrolling), connection bar, joystick, telemetry, e-stop
+///   - Normal mode: fixed layout (NO scrolling), connection status, joystick, telemetry, e-stop
 ///   - Fullscreen mode: landscape, fullscreen, joystick + minimal HUD only
 class ControlTab extends StatefulWidget {
   final String? bridgeUrl;
@@ -19,9 +21,7 @@ class ControlTab extends StatefulWidget {
 }
 
 class _ControlTabState extends State<ControlTab> {
-  final PicoUdpService _udpService = PicoUdpService();
-  final TextEditingController _ipController = TextEditingController(text: '192.168.1.100');
-  final TextEditingController _portController = TextEditingController(text: '4210');
+  final PicoUdpService _controlService = PicoUdpService();
 
   bool _isConnected = false;
   bool _emergencyStopped = false;
@@ -34,33 +34,44 @@ class _ControlTabState extends State<ControlTab> {
   @override
   void initState() {
     super.initState();
-    _udpService.onTelemetryUpdate = (t) {
+    _controlService.onTelemetryUpdate = (t) {
       if (mounted) setState(() => _telemetry = t);
     };
-    _udpService.onConnectionChanged = (c) {
+    _controlService.onConnectionChanged = (c) {
       if (mounted) setState(() => _isConnected = c);
     };
-    _udpService.setSpeedLimit(_speedLimit);
+    _controlService.setSpeedLimit(_speedLimit);
+    // Auto-connect if bridge URL is available
+    _autoConnect();
+  }
+
+  void _autoConnect() async {
+    if (widget.bridgeUrl != null && widget.bridgeUrl!.isNotEmpty) {
+      await _controlService.connect(widget.bridgeUrl!);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant ControlTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Reconnect if bridge URL changed
+    if (widget.bridgeUrl != oldWidget.bridgeUrl) {
+      _controlService.disconnect().then((_) => _autoConnect());
+    }
   }
 
   @override
   void dispose() {
     _exitFullscreen();
-    _udpService.disconnect();
-    _ipController.dispose();
-    _portController.dispose();
+    _controlService.disconnect();
     super.dispose();
   }
 
   void _toggleConnection() async {
     if (_isConnected) {
-      await _udpService.disconnect();
-    } else {
-      final ip = _ipController.text.trim();
-      final port = int.tryParse(_portController.text.trim()) ?? 4210;
-      if (ip.isNotEmpty) {
-        await _udpService.connect(ip, port: port);
-      }
+      await _controlService.disconnect();
+    } else if (widget.bridgeUrl != null && widget.bridgeUrl!.isNotEmpty) {
+      await _controlService.connect(widget.bridgeUrl!);
     }
   }
 
@@ -68,9 +79,9 @@ class _ControlTabState extends State<ControlTab> {
     setState(() {
       _emergencyStopped = !_emergencyStopped;
       if (_emergencyStopped) {
-        _udpService.emergencyStop();
+        _controlService.emergencyStop();
       } else {
-        _udpService.releaseEmergencyStop();
+        _controlService.releaseEmergencyStop();
       }
     });
   }
@@ -100,7 +111,7 @@ class _ControlTabState extends State<ControlTab> {
       _currentX = x;
       _currentY = y;
     });
-    _udpService.updateJoystick(x, y);
+    _controlService.updateJoystick(x, y);
   }
 
   void _onJoystickRelease(double x, double y) {
@@ -143,11 +154,11 @@ class _ControlTabState extends State<ControlTab> {
                         const SizedBox(height: 12),
                         _hudItem('THROTTLE', _currentY.toStringAsFixed(2)),
                         const SizedBox(height: 12),
-                        _hudItem('L SPD', _telemetry.leftRPM.toStringAsFixed(0)),
+                        _hudItem('L VEL', _telemetry.leftVel.toStringAsFixed(2)),
                         const SizedBox(height: 12),
-                        _hudItem('R SPD', _telemetry.rightRPM.toStringAsFixed(0)),
+                        _hudItem('R VEL', _telemetry.rightVel.toStringAsFixed(2)),
                         const SizedBox(height: 12),
-                        _hudItem('SERVO', '${_telemetry.servoAngle.toStringAsFixed(0)}°'),
+                        _hudItem('Vx', _telemetry.odomVx.toStringAsFixed(2)),
                       ],
                     ),
                   ),
@@ -172,12 +183,12 @@ class _ControlTabState extends State<ControlTab> {
                           children: [
                             _speedButton(Icons.remove, () {
                               setState(() => _speedLimit = (_speedLimit - 0.1).clamp(0.1, 1.0));
-                              _udpService.setSpeedLimit(_speedLimit);
+                              _controlService.setSpeedLimit(_speedLimit);
                             }),
                             const SizedBox(width: 8),
                             _speedButton(Icons.add, () {
                               setState(() => _speedLimit = (_speedLimit + 0.1).clamp(0.1, 1.0));
-                              _udpService.setSpeedLimit(_speedLimit);
+                              _controlService.setSpeedLimit(_speedLimit);
                             }),
                           ],
                         ),
@@ -382,6 +393,7 @@ class _ControlTabState extends State<ControlTab> {
   }
 
   Widget _buildConnectionBar() {
+    final hasUrl = widget.bridgeUrl != null && widget.bridgeUrl!.isNotEmpty;
     return Container(
       margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -407,69 +419,38 @@ class _ControlTabState extends State<ControlTab> {
                   : null,
             ),
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 8),
           Expanded(
-            flex: 3,
-            child: SizedBox(
+            child: Text(
+              _isConnected
+                  ? 'Connected to RPi5'
+                  : (hasUrl ? 'Disconnected' : 'Set server in Settings'),
+              style: TextStyle(
+                fontSize: 12,
+                color: _isConnected ? Colors.green : Colors.grey[500],
+              ),
+            ),
+          ),
+          if (hasUrl)
+            SizedBox(
               height: 32,
-              child: TextField(
-                controller: _ipController,
-                style: const TextStyle(fontSize: 12),
-                decoration: InputDecoration(
-                  hintText: 'Pico IP',
-                  hintStyle: TextStyle(fontSize: 11, color: Colors.grey[600]),
-                  filled: true,
-                  fillColor: Colors.white.withValues(alpha: 0.05),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                  border: OutlineInputBorder(
+              child: ElevatedButton(
+                onPressed: _toggleConnection,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _isConnected
+                      ? Colors.red.withValues(alpha: 0.8)
+                      : const Color(0xFF0F3460),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(6),
-                    borderSide: BorderSide.none,
                   ),
                 ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 4),
-          SizedBox(
-            width: 52,
-            height: 32,
-            child: TextField(
-              controller: _portController,
-              style: const TextStyle(fontSize: 12),
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                hintText: 'Port',
-                hintStyle: TextStyle(fontSize: 11, color: Colors.grey[600]),
-                filled: true,
-                fillColor: Colors.white.withValues(alpha: 0.05),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(6),
-                  borderSide: BorderSide.none,
+                child: Text(
+                  _isConnected ? 'Stop' : 'Link',
+                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
                 ),
               ),
             ),
-          ),
-          const SizedBox(width: 4),
-          SizedBox(
-            height: 32,
-            child: ElevatedButton(
-              onPressed: _toggleConnection,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _isConnected
-                    ? Colors.red.withValues(alpha: 0.8)
-                    : const Color(0xFF0F3460),
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(6),
-                ),
-              ),
-              child: Text(
-                _isConnected ? 'Stop' : 'Link',
-                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ),
         ],
       ),
     );
@@ -593,7 +574,7 @@ class _ControlTabState extends State<ControlTab> {
                 divisions: 9,
                 onChanged: (v) {
                   setState(() => _speedLimit = v);
-                  _udpService.setSpeedLimit(v);
+                  _controlService.setSpeedLimit(v);
                 },
               ),
             ),
@@ -618,13 +599,13 @@ class _ControlTabState extends State<ControlTab> {
   Widget _buildTelemetryRow() {
     return Row(
       children: [
-        _telemetryChip('L', _telemetry.leftRPM.toStringAsFixed(0), Icons.rotate_left),
+        _telemetryChip('L', _telemetry.leftVel.toStringAsFixed(2), Icons.rotate_left),
         const SizedBox(width: 6),
-        _telemetryChip('R', _telemetry.rightRPM.toStringAsFixed(0), Icons.rotate_right),
+        _telemetryChip('R', _telemetry.rightVel.toStringAsFixed(2), Icons.rotate_right),
         const SizedBox(width: 6),
-        _telemetryChip('°', _telemetry.servoAngle.toStringAsFixed(0), Icons.compass_calibration),
+        _telemetryChip('Vx', _telemetry.odomVx.toStringAsFixed(2), Icons.speed),
         const SizedBox(width: 6),
-        _telemetryChip('V', _telemetry.battery.toStringAsFixed(1), Icons.battery_charging_full),
+        _telemetryChip('Wz', _telemetry.odomWz.toStringAsFixed(2), Icons.rotate_90_degrees_ccw),
       ],
     );
   }

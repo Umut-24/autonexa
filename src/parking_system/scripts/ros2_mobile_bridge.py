@@ -6,14 +6,17 @@ Subscribes to ROS2 topics (/scan, /map, /amcl_pose, /odometry/filtered)
 and serves data via Flask HTTP endpoints for the Flutter mobile app.
 
 Endpoints:
-  /api/scan     - Latest LIDAR scan as (x,y) points in map frame (JSON)
-  /api/map      - Real SLAM occupancy grid (PNG)
-  /api/map_info - Map metadata: resolution, origin, dimensions (JSON)
-  /api/pose     - Robot pose from AMCL/EKF (JSON)
-  /api/status   - Combined status (JSON)
-  /api/markers  - Currently visible ArUco markers (JSON)
-  /api/nav_goal - POST a Nav2 goal (JSON {x, y, yaw})
-  /video_feed   - Camera MJPEG stream
+  /api/scan      - Latest LIDAR scan as (x,y) points in map frame (JSON)
+  /api/map       - Real SLAM occupancy grid (PNG)
+  /api/map_info  - Map metadata: resolution, origin, dimensions (JSON)
+  /api/pose      - Robot pose from AMCL/EKF (JSON)
+  /api/status    - Combined status (JSON)
+  /api/markers   - Currently visible ArUco markers (JSON)
+  /api/nav_goal  - POST a Nav2 goal (JSON {x, y, yaw})
+  /api/control   - POST joystick commands (JSON {x, y, e, speed_limit})
+  /api/telemetry - GET Pico telemetry (motors, encoders, odom)
+  /api/estop     - POST emergency stop
+  /video_feed    - Camera MJPEG stream
 """
 
 import threading
@@ -28,7 +31,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid, Odometry
-from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
+from sensor_msgs.msg import JointState
 from flask import Flask, Response, jsonify, request, send_file
 
 # Optional: ArUco detection
@@ -63,6 +67,15 @@ class MobileBridgeNode(Node):
         self._marker_lock = threading.Lock()
         self._markers = {}           # {id: {x_m, y_m, bearing_deg, distance_m}}
 
+        # --- Control state (joystick -> /cmd_vel) ---
+        self._control_lock = threading.Lock()
+        self._last_control_time = 0.0
+        self._control_watchdog_s = 0.5  # zero velocity if no command in 500ms
+
+        # --- Telemetry from Pico ---
+        self._telemetry_lock = threading.Lock()
+        self._pico_telemetry = {}    # Latest telemetry dict
+
         # --- QoS for map (transient local, reliable) ---
         map_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -82,6 +95,18 @@ class MobileBridgeNode(Node):
 
         # --- Nav2 goal publisher ---
         self._goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
+
+        # --- Joystick control: publish to /cmd_vel ---
+        self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+
+        # --- Pico telemetry subscriptions ---
+        self.create_subscription(
+            JointState, '/pico/joint_feedback', self._joint_feedback_cb, 10)
+        self.create_subscription(
+            Odometry, '/pico/odom', self._pico_odom_cb, 10)
+
+        # --- Watchdog timer: zero cmd_vel if no control command recently ---
+        self._watchdog_timer = self.create_timer(0.1, self._watchdog_cb)
 
         # --- Camera (optional) ---
         self._camera_lock = threading.Lock()
@@ -138,6 +163,53 @@ class MobileBridgeNode(Node):
                 'stamp': time.time(),
             }
             self._pose_source = 'odom'
+
+    def _joint_feedback_cb(self, msg: JointState):
+        data = {}
+        for i, name in enumerate(msg.name):
+            if i < len(msg.velocity):
+                data[f'{name}_vel'] = round(msg.velocity[i], 4)
+            if i < len(msg.position):
+                data[f'{name}_pos'] = round(msg.position[i], 4)
+        with self._telemetry_lock:
+            self._pico_telemetry.update(data)
+            self._pico_telemetry['joint_stamp'] = time.time()
+
+    def _pico_odom_cb(self, msg: Odometry):
+        with self._telemetry_lock:
+            self._pico_telemetry['odom_x'] = round(msg.pose.pose.position.x, 4)
+            self._pico_telemetry['odom_y'] = round(msg.pose.pose.position.y, 4)
+            self._pico_telemetry['odom_yaw'] = round(
+                self._quat_to_yaw(msg.pose.pose.orientation), 4)
+            self._pico_telemetry['odom_vx'] = round(msg.twist.twist.linear.x, 4)
+            self._pico_telemetry['odom_wz'] = round(msg.twist.twist.angular.z, 4)
+            self._pico_telemetry['odom_stamp'] = time.time()
+
+    def _watchdog_cb(self):
+        with self._control_lock:
+            if self._last_control_time > 0 and \
+               (time.time() - self._last_control_time) > self._control_watchdog_s:
+                self._last_control_time = 0.0
+                zero = Twist()
+                self._cmd_vel_pub.publish(zero)
+
+    def publish_control(self, x: float, y: float, e: int, speed_limit: float):
+        """Convert joystick input to Twist and publish on /cmd_vel."""
+        max_vx = 0.35
+        max_wz = 0.8
+        sl = max(0.1, min(1.0, speed_limit))
+
+        twist = Twist()
+        if e:
+            # Emergency: zero velocity
+            pass
+        else:
+            twist.linear.x = y * max_vx * sl
+            twist.angular.z = -x * max_wz * sl
+
+        self._cmd_vel_pub.publish(twist)
+        with self._control_lock:
+            self._last_control_time = time.time()
 
     # ---- Helpers ----
 
@@ -281,6 +353,17 @@ class MobileBridgeNode(Node):
         with self._camera_lock:
             return self._latest_frame
 
+    def get_telemetry(self):
+        with self._telemetry_lock:
+            return dict(self._pico_telemetry)
+
+    def estop(self):
+        """Publish zero velocity immediately."""
+        zero = Twist()
+        self._cmd_vel_pub.publish(zero)
+        with self._control_lock:
+            self._last_control_time = 0.0
+
     def send_nav_goal(self, x, y, yaw):
         """Publish a Nav2 goal."""
         msg = PoseStamped()
@@ -359,6 +442,30 @@ def api_markers():
     return jsonify({str(k): v for k, v in markers.items()})
 
 
+@flask_app.route('/api/control', methods=['POST'])
+def api_control():
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'JSON body required'}), 400
+    x = float(data.get('x', 0))
+    y = float(data.get('y', 0))
+    e = int(data.get('e', 0))
+    speed_limit = float(data.get('speed_limit', 1.0))
+    bridge_node.publish_control(x, y, e, speed_limit)
+    return jsonify({'status': 'ok'})
+
+
+@flask_app.route('/api/telemetry')
+def api_telemetry():
+    return jsonify(bridge_node.get_telemetry())
+
+
+@flask_app.route('/api/estop', methods=['POST'])
+def api_estop():
+    bridge_node.estop()
+    return jsonify({'status': 'stopped'})
+
+
 @flask_app.route('/api/nav_goal', methods=['POST'])
 def api_nav_goal():
     data = request.get_json(silent=True)
@@ -395,6 +502,9 @@ def index():
 <li><a href="/api/map_info">/api/map_info</a> — map metadata</li>
 <li><a href="/api/pose">/api/pose</a> — robot pose</li>
 <li><a href="/api/markers">/api/markers</a> — ArUco markers</li>
+<li><a href="/api/telemetry">/api/telemetry</a> — Pico motor/encoder telemetry</li>
+<li>POST /api/control — joystick control (JSON: x, y, e, speed_limit)</li>
+<li>POST /api/estop — emergency stop</li>
 <li><a href="/video_feed">/video_feed</a> — camera MJPEG</li>
 </ul>
 </body></html>'''
