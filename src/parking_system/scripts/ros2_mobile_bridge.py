@@ -33,6 +33,7 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from sensor_msgs.msg import JointState
+from std_srvs.srv import SetBool
 from flask import Flask, Response, jsonify, request, send_file
 
 # Optional: ArUco detection
@@ -71,6 +72,7 @@ class MobileBridgeNode(Node):
         self._control_lock = threading.Lock()
         self._last_control_time = 0.0
         self._control_watchdog_s = 0.5  # zero velocity if no command in 500ms
+        self._estop_latched = False  # tracks whether Pico E-STOP was latched
 
         # --- Telemetry from Pico ---
         self._telemetry_lock = threading.Lock()
@@ -98,6 +100,7 @@ class MobileBridgeNode(Node):
 
         # --- Joystick control: publish to /cmd_vel ---
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self._pico_estop_client = self.create_client(SetBool, '/pico/estop')
 
         # --- Pico telemetry subscriptions ---
         self.create_subscription(
@@ -201,9 +204,12 @@ class MobileBridgeNode(Node):
 
         twist = Twist()
         if e:
-            # Emergency: zero velocity
+            # Emergency: zero velocity (twist stays at zero)
             pass
         else:
+            # If Pico E-STOP was previously latched, clear it now
+            if self._estop_latched:
+                self._clear_pico_estop()
             twist.linear.x = y * max_vx * sl
             twist.angular.z = -x * max_wz * sl
 
@@ -358,11 +364,64 @@ class MobileBridgeNode(Node):
             return dict(self._pico_telemetry)
 
     def estop(self):
-        """Publish zero velocity immediately."""
+        """Publish zero velocity and request latched Pico E-STOP."""
         zero = Twist()
         self._cmd_vel_pub.publish(zero)
         with self._control_lock:
             self._last_control_time = 0.0
+
+        self._estop_latched = True
+
+        if not self._pico_estop_client.wait_for_service(timeout_sec=0.2):
+            self.get_logger().warning('/pico/estop service not available, zero cmd_vel sent only')
+            return
+
+        req = SetBool.Request()
+        req.data = True
+        future = self._pico_estop_client.call_async(req)
+
+        def _estop_done(fut):
+            try:
+                res = fut.result()
+                if res is not None and res.success:
+                    self.get_logger().warning('Pico E-STOP latched successfully')
+                else:
+                    self.get_logger().error('Pico E-STOP request returned failure')
+            except Exception as exc:
+                self.get_logger().error(f'Pico E-STOP request failed: {exc}')
+
+        future.add_done_callback(_estop_done)
+
+    def clear_estop(self):
+        """Clear the Pico E-STOP latch so motors can run again."""
+        self._clear_pico_estop()
+
+    def _clear_pico_estop(self):
+        """Send E-STOP clear to Pico via service call."""
+        if not self._estop_latched:
+            return
+
+        self._estop_latched = False
+
+        if not self._pico_estop_client.wait_for_service(timeout_sec=0.2):
+            self.get_logger().warning('/pico/estop service not available for clear')
+            return
+
+        req = SetBool.Request()
+        req.data = False
+        future = self._pico_estop_client.call_async(req)
+
+        def _clear_done(fut):
+            try:
+                res = fut.result()
+                if res is not None and res.success:
+                    self.get_logger().info('Pico E-STOP cleared')
+                else:
+                    self.get_logger().error('Pico E-STOP clear returned failure')
+            except Exception as exc:
+                self.get_logger().error(f'Pico E-STOP clear failed: {exc}')
+
+        future.add_done_callback(_clear_done)
 
     def send_nav_goal(self, x, y, yaw):
         """Publish a Nav2 goal."""
@@ -466,6 +525,12 @@ def api_estop():
     return jsonify({'status': 'stopped'})
 
 
+@flask_app.route('/api/estop_clear', methods=['POST'])
+def api_estop_clear():
+    bridge_node.clear_estop()
+    return jsonify({'status': 'cleared'})
+
+
 @flask_app.route('/api/nav_goal', methods=['POST'])
 def api_nav_goal():
     data = request.get_json(silent=True)
@@ -504,7 +569,8 @@ def index():
 <li><a href="/api/markers">/api/markers</a> — ArUco markers</li>
 <li><a href="/api/telemetry">/api/telemetry</a> — Pico motor/encoder telemetry</li>
 <li>POST /api/control — joystick control (JSON: x, y, e, speed_limit)</li>
-<li>POST /api/estop — emergency stop</li>
+<li>POST /api/estop — emergency stop (latching)</li>
+<li>POST /api/estop_clear — clear emergency stop</li>
 <li><a href="/video_feed">/video_feed</a> — camera MJPEG</li>
 </ul>
 </body></html>'''

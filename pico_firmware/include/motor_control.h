@@ -2,6 +2,7 @@
 #define MOTOR_CONTROL_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /**
  * Motor control abstraction layer.

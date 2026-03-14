@@ -12,7 +12,7 @@ TF Tree: map -> odom -> base_link -> laser_link
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -31,6 +31,23 @@ def generate_launch_description():
     serial_port_arg = DeclareLaunchArgument('serial_port', default_value='/dev/ttyUSB0')
     serial_baudrate_arg = DeclareLaunchArgument('serial_baudrate', default_value='460800')
     use_rviz_arg = DeclareLaunchArgument('use_rviz', default_value='true')
+    # Keep LiDAR+SLAM stable by default; enable Pico path explicitly when needed.
+    use_pico_bridge_arg = DeclareLaunchArgument('use_pico_bridge', default_value='false')
+    pico_serial_port_arg = DeclareLaunchArgument('pico_serial_port', default_value='/dev/ttyACM0')
+    enforce_single_pub_arg = DeclareLaunchArgument(
+        'enforce_single_publisher',
+        default_value='true',
+        description='Stop bridge if duplicate publishers are detected on /pico command topics'
+    )
+    bridge_lock_file_arg = DeclareLaunchArgument(
+        'bridge_lock_file',
+        default_value='/tmp/cmd_vel_to_pico_bridge.lock'
+    )
+    bridge_cmd_vel_topic_arg = DeclareLaunchArgument(
+        'bridge_cmd_vel_topic',
+        default_value='/cmd_vel_safe',
+        description='Final velocity topic consumed by cmd_vel_to_pico_bridge'
+    )
 
     # In live SLAM mode there is no road-mask topic by default.
     configured_nav2_params = RewrittenYaml(
@@ -150,6 +167,14 @@ def generate_launch_description():
         parameters=[configured_nav2_params]
     )
 
+    collision_monitor = Node(
+        package='nav2_collision_monitor',
+        executable='collision_monitor',
+        name='collision_monitor',
+        output='screen',
+        parameters=[configured_nav2_params]
+    )
+
     lifecycle_manager_slam = Node(
         package='nav2_lifecycle_manager',
         executable='lifecycle_manager',
@@ -180,8 +205,43 @@ def generate_launch_description():
                 'bt_navigator',
                 'waypoint_follower',
                 'velocity_smoother',
+                'collision_monitor',
             ]
         }]
+    )
+
+    # micro-ROS agent — bridges XRCE-DDS serial to ROS 2 DDS graph
+    micro_ros_agent = ExecuteProcess(
+        cmd=[
+            'ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
+            'serial', '--dev', LaunchConfiguration('pico_serial_port'),
+            '-b', '115200',
+        ],
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_pico_bridge')),
+    )
+
+    # Command bridge: consumes safe/smoothed velocity and publishes Pico control topics
+    cmd_vel_to_pico_bridge = Node(
+        package='parking_system',
+        executable='cmd_vel_to_pico_bridge.py',
+        name='cmd_vel_to_pico_bridge',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_pico_bridge')),
+        parameters=[{
+            'cmd_vel_topic': LaunchConfiguration('bridge_cmd_vel_topic'),
+            'control_cmd_topic': '/pico/control_cmd',
+            'enable_topic': '/pico/enable',
+            'heartbeat_topic': '/pico/heartbeat',
+            'publish_rate_hz': 30.0,
+            'command_timeout_s': 0.20,
+            'max_vx_mps': 0.35,
+            'max_wz_radps': 0.8,
+            'max_ax_mps2': 0.8,
+            'max_aw_radps2': 1.2,
+            'enforce_single_publisher': LaunchConfiguration('enforce_single_publisher'),
+            'bridge_lock_file': LaunchConfiguration('bridge_lock_file'),
+        }],
     )
 
     rviz = Node(
@@ -197,6 +257,11 @@ def generate_launch_description():
         serial_port_arg,
         serial_baudrate_arg,
         use_rviz_arg,
+        use_pico_bridge_arg,
+        pico_serial_port_arg,
+        enforce_single_pub_arg,
+        bridge_lock_file_arg,
+        bridge_cmd_vel_topic_arg,
         static_tf_base_to_laser,
         lidar,
         laser_scan_matcher,
@@ -209,6 +274,9 @@ def generate_launch_description():
         bt_navigator,
         waypoint_follower,
         velocity_smoother,
+        collision_monitor,
         lifecycle_manager_navigation,
+        micro_ros_agent,
+        cmd_vel_to_pico_bridge,
         rviz,
     ])

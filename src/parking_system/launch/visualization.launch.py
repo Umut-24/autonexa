@@ -28,7 +28,7 @@ def generate_launch_description():
     rviz_config_path = PathJoinSubstitution([
         pkg_dir,
         'rviz',
-        'mapping.rviz'
+        'visualization.rviz'
     ])
     
     # Robot description via robot_state_publisher

@@ -376,20 +376,19 @@ int main(void)
         prev_enc_left  = encoder_left;
         prev_enc_right = encoder_right;
 
-        float v_l = 0.0f, v_r = 0.0f;
-        if (delta_l != 0 || delta_r != 0) {
-            /* Convert encoder ticks to distance */
-            float dist_l = (float)delta_l / (float)ENCODER_EDGES_PER_REV
-                           * 2.0f * 3.14159f * WHEEL_RADIUS_M;
-            float dist_r = (float)delta_r / (float)ENCODER_EDGES_PER_REV
-                           * 2.0f * 3.14159f * WHEEL_RADIUS_M;
+        /* Convert encoder ticks to wheel linear velocities each cycle.
+           Always run forward kinematics so odom.vx/odom.wz are refreshed
+           to zero when the robot is stationary. */
+        float dist_l = (float)delta_l / (float)ENCODER_EDGES_PER_REV
+                       * 2.0f * 3.14159f * WHEEL_RADIUS_M;
+        float dist_r = (float)delta_r / (float)ENCODER_EDGES_PER_REV
+                       * 2.0f * 3.14159f * WHEEL_RADIUS_M;
 
-            v_l = dist_l / CONTROL_DT_S;
-            v_r = dist_r / CONTROL_DT_S;
+        float v_l = dist_l / CONTROL_DT_S;
+        float v_r = dist_r / CONTROL_DT_S;
 
-            ackermann_forward(v_l, v_r, servo_get_angle(),
-                              CONTROL_DT_S, &odom);
-        }
+        ackermann_forward(v_l, v_r, servo_get_angle(),
+                          CONTROL_DT_S, &odom);
 
         /* 3) Safety check */
         safety_update();

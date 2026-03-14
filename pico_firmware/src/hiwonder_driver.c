@@ -43,8 +43,7 @@
 
 /* ── Internal state ──────────────────────────────────────────── */
 static bool driver_connected = false;
-static int32_t prev_encoder_left  = 0;
-static int32_t prev_encoder_right = 0;
+static int8_t motor_cmd_cache[4] = {0, 0, 0, 0};
 
 /* ── I2C helpers ─────────────────────────────────────────────── */
 
@@ -73,6 +72,31 @@ static bool i2c_read_reg(uint8_t reg, uint8_t *data, uint8_t len)
     return (ret == (int)len);
 }
 
+static int8_t clamp_speed(int8_t speed)
+{
+    if (speed > MOTOR_SPEED_MAX) return MOTOR_SPEED_MAX;
+    if (speed < MOTOR_SPEED_MIN) return MOTOR_SPEED_MIN;
+    return speed;
+}
+
+static int32_t decode_i32_le(const uint8_t *buf, int idx)
+{
+    uint32_t raw = (uint32_t)buf[idx]
+                 | ((uint32_t)buf[idx + 1] << 8)
+                 | ((uint32_t)buf[idx + 2] << 16)
+                 | ((uint32_t)buf[idx + 3] << 24);
+    return (int32_t)raw;
+}
+
+static bool write_motor_cache(void)
+{
+    uint8_t payload[4];
+    for (int i = 0; i < 4; i++) {
+        payload[i] = (uint8_t)motor_cmd_cache[i];
+    }
+    return i2c_write_reg(REG_OPEN_LOOP_PWM, payload, 4);
+}
+
 /* ── Public API ──────────────────────────────────────────────── */
 
 bool hiwonder_driver_init(void)
@@ -97,39 +121,46 @@ bool hiwonder_driver_init(void)
                MOTOR_DRIVER_ADDR);
     }
 
-    prev_encoder_left  = 0;
-    prev_encoder_right = 0;
+    memset(motor_cmd_cache, 0, sizeof(motor_cmd_cache));
 
     return driver_connected;
 }
 
 bool hiwonder_set_speed(uint8_t channel, int8_t speed)
 {
-    /* Not used directly anymore, use set_speeds for bulk transfer */
-    return false;
+    if (channel < 1 || channel > 4) {
+        return false;
+    }
+
+    motor_cmd_cache[channel - 1] = clamp_speed(speed);
+    return write_motor_cache();
 }
 
 bool hiwonder_set_speeds(int8_t speed_left, int8_t speed_right)
 {
-    /* Clamp speeds */
-    if (speed_left > MOTOR_SPEED_MAX)  speed_left = MOTOR_SPEED_MAX;
-    if (speed_left < MOTOR_SPEED_MIN)  speed_left = MOTOR_SPEED_MIN;
-    if (speed_right > MOTOR_SPEED_MAX) speed_right = MOTOR_SPEED_MAX;
-    if (speed_right < MOTOR_SPEED_MIN) speed_right = MOTOR_SPEED_MIN;
+    for (int i = 0; i < 4; i++) {
+        motor_cmd_cache[i] = 0;
+    }
+    motor_cmd_cache[MOTOR_CHANNEL_LEFT - 1]  = clamp_speed(speed_left);
+    motor_cmd_cache[MOTOR_CHANNEL_RIGHT - 1] = clamp_speed(speed_right);
 
-    /* The payload expects 4 bytes for M1, M2, M3, M4 */
-    /* Hardware wiring: M2 = Left, M4 = Right */
-    uint8_t p[4] = {0, 0, 0, 0};
-    p[MOTOR_CHANNEL_LEFT - 1]  = (uint8_t)speed_left;
-    p[MOTOR_CHANNEL_RIGHT - 1] = (uint8_t)speed_right;
-
-    return i2c_write_reg(REG_OPEN_LOOP_PWM, p, 4);
+    return write_motor_cache();
 }
 
 bool hiwonder_read_encoder(uint8_t channel, int32_t *count)
 {
-    /* Not used directly anymore, use read_encoders for bulk transfer */
-    return false;
+    if (channel < 1 || channel > 4 || count == NULL) {
+        return false;
+    }
+
+    uint8_t buf[16] = {0};
+    if (!i2c_read_reg(REG_ENCODER_READ, buf, 16)) {
+        return false;
+    }
+
+    int idx = (int)(channel - 1) * 4;
+    *count = decode_i32_le(buf, idx);
+    return true;
 }
 
 bool hiwonder_read_encoders(int32_t *left_count, int32_t *right_count)
@@ -146,19 +177,16 @@ bool hiwonder_read_encoders(int32_t *left_count, int32_t *right_count)
     int l_idx = (MOTOR_CHANNEL_LEFT - 1) * 4;
     int r_idx = (MOTOR_CHANNEL_RIGHT - 1) * 4;
 
-    *left_count = (int32_t)(buf[l_idx] | (buf[l_idx+1] << 8) | 
-                            (buf[l_idx+2] << 16) | (buf[l_idx+3] << 24));
-                            
-    *right_count = (int32_t)(buf[r_idx] | (buf[r_idx+1] << 8) | 
-                             (buf[r_idx+2] << 16) | (buf[r_idx+3] << 24));
+    *left_count = decode_i32_le(buf, l_idx);
+    *right_count = decode_i32_le(buf, r_idx);
                              
     return true;
 }
 
 bool hiwonder_stop_all(void)
 {
-    uint8_t p[4] = {0, 0, 0, 0};
-    return i2c_write_reg(REG_OPEN_LOOP_PWM, p, 4);
+    memset(motor_cmd_cache, 0, sizeof(motor_cmd_cache));
+    return write_motor_cache();
 }
 
 bool hiwonder_is_connected(void)

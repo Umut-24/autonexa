@@ -15,8 +15,8 @@
  *   - Stop all motors
  *
  * Motor channel mapping:
- *   M1 = left rear wheel
- *   M3 = right rear wheel
+ *   M2 = left rear wheel
+ *   M4 = right rear wheel
  *
  * Speed range: -100 to +100 (negative = reverse)
  */

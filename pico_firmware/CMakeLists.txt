@@ -62,12 +62,18 @@ if(USE_MICRO_ROS)
     add_executable(autonexa_pico_uros
         ${COMMON_SOURCES}
         src/uros_transport.c
+        src/uros_time_shim.c
+        micro_ros_sdk/pico_uart_transport.c
     )
 
-    target_compile_definitions(autonexa_pico_uros PRIVATE USE_MICRO_ROS)
+    target_compile_definitions(autonexa_pico_uros PRIVATE
+        USE_MICRO_ROS
+        PICO_UROS_SKIP_TIME_SHIMS
+    )
 
     target_include_directories(autonexa_pico_uros PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/micro_ros_sdk
         ${MICROROS_INCLUDE_DIR}
     )
 
@@ -80,8 +86,8 @@ if(USE_MICRO_ROS)
         microros
     )
 
-    # micro-ROS takes over USB — disable pico stdio USB
-    pico_enable_stdio_usb(autonexa_pico_uros 0)
+    # micro-ROS transport in this project uses Pico stdio over USB CDC.
+    pico_enable_stdio_usb(autonexa_pico_uros 1)
     pico_enable_stdio_uart(autonexa_pico_uros 0)
 
     pico_add_extra_outputs(autonexa_pico_uros)

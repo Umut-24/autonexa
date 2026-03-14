@@ -10,6 +10,7 @@
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
 #include <rmw_microros/rmw_microros.h>
+#include "pico_uart_transports.h"
 
 #include <geometry_msgs/msg/twist_stamped.h>
 #include <nav_msgs/msg/odometry.h>
@@ -131,6 +132,16 @@ bool uros_init(void)
 {
     allocator = rcl_get_default_allocator();
 
+    /* Use custom serial transport backed by Pico stdio USB CDC. */
+    RCCHECK(rmw_uros_set_custom_transport(
+        true,
+        NULL,
+        pico_serial_transport_open,
+        pico_serial_transport_close,
+        pico_serial_transport_write,
+        pico_serial_transport_read
+    ));
+
     /* Wait for agent connection */
     RCCHECK(rmw_uros_ping_agent(1000, 10));
 
@@ -242,7 +253,8 @@ void uros_publish_odom(const odom_state_t *odom)
     odom_msg.twist.twist.linear.x  = (double)odom->vx;
     odom_msg.twist.twist.angular.z = (double)odom->wz;
 
-    rcl_publish(&odom_pub, &odom_msg, NULL);
+    rcl_ret_t pub_rc = rcl_publish(&odom_pub, &odom_msg, NULL);
+    (void)pub_rc;
 }
 
 void uros_publish_joint_state(float vl_rads, float vr_rads, float steer_rad)
@@ -260,7 +272,8 @@ void uros_publish_joint_state(float vl_rads, float vr_rads, float steer_rad)
     joint_velocities[1] = (double)vr_rads;      /* right wheel rad/s        */
     joint_velocities[2] = 0.0;                  /* steering velocity        */
 
-    rcl_publish(&joint_pub, &joint_msg, NULL);
+    rcl_ret_t pub_rc = rcl_publish(&joint_pub, &joint_msg, NULL);
+    (void)pub_rc;
 }
 
 /* ── Agent connectivity check ───────────────────────────────── */

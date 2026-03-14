@@ -9,11 +9,14 @@ High-level planning runs on RPi5 (Linux/ROS2) while deterministic real-time cont
 
 ## 2. Bridge Pattern (Transport Decoupling)
 
-The bridge node (`cmd_vel_to_pico_bridge.py`) sits between Nav2 and the Pico. It publishes to three topics — TwistStamped, JSON String, and Bool heartbeat — so transport layers (serial, micro-ROS, CAN) can subscribe independently without coupling to Nav2.
+The bridge node (`cmd_vel_to_pico_bridge.py`) sits between Nav2 and Pico transport, applying output limits and timeout safety before hardware commands are sent.
 
-The serial transceiver (`pico_serial_transceiver.py`) subscribes to the JSON topic and converts to ASCII CLI commands. This separation means swapping serial for micro-ROS requires only replacing the transceiver, not the bridge.
+Current topology in live control mode:
+`/cmd_vel` → `velocity_smoother` (`/cmd_vel_smoothed`) → `collision_monitor` (`/cmd_vel_safe`) → bridge → `/pico/control_cmd`
 
-Topology: Nav2 `/cmd_vel` → Bridge → `/pico/control_cmd_json` → Transceiver → serial
+Transport is micro-ROS direct:
+- RPi5 runs `micro_ros_agent` over USB serial.
+- Pico runs a micro-ROS client and subscribes/publishes ROS topics directly.
 
 ## 3. Safety Layering
 
@@ -53,15 +56,11 @@ Examples: `cmd_vel_to_pico_bridge.py:30-78`, `pico_serial_transceiver.py:30-69`,
 
 ## 6. Odometry Pipeline (Encoder → TF)
 
-Raw encoder data flows through a multi-stage pipeline:
+Current active pipeline:
 
-1. **Pico firmware** reads encoder deltas at 50Hz and computes on-board odom (`main.c:376-397`)
-2. **Pico** emits `TEL` telemetry at 10Hz with raw encoder counts (`main.c:300-315`)
-3. **Transceiver** parses TEL, converts ticks→rad/s, publishes JointState (`pico_serial_transceiver.py:141-187`)
-4. **Odom node** integrates wheel velocities + steering via Ackermann forward kinematics (`pico_joint_feedback_to_odom.py:99-110`)
-5. **EKF** (robot_localization) optionally fuses wheel odom with laser scan matcher odom
-
-Design choice: ROS-side odom integration (step 4) is preferred over Pico's on-board odom (step 1) for TF tree consistency. See `pico_serial_transceiver.py:156-157`.
+1. **Laser scan matcher** publishes `odom -> base_link` and `/odom` (primary odometry for nav bringup).
+2. **Pico firmware** computes and publishes `/pico/odom` + `/pico/joint_feedback` via micro-ROS for diagnostics and future fusion.
+3. **Future phase**: `robot_localization` EKF will fuse wheel odometry (and IMU once connected) with localization constraints.
 
 ## 7. Ackermann Kinematics
 

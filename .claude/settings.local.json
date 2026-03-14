@@ -11,7 +11,15 @@
       "Bash(grep -l \"robot_localization\\\\|ekf\" /c/GitHub/autonexa/src/parking_system/config/*.yaml 2>/dev/null | head -5)",
       "Bash(grep -n \"ekf\\\\|robot_localization\" /c/GitHub/autonexa/src/parking_system/launch/*.py)",
       "Bash(git submodule:*)",
-      "Bash(find /c/GitHub/autonexa/aruco_project/mobile_app -name \"*.dart\" -type f 2>/dev/null | head -20)"
+      "Bash(find /c/GitHub/autonexa/aruco_project/mobile_app -name \"*.dart\" -type f 2>/dev/null | head -20)",
+      "Bash(git:*)",
+      "Bash(tree:*)",
+      "Bash(head:*)",
+      "Bash(wc:*)",
+      "Bash(ls:*)",
+      "Bash(source:*)",
+      "Bash(python3:*)",
+      "Bash(cd:*)"
     ]
   }
 }

@@ -42,3 +42,9 @@ test_slam_transform.py
 
 .DS_Store
 tools/
+
+# Archive of unused files
+_archive/
+
+# Pico firmware stale build dirs
+pico_firmware/build_*/

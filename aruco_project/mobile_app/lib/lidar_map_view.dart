@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'main.dart' show AppColors;
 
 /// Real-time map view with LIDAR scan overlay and robot pose.
 ///
@@ -165,12 +166,12 @@ class _LidarMapViewState extends State<LidarMapView> {
             child: Container(
               margin: const EdgeInsets.all(8),
               decoration: BoxDecoration(
-                color: Colors.black,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white12),
+                color: AppColors.background,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AppColors.border),
               ),
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(14),
                 child: _buildMapContent(),
               ),
             ),
@@ -189,10 +190,11 @@ class _LidarMapViewState extends State<LidarMapView> {
 
     return Container(
       margin: const EdgeInsets.fromLTRB(8, 4, 8, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: Colors.white10,
-        borderRadius: BorderRadius.circular(8),
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
       ),
       child: Row(
         children: [
@@ -201,7 +203,7 @@ class _LidarMapViewState extends State<LidarMapView> {
             height: 8,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: _connected ? Colors.green : Colors.red,
+              color: _connected ? AppColors.success : AppColors.error,
             ),
           ),
           const SizedBox(width: 8),
@@ -209,20 +211,22 @@ class _LidarMapViewState extends State<LidarMapView> {
             _connected ? 'ROS2 Bridge' : (_error ?? 'Disconnected'),
             style: TextStyle(
               fontSize: 12,
-              color: _connected ? Colors.green : Colors.red,
+              fontWeight: FontWeight.w500,
+              color: _connected ? AppColors.success : AppColors.error,
             ),
           ),
           const Spacer(),
           Text(
             'Scan: $scanStatus ($_scanCount pts)',
-            style: const TextStyle(fontSize: 11, color: Colors.grey),
+            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
           ),
           const SizedBox(width: 12),
           Text(
             'Pose: $_poseSource',
             style: TextStyle(
               fontSize: 11,
-              color: _poseSource == 'amcl' ? Colors.green : Colors.orange,
+              fontWeight: FontWeight.w500,
+              color: _poseSource == 'amcl' ? AppColors.success : AppColors.warning,
             ),
           ),
         ],
@@ -236,16 +240,17 @@ class _LidarMapViewState extends State<LidarMapView> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(Icons.map, size: 48, color: Colors.grey),
-            const SizedBox(height: 12),
+            Icon(Icons.map_rounded, size: 48,
+                color: AppColors.textSecondary.withValues(alpha: 0.4)),
+            const SizedBox(height: 14),
             Text(
               _error ?? 'Waiting for ROS2 bridge...',
-              style: const TextStyle(color: Colors.grey),
+              style: const TextStyle(color: AppColors.textSecondary),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Text(
               widget.baseUrl,
-              style: const TextStyle(fontSize: 11, color: Colors.grey),
+              style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
             ),
           ],
         ),
@@ -278,8 +283,9 @@ class _LidarMapViewState extends State<LidarMapView> {
       margin: const EdgeInsets.fromLTRB(8, 0, 8, 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: Colors.white10,
-        borderRadius: BorderRadius.circular(8),
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppColors.border),
       ),
       child: Row(
         children: [
@@ -292,7 +298,7 @@ class _LidarMapViewState extends State<LidarMapView> {
           if (_mapInfo != null)
             Text(
               '${_mapInfo!.width}x${_mapInfo!.height} @ ${(_mapInfo!.resolution * 100).toStringAsFixed(0)}cm/px',
-              style: const TextStyle(fontSize: 10, color: Colors.grey),
+              style: const TextStyle(fontSize: 10, color: AppColors.textSecondary),
             ),
         ],
       ),
@@ -302,9 +308,9 @@ class _LidarMapViewState extends State<LidarMapView> {
   Widget _infoChip(String label, String value) {
     return Row(
       children: [
-        Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+        Text(label, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
         const SizedBox(width: 4),
-        Text(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, fontFamily: 'monospace')),
+        Text(value, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
       ],
     );
   }
@@ -363,7 +369,7 @@ class _MapPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final bgPaint = Paint()..color = const Color(0xFF1A1A2E);
+    final bgPaint = Paint()..color = AppColors.background;
     canvas.drawRect(Rect.fromLTWH(0, 0, size.width, size.height), bgPaint);
 
     if (mapImage == null || mapInfo == null || mapInfo!.width == 0 || mapInfo!.height == 0) {

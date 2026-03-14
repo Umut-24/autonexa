@@ -1,7 +1,0 @@
-image: mapppp.pgm
-mode: trinary
-resolution: 0.020
-origin: [-1.674, -1.633, 0]
-negate: 0
-occupied_thresh: 0.65
-free_thresh: 0.196

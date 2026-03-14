@@ -114,6 +114,8 @@ source install/setup.bash
 ros2 launch parking_system nav2_live_slam.launch.py
 ```
 
+`use_pico_bridge` is disabled by default in this launch so LiDAR + SLAM can be validated first.
+
 ### Live workflow
 1. Start launch (RViz + Nav2 + SLAM Toolbox)
 2. Move robot to explore; SLAM builds map online from `/scan`
@@ -122,6 +124,37 @@ ros2 launch parking_system nav2_live_slam.launch.py
 5. Nav2 local/global costmaps + controller provide obstacle avoidance while moving
 
 > This mode does not require a pre-existing map file.
+
+### Live Nav2 + Pico Control Chain (micro-ROS direct)
+
+`nav2_live_slam.launch.py` now supports full RPi5↔Pico bringup in one command:
+
+```bash
+cd ~/intelligent_parking_ws
+source install/setup.bash
+source /tmp/micro_ros_agent_ws/install/setup.bash  # if needed on your system
+ros2 launch parking_system nav2_live_slam.launch.py \
+  use_pico_bridge:=true \
+  enforce_single_publisher:=true \
+  pico_serial_port:=/dev/serial/by-id/<your-pico-id> \
+  serial_port:=/dev/serial/by-id/<your-lidar-id> \
+  bridge_cmd_vel_topic:=/cmd_vel_safe
+```
+
+Control flow in this mode:
+`controller/behaviors -> /cmd_vel -> velocity_smoother -> /cmd_vel_smoothed -> collision_monitor -> /cmd_vel_safe -> cmd_vel_to_pico_bridge -> /pico/control_cmd`.
+
+This keeps smoothing + collision safety in-chain before commands reach hardware.
+
+### Optional EKF Fusion Skeleton (No IMU Yet)
+
+```bash
+cd ~/intelligent_parking_ws
+source install/setup.bash
+ros2 launch parking_system ekf_fusion.launch.py
+```
+
+This starts `robot_localization` EKF with Pico odometry input only and publishes `/odometry/filtered` (TF publication remains off to avoid conflict with scan-matcher odom).
 
 ### 1. Start LIDAR Driver
 
@@ -264,6 +297,25 @@ Modify navigation parameters in `config/nav2_params.yaml` to tune path planning,
 - Check permissions: `sudo chmod 666 /dev/ttyUSB0`
 - Verify baud rate matches LIDAR specifications
 
+### LiDAR Timeout (`SL_RESULT_OPERATION_TIMEOUT`)
+- Check whether an old process is still holding the LiDAR port: `fuser /dev/ttyUSB0`
+- Stop stale launch/driver processes before restarting (`kill <pid>` from `fuser` output)
+- Prefer stable serial symlinks instead of dynamic names:
+  `ls -l /dev/serial/by-id`
+  then pass `serial_port:=/dev/serial/by-id/<your-lidar-id>` and
+  `pico_serial_port:=/dev/serial/by-id/<your-pico-id>`
+
+### Control Chain Validation (Nav2 -> Pico)
+- Topic/type check:
+  `ros2 run parking_system diagnose_control_chain.py --ros-args -p expect_pico_bridge:=true`
+- Enforce single bridge publisher on `/pico/control_cmd`, `/pico/enable`, `/pico/heartbeat`:
+  `ros2 run parking_system diagnose_control_chain.py --ros-args -p expect_pico_bridge:=true -p require_single_pico_publisher:=true`
+- Topic/type + live flow check:
+  `ros2 run parking_system diagnose_control_chain.py --ros-args -p expect_pico_bridge:=true -p require_flow:=true -p window_s:=12.0`
+- For `require_flow:=true`, send a goal or joystick command during the check window.
+- Record the full chain during a test run:
+  `ros2 run parking_system record_control_chain_bag.py`
+
 ### Localization Issues
 - Ensure initial pose estimate is accurate
 - Check that map frame and robot frames are correctly configured
@@ -295,14 +347,13 @@ This repository now includes an initial RPi5-side control pipeline so Nav2 outpu
 - `cmd_vel_to_pico_bridge.py`
   - Subscribes: `/cmd_vel` (Nav2 output)
   - Publishes: `/pico/control_cmd` (`geometry_msgs/TwistStamped`)
-  - Publishes mirror JSON for transport: `/pico/control_cmd_json` (`std_msgs/String`)
+  - Publishes enable state: `/pico/enable` (`std_msgs/Bool`)
   - Publishes heartbeat: `/pico/heartbeat` (`std_msgs/Bool`)
   - Features: rate limiting, acceleration limiting, timeout-to-safe-stop.
 
-- `pico_joint_feedback_to_odom.py`
-  - Subscribes: `/pico/joint_feedback` (`sensor_msgs/JointState`)
-  - Publishes: `/pico/odom` (`nav_msgs/Odometry`)
-  - Implements Ackermann-compatible odometry using rear wheel speed and steering angle.
+- `micro_ros_agent` (external package)
+  - Bridges XRCE-DDS over serial to ROS 2 DDS for Pico micro-ROS firmware.
+  - Pico publishes `/pico/odom` and `/pico/joint_feedback` directly.
 
 ### Launch
 ```bash
@@ -310,6 +361,9 @@ cd ~/intelligent_parking_ws
 source install/setup.bash
 ros2 launch parking_system rpi5_pico_bridge.launch.py
 ```
+
+If launch fails with `Package 'micro_ros_agent' not found`, install and source the
+agent workspace/package before launching the bridge.
 
 ### Expected JointState contract from Pico
 - `name`: must include

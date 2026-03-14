@@ -1,0 +1,33 @@
+ekf_filter_node:
+  ros__parameters:
+    use_sim_time: false
+    frequency: 30.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: false
+    publish_acceleration: false
+
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    # Wheel/firmware odometry from Pico micro-ROS.
+    odom0: /pico/odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 20
+    odom0_nodelay: true
+
+    # Keep conservative process noise until IMU is added.
+    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,
+                               0.0,  0.0,  1.0e-6,0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  1.0e-6,0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  1.0e-6,0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.02]

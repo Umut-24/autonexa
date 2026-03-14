@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'main.dart' show AppColors;
 
 /// Callback signature for joystick movement.
 /// [x] ranges from -1.0 (full left) to 1.0 (full right).
@@ -21,9 +22,9 @@ class VirtualJoystick extends StatefulWidget {
     this.size = 220,
     required this.onMove,
     this.onRelease,
-    this.baseColor = const Color(0xFF1A1A2E),
-    this.knobColor = const Color(0xFFE94560),
-    this.accentColor = const Color(0xFF0F3460),
+    this.baseColor = AppColors.surface,
+    this.knobColor = AppColors.accent,
+    this.accentColor = AppColors.accentDim,
   });
 
   @override

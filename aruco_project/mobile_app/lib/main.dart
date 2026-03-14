@@ -7,6 +7,21 @@ import 'package:google_fonts/google_fonts.dart';
 import 'control_tab.dart';
 import 'lidar_map_view.dart';
 
+// ─── Color Palette ──────────────────────────────────────────────────────────
+class AppColors {
+  static const background = Color(0xFF0D0D14);
+  static const surface = Color(0xFF14141E);
+  static const surfaceLight = Color(0xFF1C1C2A);
+  static const border = Color(0xFF2A2A3A);
+  static const accent = Color(0xFFE94560);
+  static const accentDim = Color(0xFF0F3460);
+  static const textPrimary = Color(0xFFF0F0F0);
+  static const textSecondary = Color(0xFF8888A0);
+  static const success = Color(0xFF2ECC71);
+  static const warning = Color(0xFFE67E22);
+  static const error = Color(0xFFE74C3C);
+}
+
 void main() {
   runApp(const AutoNexaApp());
 }
@@ -17,16 +32,51 @@ class AutoNexaApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AutoNexa Mobile',
+      title: 'AutoNexa',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         brightness: Brightness.dark,
-        primarySwatch: Colors.red,
+        scaffoldBackgroundColor: AppColors.background,
+        colorScheme: const ColorScheme.dark(
+          primary: AppColors.accent,
+          surface: AppColors.surface,
+        ),
         textTheme: GoogleFonts.interTextTheme(ThemeData.dark().textTheme),
-        tabBarTheme: const TabBarThemeData(
-          indicatorSize: TabBarIndicatorSize.tab,
-          indicatorColor: Colors.red,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.grey,
+        cardTheme: CardThemeData(
+          color: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: AppColors.border, width: 1),
+          ),
+          elevation: 0,
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.accentDim,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            elevation: 0,
+            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 20),
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: AppColors.surfaceLight,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: AppColors.border),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: AppColors.border),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: AppColors.accent, width: 1.5),
+          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+          hintStyle: const TextStyle(color: AppColors.textSecondary, fontSize: 14),
         ),
       ),
       home: const HomePage(),
@@ -41,28 +91,17 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
+class _HomePageState extends State<HomePage> {
   final TextEditingController _serverController = TextEditingController();
-  final TextEditingController _calibController = TextEditingController();
-  String? _baseUrl; // e.g. http://192.168.1.5:5000
+  String? _baseUrl;
   WebViewController? _webViewController;
   Timer? _pollTimer;
   Map<String, dynamic> _state = {};
-  bool _allIdsMode = false;
-  Map<int, Map<String, dynamic>> _allIdsTelemetry = {}; // store telemetry for all IDs
-  int? _preSelectedId; // pre-selected ID before connecting
-  late TabController _tabController;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 5, vsync: this);
-  }
+  int _currentTab = 3; // Start on Control tab
 
   @override
   void dispose() {
     _pollTimer?.cancel();
-    _tabController.dispose();
     super.dispose();
   }
 
@@ -70,46 +109,24 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final text = _serverController.text.trim();
     if (text.isEmpty) return;
     var url = text;
-    if (!url.startsWith('http')) {
-      url = 'http://$url';
-    }
-    // ensure no trailing slash
+    if (!url.startsWith('http')) url = 'http://$url';
     url = url.replaceAll(RegExp(r'/*\z'), '');
 
-    setState(() {
-      _baseUrl = url;
-    });
+    setState(() => _baseUrl = url);
 
-    // if pre-selected ID, set it on connect
-    if (_preSelectedId != null && _baseUrl != null) {
-      _send('/set_id/$_preSelectedId');
-    }
-
-    // start polling state from ROS2 bridge
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       if (_baseUrl == null) return;
       try {
-        final r = await http.get(Uri.parse('$_baseUrl/api/status')).timeout(const Duration(seconds: 1));
+        final r = await http.get(Uri.parse('$_baseUrl/api/status'))
+            .timeout(const Duration(seconds: 1));
         if (r.statusCode == 200) {
-          final newState = Map<String, dynamic>.from(jsonDecodeSafe(r.body));
-          setState(() {
-            _state = newState;
-            // if all-IDs mode, store telemetry for each ID
-            if (_allIdsMode && newState['target_id'] != null) {
-              final id = newState['target_id'] as int;
-              _allIdsTelemetry[id] = {
-                'distance_cm': newState['distance_cm'],
-                'bearing': newState['bearing'],
-                'timestamp': DateTime.now().millisecondsSinceEpoch,
-              };
-            }
-          });
+          setState(() => _state = _jsonDecodeSafe(r.body));
         }
       } catch (_) {}
     });
 
-    // Load camera feed via webview (MJPEG from bridge /video_feed)
+    // Camera feed via webview
     if (_baseUrl != null) {
       try {
         final videoHtml = 'data:text/html,<html><body style="margin:0;background:black">'
@@ -127,126 +144,16 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     }
   }
 
-  void _send(String path) async {
-    if (_baseUrl == null) return;
-    try {
-      await http.get(Uri.parse('$_baseUrl$path')).timeout(const Duration(seconds: 1));
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  void _setId(int id) {
-    _send('/set_id/$id');
-    // clear all-IDs telemetry when switching to single ID
-    if (_allIdsMode) {
-      setState(() {
-        _allIdsTelemetry.clear();
-        _allIdsMode = false;
-      });
-    }
-  }
-
-  void _nextId() => _send('/next_id');
-  void _prevId() => _send('/prev_id');
-  void _quit() => _send('/quit');
-
-  void _calibrate() {
-    final v = _calibController.text.trim();
-    if (v.isEmpty || _baseUrl == null) return;
-    _send('/calibrate?distance=${Uri.encodeComponent(v)}');
-  }
-
-  void _toggleAllIdsMode() {
+  void _disconnect() {
+    _pollTimer?.cancel();
     setState(() {
-      _allIdsMode = !_allIdsMode;
-      if (_allIdsMode) {
-        _allIdsTelemetry.clear();
-        // start scanning all IDs (optional: cycle through them)
-        _send('/set_id/0');
-      } else {
-        _allIdsTelemetry.clear();
-      }
+      _baseUrl = null;
+      _state = {};
+      _webViewController = null;
     });
   }
 
-  void _showPreSelectDialog() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Pre-select Detection ID'),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: GridView.count(
-            crossAxisCount: 4,
-            childAspectRatio: 1.5,
-            children: List.generate(16, (i) {
-              final selected = _preSelectedId == i;
-              return Padding(
-                padding: const EdgeInsets.all(4.0),
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: selected ? Colors.green : null,
-                  ),
-                  onPressed: () {
-                    setState(() => _preSelectedId = i);
-                    Navigator.pop(ctx);
-                  },
-                  child: Text('$i'),
-                ),
-              );
-            }),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancel'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _showAllIdsTelemetry() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('All-IDs Telemetry'),
-        content: SizedBox(
-          width: double.maxFinite,
-          child: ListView.builder(
-            itemCount: _allIdsTelemetry.length,
-            itemBuilder: (c, i) {
-              final id = _allIdsTelemetry.keys.elementAt(i);
-              final telemetry = _allIdsTelemetry[id]!;
-              return ListTile(
-                title: Text('ID $id'),
-                subtitle: Text(
-                  'Distance: ${telemetry['distance_cm']} cm, Bearing: ${telemetry['bearing']}°',
-                ),
-                trailing: ElevatedButton(
-                  onPressed: () {
-                    _setId(id);
-                    Navigator.pop(ctx);
-                  },
-                  child: const Text('Lock'),
-                ),
-              );
-            },
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  static Map<String, dynamic> jsonDecodeSafe(String s) {
+  static Map<String, dynamic> _jsonDecodeSafe(String s) {
     try {
       return s.isEmpty ? {} : Map<String, dynamic>.from(json.decode(s));
     } catch (_) {
@@ -257,160 +164,352 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        elevation: 0,
-        backgroundColor: Colors.transparent,
-        title: Row(
-          children: [
-            SizedBox(
-              height: 40,
-              width: 40,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: Image.asset(
-                  'assets/logo.png',
-                  fit: BoxFit.contain,
-                  errorBuilder: (c, e, s) => Container(
-                    color: Colors.white12,
-                    alignment: Alignment.center,
-                    child: const Text('A', style: TextStyle(fontSize: 18)),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Text('AutoNexa', style: Theme.of(context).textTheme.titleLarge),
-            const Spacer(),
-            // Connection status indicator
-            Container(
-              width: 12,
-              height: 12,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _baseUrl != null ? Colors.green : Colors.grey,
-              ),
-            ),
-            const SizedBox(width: 8),
-          ],
-        ),
-        bottom: TabBar(
-          controller: _tabController,
-          isScrollable: true,
-          tabAlignment: TabAlignment.center,
-          tabs: const [
-            Tab(icon: Icon(Icons.videocam), text: 'Camera'),
-            Tab(icon: Icon(Icons.dashboard), text: 'Dashboard'),
-            Tab(icon: Icon(Icons.map), text: 'Map'),
-            Tab(icon: Icon(Icons.gamepad), text: 'Control'),
-            Tab(icon: Icon(Icons.settings), text: 'Settings'),
-          ],
+      body: IndexedStack(
+        index: _currentTab,
+        children: [
+          _buildCameraTab(),
+          _buildDashboardTab(),
+          _buildMapTab(),
+          ControlTab(bridgeUrl: _baseUrl),
+          _buildSettingsTab(),
+        ],
+      ),
+      bottomNavigationBar: _buildBottomBar(),
+    );
+  }
+
+  // ─── Bottom Navigation ──────────────────────────────────────────────────
+  Widget _buildBottomBar() {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(top: BorderSide(color: AppColors.border, width: 1)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+          child: Row(
+            children: [
+              _navItem(0, Icons.videocam_rounded, 'Camera'),
+              _navItem(1, Icons.dashboard_rounded, 'Status'),
+              _navItem(2, Icons.map_rounded, 'Map'),
+              _navItem(3, Icons.gamepad_rounded, 'Control'),
+              _navItem(4, Icons.settings_rounded, 'Settings'),
+            ],
+          ),
         ),
       ),
-      body: TabBarView(
-        controller: _tabController,
+    );
+  }
+
+  Widget _navItem(int index, IconData icon, String label) {
+    final selected = _currentTab == index;
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => setState(() => _currentTab = index),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          margin: const EdgeInsets.symmetric(horizontal: 2),
+          decoration: BoxDecoration(
+            color: selected ? AppColors.accent.withValues(alpha: 0.12) : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 22,
+                color: selected ? AppColors.accent : AppColors.textSecondary,
+              ),
+              const SizedBox(height: 3),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                  color: selected ? AppColors.accent : AppColors.textSecondary,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ─── Header Widget ──────────────────────────────────────────────────────
+  Widget _header(String title, {Widget? trailing}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 8),
+      child: Row(
         children: [
-          // ========== TAB 1: CAMERA FEED ==========
-          _buildCameraTab(),
-          
-          // ========== TAB 2: DASHBOARD ==========
-          _buildDashboardTab(),
-          
-          // ========== TAB 3: MAP VIEW ==========
-          _buildMapTab(),
-          
-          // ========== TAB 4: CONTROL (ACKERMANN) ==========
-          ControlTab(bridgeUrl: _baseUrl),
-          
-          // ========== TAB 5: SETTINGS ==========
-          _buildSettingsTab(),
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w700,
+              color: AppColors.textPrimary,
+              letterSpacing: -0.5,
+            ),
+          ),
+          const Spacer(),
+          if (trailing != null) trailing,
+          _connectionDot(),
         ],
       ),
     );
   }
 
-  // ==================== TAB: CAMERA FEED ====================
+  Widget _connectionDot() {
+    return Container(
+      width: 10,
+      height: 10,
+      margin: const EdgeInsets.only(left: 10),
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: _baseUrl != null ? AppColors.success : AppColors.textSecondary,
+        boxShadow: _baseUrl != null
+            ? [BoxShadow(color: AppColors.success.withValues(alpha: 0.5), blurRadius: 8)]
+            : null,
+      ),
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  //  TAB: CAMERA
+  // ═════════════════════════════════════════════════════════════════════════
   Widget _buildCameraTab() {
     return SafeArea(
       child: Column(
         children: [
-          // Camera feed (WebView)
+          _header('Camera'),
           Expanded(
             child: Container(
-              margin: const EdgeInsets.all(12),
+              margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white12),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: AppColors.border),
+                color: AppColors.surface,
               ),
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(14),
                 child: _baseUrl == null
-                    ? const Center(child: Text('Connect from Settings tab'))
+                    ? _placeholder('Connect from Settings to view camera feed', Icons.videocam_off_rounded)
                     : (_webViewController == null
-                        ? const Center(child: CircularProgressIndicator())
+                        ? const Center(child: CircularProgressIndicator(color: AppColors.accent))
                         : WebViewWidget(controller: _webViewController!)),
               ),
             ),
           ),
-
-          // Telemetry display
+          // Telemetry bar
           Container(
-            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            padding: const EdgeInsets.all(12),
+            margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             decoration: BoxDecoration(
-              color: Colors.white10,
+              color: AppColors.surface,
               borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.border),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Row(
               children: [
-                Text(
-                  'Live Telemetry',
-                  style: Theme.of(context).textTheme.titleMedium,
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'ID: ${_state['target_id'] ?? '-'}  |  Distance: ${_state['distance_cm'] ?? '-'} cm  |  Bearing: ${_state['bearing'] ?? '-'}°',
-                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-                ),
-                if (_allIdsMode && _allIdsTelemetry.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Text(
-                    'All-IDs Mode: ${_allIdsTelemetry.length} markers tracked',
-                    style: const TextStyle(fontSize: 12, color: Colors.greenAccent),
-                  ),
-                ],
+                _miniStat('ID', '${_state['target_id'] ?? '-'}'),
+                _miniStat('Dist', '${_state['distance_cm'] ?? '-'}cm'),
+                _miniStat('Bearing', '${_state['bearing'] ?? '-'}°'),
               ],
             ),
           ),
+        ],
+      ),
+    );
+  }
 
-          // Quick controls
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
+  // ═════════════════════════════════════════════════════════════════════════
+  //  TAB: DASHBOARD
+  // ═════════════════════════════════════════════════════════════════════════
+  Widget _buildDashboardTab() {
+    return SafeArea(
+      child: Column(
+        children: [
+          _header('Status'),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 0, vertical: 4),
               children: [
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _prevId,
-                    icon: const Icon(Icons.arrow_back),
-                    label: const Text('Prev'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ElevatedButton.icon(
-                    onPressed: _nextId,
-                    icon: const Icon(Icons.arrow_forward),
-                    label: const Text('Next'),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _allIdsMode ? Colors.green : Colors.grey,
+                // System Status
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _sectionTitle('System'),
+                        const SizedBox(height: 14),
+                        _statusRow('Connection', _baseUrl ?? 'Not Connected',
+                            color: _baseUrl != null ? AppColors.success : AppColors.textSecondary),
+                        _statusRow('Pose Source', _state['pose']?['source']?.toString() ?? '-'),
+                        _statusRow('Robot X', '${(_state['pose']?['x_m'] as num?)?.toStringAsFixed(3) ?? '-'} m'),
+                        _statusRow('Robot Y', '${(_state['pose']?['y_m'] as num?)?.toStringAsFixed(3) ?? '-'} m'),
+                        _statusRow('Scan Points', _state['scan']?['count']?.toString() ?? '-'),
+                        _statusRow('Map',
+                            _state['map'] != null ? '${_state['map']?['width']}x${_state['map']?['height']}' : 'No map'),
+                      ],
                     ),
-                    onPressed: _toggleAllIdsMode,
-                    child: Text(_allIdsMode ? 'All-IDs ✓' : 'All-IDs'),
+                  ),
+                ),
+                // Visible Markers
+                if (_state['markers'] != null && (_state['markers'] as Map).isNotEmpty)
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _sectionTitle('Visible Markers'),
+                          const SizedBox(height: 14),
+                          ...(_state['markers'] as Map).entries.map((e) =>
+                              _statusRow(
+                                'ID ${e.key}',
+                                '${(e.value['distance_m'] as num?)?.toStringAsFixed(2) ?? '-'}m / ${(e.value['bearing_deg'] as num?)?.toStringAsFixed(0) ?? '-'}°',
+                              ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  //  TAB: MAP
+  // ═════════════════════════════════════════════════════════════════════════
+  Widget _buildMapTab() {
+    return SafeArea(
+      child: Column(
+        children: [
+          _header('Map'),
+          Expanded(
+            child: _baseUrl == null
+                ? _placeholder('Connect from Settings to view LIDAR map', Icons.map_rounded)
+                : LidarMapView(baseUrl: _baseUrl!),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  //  TAB: SETTINGS
+  // ═════════════════════════════════════════════════════════════════════════
+  Widget _buildSettingsTab() {
+    return SafeArea(
+      child: Column(
+        children: [
+          _header('Settings'),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              children: [
+                // Connection
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _sectionTitle('Server Connection'),
+                        const SizedBox(height: 14),
+                        TextField(
+                          controller: _serverController,
+                          decoration: const InputDecoration(
+                            hintText: 'e.g. 192.168.1.5:5000',
+                            prefixIcon: Icon(Icons.dns_rounded, size: 20, color: AppColors.textSecondary),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: _baseUrl == null ? _connect : null,
+                                icon: const Icon(Icons.link_rounded, size: 18),
+                                label: const Text('Connect'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: AppColors.accentDim,
+                                  disabledBackgroundColor: AppColors.surfaceLight,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: _baseUrl != null ? _disconnect : null,
+                                icon: const Icon(Icons.link_off_rounded, size: 18),
+                                label: const Text('Disconnect'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: AppColors.error.withValues(alpha: 0.8),
+                                  disabledBackgroundColor: AppColors.surfaceLight,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        if (_baseUrl != null) ...[
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              Container(
+                                width: 8,
+                                height: 8,
+                                decoration: const BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: AppColors.success,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _baseUrl!,
+                                  style: const TextStyle(fontSize: 12, color: AppColors.success),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                // About
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _sectionTitle('About'),
+                        const SizedBox(height: 14),
+                        const Text(
+                          'AutoNexa Mobile Controller',
+                          style: TextStyle(fontSize: 14, color: AppColors.textPrimary),
+                        ),
+                        const SizedBox(height: 4),
+                        const Text(
+                          'Connects to the RPi5 ROS2 bridge for joystick control, '
+                          'LIDAR map visualization, and system telemetry.',
+                          style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -421,314 +520,33 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
-  // ==================== TAB: DASHBOARD ====================
-  Widget _buildDashboardTab() {
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // ROS2 Bridge Status card
-            Card(
-              color: Colors.white10,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'System Status',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Container(
-                          width: 16,
-                          height: 16,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: _baseUrl != null ? Colors.green : Colors.grey,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          _baseUrl ?? 'Not Connected',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: _baseUrl != null ? Colors.green : Colors.grey,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    _buildTelemetryRow('Pose Source', _state['pose']?['source']?.toString() ?? '-'),
-                    _buildTelemetryRow('Robot X', '${(_state['pose']?['x_m'] as num?)?.toStringAsFixed(2) ?? '-'} m'),
-                    _buildTelemetryRow('Robot Y', '${(_state['pose']?['y_m'] as num?)?.toStringAsFixed(2) ?? '-'} m'),
-                    _buildTelemetryRow('Scan Points', _state['scan']?['count']?.toString() ?? '-'),
-                    _buildTelemetryRow('Map', _state['map'] != null ? '${_state['map']?['width']}x${_state['map']?['height']}' : 'No map'),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // ArUco Detection card
-            Card(
-              color: Colors.white10,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'ArUco Detection',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 12),
-                    GridView.count(
-                      crossAxisCount: 4,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      childAspectRatio: 1.2,
-                      mainAxisSpacing: 8,
-                      crossAxisSpacing: 8,
-                      children: List.generate(16, (i) {
-                        final chosen = _state['target_id'] == i;
-                        final tracked = _allIdsTelemetry.containsKey(i);
-                        return ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: chosen
-                                ? Colors.green
-                                : (tracked ? Colors.orange : Colors.grey),
-                          ),
-                          onPressed: () => _setId(i),
-                          child: Text('$i', style: const TextStyle(fontSize: 16)),
-                        );
-                      }),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: _showPreSelectDialog,
-                            child: Text(
-                              _preSelectedId != null
-                                  ? 'Pre-select: $_preSelectedId'
-                                  : 'Pre-select ID',
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // Markers card
-            if (_state['markers'] != null && (_state['markers'] as Map).isNotEmpty)
-              Card(
-                color: Colors.white10,
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Visible Markers',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 12),
-                      ...(_state['markers'] as Map).entries.map((e) =>
-                        _buildTelemetryRow(
-                          'ID ${e.key}',
-                          '${(e.value['distance_m'] as num?)?.toStringAsFixed(2) ?? '-'}m / ${(e.value['bearing_deg'] as num?)?.toStringAsFixed(0) ?? '-'}°',
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-          ],
-        ),
+  // ─── Shared Widgets ─────────────────────────────────────────────────────
+  Widget _sectionTitle(String title) {
+    return Text(
+      title,
+      style: const TextStyle(
+        fontSize: 15,
+        fontWeight: FontWeight.w600,
+        color: AppColors.textPrimary,
+        letterSpacing: -0.3,
       ),
     );
   }
 
-  // ==================== TAB: MAP VIEW ====================
-  Widget _buildMapTab() {
-    if (_baseUrl == null) {
-      return const SafeArea(
-        child: Center(child: Text('Connect from Settings tab')),
-      );
-    }
-    return LidarMapView(baseUrl: _baseUrl!);
-  }
-
-  // ==================== TAB: SETTINGS ====================
-  Widget _buildSettingsTab() {
-    return SafeArea(
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Connection card
-            Card(
-              color: Colors.white10,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Server Connection',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _serverController,
-                      decoration: InputDecoration(
-                        hintText: 'e.g. 192.168.1.5:5000',
-                        filled: true,
-                        fillColor: Colors.white10,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Colors.white12),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 14,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    ElevatedButton(
-                      onPressed: _connect,
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: Text('Connect to Server'),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    if (_baseUrl != null)
-                      Text(
-                        'Connected to: $_baseUrl',
-                        style: const TextStyle(fontSize: 12, color: Colors.green),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // Calibration card
-            Card(
-              color: Colors.white10,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Calibration',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _calibController,
-                      keyboardType: TextInputType.number,
-                      decoration: InputDecoration(
-                        hintText: 'Distance in cm (e.g. 50)',
-                        filled: true,
-                        fillColor: Colors.white10,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: const BorderSide(color: Colors.white12),
-                        ),
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 14,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    ElevatedButton(
-                      onPressed: _calibrate,
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: Text('Calibrate Distance'),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Place your car at a known distance and calibrate for accurate measurements.',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 12),
-
-            // Control card
-            Card(
-              color: Colors.white10,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Server Control',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 12),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.red,
-                      ),
-                      onPressed: _quit,
-                      child: const Padding(
-                        padding: EdgeInsets.symmetric(vertical: 12),
-                        child: Text('Stop Server'),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Gracefully stop the server process.',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTelemetryRow(String label, String value) {
+  Widget _statusRow(String label, String value, {Color? color}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 5),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(
-            label,
-            style: const TextStyle(fontSize: 13, color: Colors.grey),
-          ),
+          Text(label, style: const TextStyle(fontSize: 13, color: AppColors.textSecondary)),
           Text(
             value,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 13,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
+              fontWeight: FontWeight.w600,
+              color: color ?? AppColors.textPrimary,
+              fontFamily: 'monospace',
             ),
           ),
         ],
@@ -736,4 +554,39 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     );
   }
 
+  Widget _miniStat(String label, String value) {
+    return Expanded(
+      child: Column(
+        children: [
+          Text(label, style: const TextStyle(fontSize: 10, color: AppColors.textSecondary)),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: const TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _placeholder(String message, IconData icon) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 48, color: AppColors.textSecondary.withValues(alpha: 0.4)),
+          const SizedBox(height: 14),
+          Text(
+            message,
+            style: const TextStyle(fontSize: 14, color: AppColors.textSecondary),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      ),
+    );
+  }
 }

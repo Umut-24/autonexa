@@ -31,32 +31,15 @@ install(DIRECTORY
 
 # Install Python scripts (standalone scripts)
 install(PROGRAMS
-  scripts/select_slot.py
-  scripts/test_parking_slot_selection.py
-  scripts/temporary_odom_publisher.py
-  scripts/slam_initializer.py
-  scripts/map_bootstrap.py
-  scripts/odom_bootstrap.py
-  scripts/localization_initializer.py
   scripts/diagnose_scan_quality.py
   scripts/diagnose_localization.py
   scripts/diagnose_tf_tree.py
+  scripts/diagnose_control_chain.py
+  scripts/record_control_chain_bag.py
   scripts/print_robot_position.py
-  scripts/spot_recorder.py
-  scripts/spot_navigator.py
-  scripts/road_mask_editor.py
-  scripts/road_mask_publisher.py
   scripts/nav2_activator.py
   scripts/cmd_vel_to_pico_bridge.py
   scripts/ros2_mobile_bridge.py
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-# Install parking system module scripts
-install(PROGRAMS
-  scripts/parking_system/parking_coordinator.py
-  scripts/parking_system/parking_slot_selector.py
-  scripts/parking_system/path_monitor.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -66,4 +49,3 @@ if(BUILD_TESTING)
 endif()
 
 ament_package()
-
