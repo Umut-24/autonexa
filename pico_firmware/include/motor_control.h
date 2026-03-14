@@ -1,0 +1,51 @@
+#ifndef MOTOR_CONTROL_H
+#define MOTOR_CONTROL_H
+
+#include <stdbool.h>
+
+/**
+ * Motor control abstraction layer.
+ *
+ * Provides a unified API for setting velocity commands via Ackermann
+ * inverse kinematics. Used by both the ASCII serial CLI and micro-ROS
+ * transport layers.
+ */
+
+/**
+ * Set target body velocity. Computes Ackermann inverse kinematics
+ * internally and updates motor speeds and steering angle.
+ * @param vx  Longitudinal speed [m/s]
+ * @param wz  Yaw rate [rad/s]
+ */
+void motor_control_set_velocity(float vx, float wz);
+
+/**
+ * Enable or disable motor output.
+ * When disabled, motors are stopped and speeds zeroed.
+ * @param enable  true to enable, false to disable
+ */
+void motor_control_enable(bool enable);
+
+/** Stop all motors and center steering. Keeps enabled state unchanged. */
+void motor_control_stop(void);
+
+/** Returns true if motors are currently enabled. */
+bool motor_control_is_enabled(void);
+
+/**
+ * Apply current motor commands to hardware.
+ * Call once per control loop iteration. Only actuates if enabled and
+ * safety is OK; otherwise stops motors.
+ */
+void motor_control_apply(void);
+
+/** Get current left motor speed command [-100..100]. */
+int8_t motor_control_get_speed_left(void);
+
+/** Get current right motor speed command [-100..100]. */
+int8_t motor_control_get_speed_right(void);
+
+/** Get current target steering angle [rad]. */
+float motor_control_get_steer_rad(void);
+
+#endif /* MOTOR_CONTROL_H */

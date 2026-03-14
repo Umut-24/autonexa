@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
 import 'joystick_widget.dart';
 import 'pico_udp_service.dart';
 
@@ -8,7 +10,9 @@ import 'pico_udp_service.dart';
 ///   - Normal mode: fixed layout (NO scrolling), connection bar, joystick, telemetry, e-stop
 ///   - Fullscreen mode: landscape, fullscreen, joystick + minimal HUD only
 class ControlTab extends StatefulWidget {
-  const ControlTab({super.key});
+  final String? bridgeUrl;
+
+  const ControlTab({super.key, this.bridgeUrl});
 
   @override
   State<ControlTab> createState() => _ControlTabState();
@@ -361,6 +365,13 @@ class _ControlTabState extends State<ControlTab> {
                   _buildEmergencyStop(),
 
                   const SizedBox(height: 8),
+
+                  // Nav2 Goal button (optional, only if bridge URL set)
+                  if (widget.bridgeUrl != null)
+                    _buildNavGoalButton(),
+
+                  if (widget.bridgeUrl != null)
+                    const SizedBox(height: 8),
                 ],
               ),
             ),
@@ -641,6 +652,80 @@ class _ControlTabState extends State<ControlTab> {
             ),
             Text(label, style: TextStyle(fontSize: 9, color: Colors.grey[600])),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _showNavGoalDialog() {
+    final xCtrl = TextEditingController();
+    final yCtrl = TextEditingController();
+    final yawCtrl = TextEditingController(text: '0');
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Send Nav2 Goal'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: xCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+              decoration: const InputDecoration(labelText: 'X (meters)'),
+            ),
+            TextField(
+              controller: yCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+              decoration: const InputDecoration(labelText: 'Y (meters)'),
+            ),
+            TextField(
+              controller: yawCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+              decoration: const InputDecoration(labelText: 'Yaw (radians, default 0)'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final x = double.tryParse(xCtrl.text);
+              final y = double.tryParse(yCtrl.text);
+              final yaw = double.tryParse(yawCtrl.text) ?? 0.0;
+              if (x == null || y == null) return;
+              Navigator.pop(ctx);
+              try {
+                await http.post(
+                  Uri.parse('${widget.bridgeUrl}/api/nav_goal'),
+                  headers: {'Content-Type': 'application/json'},
+                  body: jsonEncode({'x': x, 'y': y, 'yaw': yaw}),
+                ).timeout(const Duration(seconds: 3));
+              } catch (_) {}
+            },
+            child: const Text('Send Goal'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNavGoalButton() {
+    return SizedBox(
+      width: double.infinity,
+      height: 40,
+      child: ElevatedButton.icon(
+        onPressed: _showNavGoalDialog,
+        icon: const Icon(Icons.navigation, size: 18),
+        label: const Text('Send Nav2 Goal'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: const Color(0xFF0F3460),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
         ),
       ),
     );

@@ -9,7 +9,7 @@
  *   - Encoder reading from driver board
  *   - Safety watchdog with command timeout and E-STOP
  *
- * Phase 2 (future): micro-ROS executor replaces serial CLI
+ * Phase 2: micro-ROS executor replaces serial CLI (compile with -DUSE_MICRO_ROS)
  */
 
 #include <stdio.h>
@@ -26,12 +26,13 @@
 #include "hiwonder_driver.h"
 #include "safety.h"
 #include "ackermann.h"
+#include "motor_control.h"
+
+#ifdef USE_MICRO_ROS
+#include "uros_transport.h"
+#endif
 
 /* ── State ───────────────────────────────────────────────────── */
-static float target_steer_rad = 0.0f;
-static int8_t speed_left      = 0;
-static int8_t speed_right     = 0;
-
 static int32_t encoder_left   = 0;
 static int32_t encoder_right  = 0;
 static int32_t prev_enc_left  = 0;
@@ -39,10 +40,15 @@ static int32_t prev_enc_right = 0;
 
 /* Odometry */
 static odom_state_t odom;
-static bool motors_enabled = false;
 
-/* Telemetry counter */
+/* Telemetry / loop counter */
 static uint32_t loop_count = 0;
+
+#ifndef USE_MICRO_ROS
+/* ── Serial-only state (bench-test raw speed commands) ──────── */
+static float   target_steer_rad = 0.0f;
+static int8_t  speed_left       = 0;
+static int8_t  speed_right      = 0;
 
 /* ── Serial command buffer ───────────────────────────────────── */
 #define SERIAL_BUF_SIZE 128
@@ -71,7 +77,7 @@ static void process_serial_command(const char *cmd)
     /* === MOTOR (I2C via Hiwonder driver board) === */
     else if (strncmp(cmd, "SPEED_L ", 8) == 0) {
         speed_left = (int8_t)atoi(cmd + 8);
-        if (motors_enabled && safety_is_ok()) {
+        if (motor_control_is_enabled() && safety_is_ok()) {
             hiwonder_set_speed(MOTOR_CHANNEL_LEFT, speed_left);
         }
         safety_feed_watchdog();
@@ -79,7 +85,7 @@ static void process_serial_command(const char *cmd)
     }
     else if (strncmp(cmd, "SPEED_R ", 8) == 0) {
         speed_right = (int8_t)atoi(cmd + 8);
-        if (motors_enabled && safety_is_ok()) {
+        if (motor_control_is_enabled() && safety_is_ok()) {
             hiwonder_set_speed(MOTOR_CHANNEL_RIGHT, speed_right);
         }
         safety_feed_watchdog();
@@ -89,7 +95,7 @@ static void process_serial_command(const char *cmd)
         int8_t spd = (int8_t)atoi(cmd + 6);
         speed_left  = spd;
         speed_right = spd;
-        if (motors_enabled && safety_is_ok()) {
+        if (motor_control_is_enabled() && safety_is_ok()) {
             hiwonder_set_speeds(speed_left, speed_right);
         }
         safety_feed_watchdog();
@@ -106,28 +112,12 @@ static void process_serial_command(const char *cmd)
     else if (strncmp(cmd, "VEL ", 4) == 0) {
         float vx, wz;
         if (sscanf(cmd + 4, "%f %f", &vx, &wz) == 2) {
-            float steer, v_l, v_r;
-            ackermann_inverse(vx, wz, &steer, &v_l, &v_r);
-
-            /* Convert m/s to driver board speed units (approx) */
-            /* max speed ≈ 0.3 m/s → scale to 100 */
-            float scale = 100.0f / 0.3f;
-            speed_left  = (int8_t)(v_l * scale);
-            speed_right = (int8_t)(v_r * scale);
-            target_steer_rad = steer;
-
-            if (speed_left  >  100) speed_left  =  100;
-            if (speed_left  < -100) speed_left  = -100;
-            if (speed_right >  100) speed_right =  100;
-            if (speed_right < -100) speed_right = -100;
-
-            servo_set_angle(steer);
-            if (motors_enabled && safety_is_ok()) {
-                hiwonder_set_speeds(speed_left, speed_right);
-            }
+            motor_control_set_velocity(vx, wz);
             safety_feed_watchdog();
             printf("OK VEL vx=%.3f wz=%.3f → steer=%.3f L=%d R=%d\n",
-                   vx, wz, steer, speed_left, speed_right);
+                   vx, wz, motor_control_get_steer_rad(),
+                   motor_control_get_speed_left(),
+                   motor_control_get_speed_right());
         } else {
             printf("ERR VEL usage: VEL <vx_mps> <wz_radps>\n");
         }
@@ -205,8 +195,7 @@ static void process_serial_command(const char *cmd)
     /* === SAFETY === */
     else if (strcmp(cmd, "ESTOP") == 0) {
         safety_estop_activate();
-        speed_left  = 0;
-        speed_right = 0;
+        motor_control_stop();
         printf("OK ESTOP\n");
     }
     else if (strcmp(cmd, "ESTOP_CLEAR") == 0) {
@@ -216,24 +205,17 @@ static void process_serial_command(const char *cmd)
 
     /* === ENABLE / DISABLE === */
     else if (strcmp(cmd, "ENABLE") == 0) {
-        motors_enabled = true;
-        safety_feed_watchdog();
+        motor_control_enable(true);
         printf("OK ENABLE\n");
     }
     else if (strcmp(cmd, "DISABLE") == 0) {
-        motors_enabled = false;
-        speed_left  = 0;
-        speed_right = 0;
-        hiwonder_stop_all();
+        motor_control_enable(false);
         printf("OK DISABLE\n");
     }
 
     /* === STOP === */
     else if (strcmp(cmd, "STOP") == 0) {
-        speed_left  = 0;
-        speed_right = 0;
-        hiwonder_stop_all();
-        servo_center();
+        motor_control_stop();
         printf("OK STOP\n");
     }
 
@@ -243,11 +225,11 @@ static void process_serial_command(const char *cmd)
                "speed_L=%d speed_R=%d steer=%.3f "
                "enc_L=%ld enc_R=%ld "
                "odom x=%.3f y=%.3f yaw=%.2f\n",
-               motors_enabled,
+               motor_control_is_enabled(),
                safety_is_estopped(),
                safety_is_timed_out(),
-               speed_left,
-               speed_right,
+               motor_control_get_speed_left(),
+               motor_control_get_speed_right(),
                servo_get_angle(),
                (long)encoder_left,
                (long)encoder_right,
@@ -304,8 +286,8 @@ static void print_telemetry(void)
 
     printf("TEL %lu,%d,%d,%.3f,%ld,%ld,%.3f,%.3f,%.2f,%d,%d\n",
            (unsigned long)to_ms_since_boot(get_absolute_time()),
-           speed_left,
-           speed_right,
+           motor_control_get_speed_left(),
+           motor_control_get_speed_right(),
            servo_get_angle(),
            (long)encoder_left,
            (long)encoder_right,
@@ -314,15 +296,19 @@ static void print_telemetry(void)
            safety_is_timed_out());
 }
 
+#endif /* !USE_MICRO_ROS */
+
 /* ══════════════════════════════════════════════════════════════
  * MAIN
  * ══════════════════════════════════════════════════════════════ */
 
 int main(void)
 {
+#ifndef USE_MICRO_ROS
     /* ── Init Pico stdlib (USB serial) ───────────────────────── */
     stdio_init_all();
-    
+#endif
+
     /* Pre-init Heartbeat LED to verify power and boot */
     gpio_init(HEARTBEAT_LED_PIN);
     gpio_set_dir(HEARTBEAT_LED_PIN, GPIO_OUT);
@@ -332,7 +318,8 @@ int main(void)
         gpio_put(HEARTBEAT_LED_PIN, 0);
         sleep_ms(100);
     }
-    
+
+#ifndef USE_MICRO_ROS
     sleep_ms(2000);  /* wait for USB serial */
 
     printf("\n");
@@ -343,23 +330,30 @@ int main(void)
     printf("║  Control freq: %d Hz                      ║\n", CONTROL_FREQ_HZ);
     printf("╚═══════════════════════════════════════════╝\n");
     printf("Type HELP for commands.\n\n");
+#endif
 
     /* ── Init subsystems ─────────────────────────────────────── */
     servo_init();
-    printf("[INIT] Servo OK (GPIO %d, center=%d µs)\n",
-           SERVO_PIN, SERVO_PWM_CENTER_US);
-
-    bool driver_ok = hiwonder_driver_init();
-    printf("[INIT] Motor driver: %s\n", driver_ok ? "OK" : "NOT FOUND");
-
+    hiwonder_driver_init();
     safety_init();
-    printf("[INIT] Safety watchdog OK (timeout=%d ms)\n", CMD_TIMEOUT_MS);
-
     ackermann_odom_reset(&odom);
-    printf("[INIT] Ackermann kinematics ready\n");
-    printf("[INIT] Wheelbase=%.2fm Track=%.2fm MaxSteer=%.1f°\n",
-           WHEELBASE_M, TRACK_WIDTH_M, MAX_STEERING_RAD * 180.0f / 3.14159f);
-    printf("\n");
+
+#ifdef USE_MICRO_ROS
+    /* micro-ROS transport init — blocks until agent is found */
+    while (!uros_init()) {
+        /* Blink LED fast while waiting for agent */
+        gpio_put(HEARTBEAT_LED_PIN, 1);
+        sleep_ms(50);
+        gpio_put(HEARTBEAT_LED_PIN, 0);
+        sleep_ms(50);
+    }
+#endif
+
+    /* ── Rate dividers for micro-ROS publishing ──────────────── */
+#ifdef USE_MICRO_ROS
+    const uint32_t odom_divider  = CONTROL_FREQ_HZ / UROS_ODOM_PUB_RATE_HZ;   /* 50/20 = every 2-3 loops */
+    const uint32_t joint_divider = CONTROL_FREQ_HZ / UROS_JOINT_PUB_RATE_HZ;   /* 50/10 = every 5 loops  */
+#endif
 
     /* ── Main control loop ───────────────────────────────────── */
     absolute_time_t next_tick = get_absolute_time();
@@ -382,6 +376,7 @@ int main(void)
         prev_enc_left  = encoder_left;
         prev_enc_right = encoder_right;
 
+        float v_l = 0.0f, v_r = 0.0f;
         if (delta_l != 0 || delta_r != 0) {
             /* Convert encoder ticks to distance */
             float dist_l = (float)delta_l / (float)ENCODER_EDGES_PER_REV
@@ -389,8 +384,8 @@ int main(void)
             float dist_r = (float)delta_r / (float)ENCODER_EDGES_PER_REV
                            * 2.0f * 3.14159f * WHEEL_RADIUS_M;
 
-            float v_l = dist_l / CONTROL_DT_S;
-            float v_r = dist_r / CONTROL_DT_S;
+            v_l = dist_l / CONTROL_DT_S;
+            v_r = dist_r / CONTROL_DT_S;
 
             ackermann_forward(v_l, v_r, servo_get_angle(),
                               CONTROL_DT_S, &odom);
@@ -399,16 +394,27 @@ int main(void)
         /* 3) Safety check */
         safety_update();
 
-        /* 4) Apply motor commands if enabled */
-        if (motors_enabled && safety_is_ok()) {
-            hiwonder_set_speeds(speed_left, speed_right);
+        /* 4) Apply motor commands */
+        motor_control_apply();
+
+#ifdef USE_MICRO_ROS
+        /* 5a) micro-ROS: spin executor + publish */
+        uros_spin_some();
+
+        if (loop_count % odom_divider == 0) {
+            uros_publish_odom(&odom);
         }
-
-        /* 5) Poll serial */
+        if (loop_count % joint_divider == 0) {
+            /* Convert wheel linear speed to angular speed (rad/s) */
+            float wl_rads = (WHEEL_RADIUS_M > 0.001f) ? v_l / WHEEL_RADIUS_M : 0.0f;
+            float wr_rads = (WHEEL_RADIUS_M > 0.001f) ? v_r / WHEEL_RADIUS_M : 0.0f;
+            uros_publish_joint_state(wl_rads, wr_rads, servo_get_angle());
+        }
+#else
+        /* 5b) ASCII serial: poll commands + print telemetry */
         poll_serial();
-
-        /* 6) Telemetry */
         print_telemetry();
+#endif
     }
 
     return 0;

@@ -280,14 +280,25 @@ def generate_frames():
                     marker_y_cm = tvec[2][0] * DISTANCE_SCALE
                     bearing_deg = np.degrees(np.arctan2(tvec[0][0], tvec[2][0]))
                     
-                    # Store this marker's position
+                    # Store this marker's position.
+                    # NOTE: These are camera-relative coordinates and will
+                    # shift every frame as the robot moves. For stable
+                    # map-frame positions, use the ROS2 bridge which
+                    # transforms detections via AMCL pose.
                     with spots_lock:
-                        parking_spots[marker_id] = {
-                            'x': marker_x_cm,
-                            'y': marker_y_cm,
-                            'bearing': bearing_deg,
-                            'distance': distance_cm,
-                        }
+                        existing = parking_spots.get(marker_id)
+                        if existing and existing.get('map_frame'):
+                            # Preserve map-frame position set by ROS2 bridge
+                            existing['bearing'] = bearing_deg
+                            existing['distance'] = distance_cm
+                        else:
+                            parking_spots[marker_id] = {
+                                'x': marker_x_cm,
+                                'y': marker_y_cm,
+                                'bearing': bearing_deg,
+                                'distance': distance_cm,
+                                'map_frame': False,
+                            }
                     
                     # If this is our target, highlight and update guidance
                     if marker_id == TARGET_ID:
@@ -305,15 +316,19 @@ def generate_frames():
                         cv2.rectangle(frame, (int(c[0][0]), int(c[0][1])),
                                     (int(c[2][0]), int(c[2][1])), (0, 255, 0), 2)
 
-        # Update robot pose estimate (simple: use target marker as reference)
-        if target_x_cm is not None and distance_cm < 300:  # Within reasonable range
+        # Robot pose: use ROS2 bridge (/api/pose) if available,
+        # fall back to marker-based estimate only as last resort.
+        # The marker-relative projection below is a rough camera-only
+        # estimate — it is intentionally NOT used when the ROS2 bridge
+        # is running (which provides AMCL/EKF localisation).
+        if target_x_cm is not None and distance_cm < 300:
             with robot_pose_lock:
-                # Very simple odometry: use marker as anchor point
-                # In production: use wheel encoders + IMU
-                robot_pose['x_cm'] = TESTBED_WIDTH_CM / 2 - target_x_cm
-                robot_pose['y_cm'] = TESTBED_HEIGHT_CM / 2 + distance_cm
-                robot_pose['theta_deg'] = bearing
-                robot_pose['timestamp'] = time.time()
+                # Only update if no external pose source has written recently
+                if time.time() - robot_pose.get('_ext_stamp', 0) > 2.0:
+                    robot_pose['x_cm'] = TESTBED_WIDTH_CM / 2 - target_x_cm
+                    robot_pose['y_cm'] = TESTBED_HEIGHT_CM / 2 + distance_cm
+                    robot_pose['theta_deg'] = bearing
+                    robot_pose['timestamp'] = time.time()
 
         # UI Display
         lines = [(f"TARGET ID: {TARGET_ID}", (200, 200, 200))]

@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Team-B integration launch:
-- cmd_vel_to_pico_bridge: Nav2 cmd stream -> Pico command stream
-- pico_joint_feedback_to_odom: Pico joint feedback -> odometry topic
+RPi5 ↔ Pico bridge launch (micro-ROS):
+- micro_ros_agent: XRCE-DDS agent over USB serial
+- cmd_vel_to_pico_bridge: Nav2 cmd_vel -> rate-limited /pico/control_cmd + /pico/enable
+
+The Pico runs micro-ROS firmware and subscribes/publishes directly.
+No serial transceiver or odom conversion nodes are needed.
 
 Usage:
   ros2 launch parking_system rpi5_pico_bridge.launch.py
+  ros2 launch parking_system rpi5_pico_bridge.launch.py pico_serial_port:=/dev/ttyACM1
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -17,11 +21,19 @@ from launch_ros.actions import Node
 def generate_launch_description():
     cmd_vel_topic_arg = DeclareLaunchArgument('cmd_vel_topic', default_value='/cmd_vel')
     control_cmd_topic_arg = DeclareLaunchArgument('control_cmd_topic', default_value='/pico/control_cmd')
-    joint_feedback_topic_arg = DeclareLaunchArgument('joint_feedback_topic', default_value='/pico/joint_feedback')
-    odom_topic_arg = DeclareLaunchArgument('odom_topic', default_value='/pico/odom')
     serial_port_arg = DeclareLaunchArgument('pico_serial_port', default_value='/dev/ttyACM0')
-    baud_rate_arg = DeclareLaunchArgument('pico_baud_rate', default_value='115200')
 
+    # micro-ROS agent — bridges XRCE-DDS over USB serial to ROS2 DDS
+    micro_ros_agent = ExecuteProcess(
+        cmd=[
+            'ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
+            'serial', '--dev', LaunchConfiguration('pico_serial_port'),
+            '-b', '115200',
+        ],
+        output='screen',
+    )
+
+    # Bridge: rate/accel limits on Nav2 cmd_vel, publishes TwistStamped + Bool enable
     bridge = Node(
         package='parking_system',
         executable='cmd_vel_to_pico_bridge.py',
@@ -39,39 +51,10 @@ def generate_launch_description():
         }],
     )
 
-    serial_transceiver = Node(
-        package='parking_system',
-        executable='pico_serial_transceiver.py',
-        name='pico_serial_transceiver',
-        output='screen',
-        parameters=[{
-            'serial_port': LaunchConfiguration('pico_serial_port'),
-            'baud_rate': LaunchConfiguration('pico_baud_rate'),
-        }],
-    )
-
-    feedback_to_odom = Node(
-        package='parking_system',
-        executable='pico_joint_feedback_to_odom.py',
-        name='pico_joint_feedback_to_odom',
-        output='screen',
-        parameters=[{
-            'joint_feedback_topic': LaunchConfiguration('joint_feedback_topic'),
-            'odom_topic': LaunchConfiguration('odom_topic'),
-            'wheel_radius_m': 0.0325,
-            'wheelbase_m': 0.20,
-        }],
-    )
-
     return LaunchDescription([
         cmd_vel_topic_arg,
         control_cmd_topic_arg,
-        joint_feedback_topic_arg,
-        odom_topic_arg,
         serial_port_arg,
-        baud_rate_arg,
+        micro_ros_agent,
         bridge,
-        serial_transceiver,
-        feedback_to_odom,
     ])
-

@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-RPi5 Team-B bridge node:
+RPi5 bridge node:
 - Consumes Nav2 velocity commands (/cmd_vel)
 - Applies output rate + acceleration limiting + timeout safety
 - Publishes normalized control command for Pico as:
   * geometry_msgs/TwistStamped (/pico/control_cmd)
-  * std_msgs/String JSON mirror (/pico/control_cmd_json)
+  * std_msgs/Bool enable state (/pico/enable)
   * std_msgs/Bool heartbeat (/pico/heartbeat)
 
-This keeps transport decoupled: serial/micro-ROS transport can subscribe to one of these topics.
+The Pico subscribes to these topics directly via micro-ROS (XRCE-DDS over USB serial).
 """
 
-import json
 from dataclasses import dataclass
 
 import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from geometry_msgs.msg import Twist, TwistStamped
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool
 
 
 @dataclass
@@ -34,7 +33,7 @@ class CmdVelToPicoBridge(Node):
         # Topics
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
         self.declare_parameter('control_cmd_topic', '/pico/control_cmd')
-        self.declare_parameter('control_cmd_json_topic', '/pico/control_cmd_json')
+        self.declare_parameter('enable_topic', '/pico/enable')
         self.declare_parameter('heartbeat_topic', '/pico/heartbeat')
 
         # Timing and safety
@@ -49,7 +48,7 @@ class CmdVelToPicoBridge(Node):
 
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').value
         self.control_cmd_topic = self.get_parameter('control_cmd_topic').value
-        self.control_cmd_json_topic = self.get_parameter('control_cmd_json_topic').value
+        self.enable_topic = self.get_parameter('enable_topic').value
         self.heartbeat_topic = self.get_parameter('heartbeat_topic').value
 
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
@@ -66,7 +65,7 @@ class CmdVelToPicoBridge(Node):
 
         self.cmd_sub = self.create_subscription(Twist, self.cmd_vel_topic, self.on_cmd_vel, 20)
         self.cmd_pub = self.create_publisher(TwistStamped, self.control_cmd_topic, 20)
-        self.json_pub = self.create_publisher(String, self.control_cmd_json_topic, 20)
+        self.enable_pub = self.create_publisher(Bool, self.enable_topic, 20)
         self.heartbeat_pub = self.create_publisher(Bool, self.heartbeat_topic, 5)
 
         dt = 1.0 / max(1.0, self.publish_rate_hz)
@@ -103,6 +102,7 @@ class CmdVelToPicoBridge(Node):
         self.output.vx = self.apply_rate_limit(self.output.vx, desired.vx, self.max_ax * dt)
         self.output.wz = self.apply_rate_limit(self.output.wz, desired.wz, self.max_aw * dt)
 
+        # Publish TwistStamped control command
         cmd_msg = TwistStamped()
         cmd_msg.header.stamp = now.to_msg()
         cmd_msg.header.frame_id = 'base_link'
@@ -110,17 +110,12 @@ class CmdVelToPicoBridge(Node):
         cmd_msg.twist.angular.z = self.output.wz
         self.cmd_pub.publish(cmd_msg)
 
-        mode = 'AUTO' if not command_stale else 'SAFE_STOP'
-        json_msg = String()
-        json_msg.data = json.dumps({
-            'stamp_ns': int(now.nanoseconds),
-            'vx_mps': self.output.vx,
-            'wz_radps': self.output.wz,
-            'mode': mode,
-            'enable': not command_stale,
-        })
-        self.json_pub.publish(json_msg)
+        # Publish enable state
+        enable_msg = Bool()
+        enable_msg.data = not command_stale
+        self.enable_pub.publish(enable_msg)
 
+        # Publish heartbeat
         hb = Bool()
         hb.data = True
         self.heartbeat_pub.publish(hb)

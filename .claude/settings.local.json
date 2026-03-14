@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /c/GitHub/autonexa/pico_firmware/src -name \"*.c\" | xargs wc -l)",
+      "Bash(git -C /c/GitHub/autonexa log --oneline | head -20)",
+      "Bash(find /c/GitHub/autonexa -name \"*ekf*\" -o -name \"*robot_localization*\" 2>/dev/null | head -20)",
+      "Bash(find /c/GitHub/autonexa -name \"*ekf*\" -o -name \"*localization*\" -type f 2>/dev/null | head -20)",
+      "Bash(find /c/GitHub/autonexa -name \"*.yaml\" -path \"*/config/*\" -type f 2>/dev/null | grep -E \"\\(nav2|ekf|robot_state\\)\" | head -10)",
+      "Bash(grep -r \"pico\\\\|Pico\" /c/GitHub/autonexa/src/parking_system/launch/*.py 2>/dev/null | head -30)",
+      "Bash(find /c/GitHub/autonexa -name \"*ekf*\" -o -name \"*localization*\" 2>/dev/null | grep -E \"\\\\.\\(yaml|xml|launch|py\\)$\")",
+      "Bash(grep -l \"robot_localization\\\\|ekf\" /c/GitHub/autonexa/src/parking_system/config/*.yaml 2>/dev/null | head -5)",
+      "Bash(grep -n \"ekf\\\\|robot_localization\" /c/GitHub/autonexa/src/parking_system/launch/*.py)",
+      "Bash(git submodule:*)",
+      "Bash(find /c/GitHub/autonexa/aruco_project/mobile_app -name \"*.dart\" -type f 2>/dev/null | head -20)"
+    ]
+  }
+}

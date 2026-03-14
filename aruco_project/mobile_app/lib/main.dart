@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'control_tab.dart';
+import 'lidar_map_view.dart';
 
 void main() {
   runApp(const AutoNexaApp());
@@ -84,12 +85,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       _send('/set_id/$_preSelectedId');
     }
 
-    // start polling state
+    // start polling state from ROS2 bridge
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) async {
       if (_baseUrl == null) return;
       try {
-        final r = await http.get(Uri.parse('$_baseUrl/state')).timeout(const Duration(seconds: 1));
+        final r = await http.get(Uri.parse('$_baseUrl/api/status')).timeout(const Duration(seconds: 1));
         if (r.statusCode == 200) {
           final newState = Map<String, dynamic>.from(jsonDecodeSafe(r.body));
           setState(() {
@@ -108,16 +109,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       } catch (_) {}
     });
 
-    // if webview available, load index
+    // Load camera feed via webview (MJPEG from bridge /video_feed)
     if (_baseUrl != null) {
       try {
+        final videoHtml = 'data:text/html,<html><body style="margin:0;background:black">'
+            '<img src="$_baseUrl/video_feed" style="width:100%;height:100%;object-fit:contain" />'
+            '</body></html>';
         if (_webViewController == null) {
           final c = WebViewController();
           c.setJavaScriptMode(JavaScriptMode.unrestricted);
-          c.loadRequest(Uri.parse('$_baseUrl/'));
+          c.loadRequest(Uri.parse(videoHtml));
           _webViewController = c;
         } else {
-          _webViewController!.loadRequest(Uri.parse('$_baseUrl/'));
+          _webViewController!.loadRequest(Uri.parse(videoHtml));
         }
       } catch (_) {}
     }
@@ -315,7 +319,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
           _buildMapTab(),
           
           // ========== TAB 4: CONTROL (ACKERMANN) ==========
-          const ControlTab(),
+          ControlTab(bridgeUrl: _baseUrl),
           
           // ========== TAB 5: SETTINGS ==========
           _buildSettingsTab(),
@@ -425,7 +429,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Connection info card
+            // ROS2 Bridge Status card
             Card(
               color: Colors.white10,
               child: Padding(
@@ -434,7 +438,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Connection Status',
+                      'System Status',
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     const SizedBox(height: 12),
@@ -458,13 +462,19 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 12),
+                    _buildTelemetryRow('Pose Source', _state['pose']?['source']?.toString() ?? '-'),
+                    _buildTelemetryRow('Robot X', '${(_state['pose']?['x_m'] as num?)?.toStringAsFixed(2) ?? '-'} m'),
+                    _buildTelemetryRow('Robot Y', '${(_state['pose']?['y_m'] as num?)?.toStringAsFixed(2) ?? '-'} m'),
+                    _buildTelemetryRow('Scan Points', _state['scan']?['count']?.toString() ?? '-'),
+                    _buildTelemetryRow('Map', _state['map'] != null ? '${_state['map']?['width']}x${_state['map']?['height']}' : 'No map'),
                   ],
                 ),
               ),
             ),
             const SizedBox(height: 12),
 
-            // ID Selection card
+            // ArUco Detection card
             Card(
               color: Colors.white10,
               child: Padding(
@@ -473,7 +483,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Select Detection ID',
+                      'ArUco Detection',
                       style: Theme.of(context).textTheme.titleMedium,
                     ),
                     const SizedBox(height: 12),
@@ -519,93 +529,30 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
             ),
             const SizedBox(height: 12),
 
-            // Telemetry card
-            Card(
-              color: Colors.white10,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          'Telemetry',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        if (_allIdsMode)
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.green,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              'All-IDs: ${_allIdsTelemetry.length}',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    _buildTelemetryRow('Target ID', _state['target_id']?.toString() ?? '-'),
-                    _buildTelemetryRow('Distance', '${_state['distance_cm'] ?? '-'} cm'),
-                    _buildTelemetryRow('Bearing', '${_state['bearing'] ?? '-'}°'),
-                    if (_allIdsMode && _allIdsTelemetry.isNotEmpty) ...[
+            // Markers card
+            if (_state['markers'] != null && (_state['markers'] as Map).isNotEmpty)
+              Card(
+                color: Colors.white10,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Visible Markers',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
                       const SizedBox(height: 12),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.teal,
-                        ),
-                        onPressed: _showAllIdsTelemetry,
-                        child: Text(
-                          'View All-IDs Telemetry (${_allIdsTelemetry.length})',
+                      ...(_state['markers'] as Map).entries.map((e) =>
+                        _buildTelemetryRow(
+                          'ID ${e.key}',
+                          '${(e.value['distance_m'] as num?)?.toStringAsFixed(2) ?? '-'}m / ${(e.value['bearing_deg'] as num?)?.toStringAsFixed(0) ?? '-'}°',
                         ),
                       ),
                     ],
-                  ],
+                  ),
                 ),
               ),
-            ),
-            const SizedBox(height: 12),
-
-            // All-IDs Mode card
-            Card(
-              color: Colors.white10,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'All-IDs Mode',
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                    const SizedBox(height: 12),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _allIdsMode ? Colors.green : Colors.grey,
-                      ),
-                      onPressed: _toggleAllIdsMode,
-                      child: Text(
-                        _allIdsMode ? 'All-IDs Mode: ON' : 'Turn On All-IDs Mode',
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      _allIdsMode
-                          ? 'Tracking all visible markers and storing telemetry'
-                          : 'Enable to track all markers simultaneously',
-                      style: const TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                  ],
-                ),
-              ),
-            ),
           ],
         ),
       ),
@@ -614,50 +561,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
 
   // ==================== TAB: MAP VIEW ====================
   Widget _buildMapTab() {
-    return SafeArea(
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Card(
-            color: Colors.white10,
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.map, size: 64, color: Colors.grey),
-                  const SizedBox(height: 16),
-                  Text(
-                    'Map View',
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    'Map visualization with occupancy grid and robot tracking coming soon.\n\nTo enable: Update enhanced server and integrate map endpoints.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: Colors.grey),
-                  ),
-                  const SizedBox(height: 16),
-                  if (_baseUrl != null)
-                    ElevatedButton.icon(
-                      icon: const Icon(Icons.language),
-                      label: const Text('Open Server Dashboard'),
-                      onPressed: () {
-                        if (_webViewController != null) {
-                          _webViewController!.loadRequest(
-                            Uri.parse('$_baseUrl/'),
-                          );
-                          _tabController.animateTo(0);
-                        }
-                      },
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
+    if (_baseUrl == null) {
+      return const SafeArea(
+        child: Center(child: Text('Connect from Settings tab')),
+      );
+    }
+    return LidarMapView(baseUrl: _baseUrl!);
   }
 
   // ==================== TAB: SETTINGS ====================

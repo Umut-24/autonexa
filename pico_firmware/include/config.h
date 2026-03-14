@@ -56,6 +56,14 @@
 /* ---------- Serial ---------- */
 #define SERIAL_BAUD          115200
 
+/* ---------- micro-ROS ---------- */
+#ifdef USE_MICRO_ROS
+#define UROS_ODOM_PUB_RATE_HZ    20
+#define UROS_JOINT_PUB_RATE_HZ   10
+#define UROS_NODE_NAME            "pico_controller"
+#define UROS_DOMAIN_ID            0
+#endif
+
 /* ---------- Operating Modes ---------- */
 typedef enum {
     MODE_MANUAL  = 0,
