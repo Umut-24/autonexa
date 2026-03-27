@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoNexa Subsystem Test Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #111827;
+      --muted: #1f2937;
+      --text: #e5e7eb;
+      --accent: #22d3ee;
+      --accent2: #a78bfa;
+      --ok: #34d399;
+      --warn: #f59e0b;
+      --bad: #f87171;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: linear-gradient(160deg, #020617 0%, #111827 60%, #0f172a 100%);
+      color: var(--text);
+    }
+
+    .container {
+      width: min(1200px, 94vw);
+      margin: 24px auto 48px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .card {
+      background: rgba(17, 24, 39, 0.9);
+      border: 1px solid #334155;
+      border-radius: 14px;
+      padding: 16px;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+    }
+
+    h1, h2, h3 { margin: 0 0 10px; }
+    h1 { font-size: 1.55rem; }
+    h2 { font-size: 1.2rem; color: var(--accent); }
+
+    p.meta {
+      margin: 4px 0 0;
+      color: #cbd5e1;
+      font-size: 0.95rem;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    button {
+      border: 1px solid #475569;
+      background: #1e293b;
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+
+    button:hover { border-color: var(--accent); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 10px;
+      font-size: 0.92rem;
+    }
+
+    th, td {
+      border: 1px solid #334155;
+      padding: 8px;
+      text-align: left;
+      vertical-align: middle;
+    }
+
+    th {
+      background: #1e293b;
+      color: #bae6fd;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    td[contenteditable="true"] {
+      background: rgba(15, 23, 42, 0.75);
+      outline: none;
+    }
+
+    td[contenteditable="true"]:focus {
+      box-shadow: inset 0 0 0 2px var(--accent2);
+      background: rgba(30, 41, 59, 0.95);
+    }
+
+    .table-wrap {
+      max-height: 280px;
+      overflow: auto;
+      border: 1px solid #334155;
+      border-radius: 10px;
+    }
+
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .kpi {
+      background: #0b1220;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .kpi small { color: #94a3b8; display: block; }
+    .kpi strong { font-size: 1.08rem; }
+
+    .chart-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    canvas {
+      width: 100% !important;
+      max-height: 300px;
+      background: #0b1220;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 8px;
+    }
+
+    .footnote {
+      color: #94a3b8;
+      font-size: 0.85rem;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <section class="card">
+      <h1>AutoNexa Test Data Dashboard</h1>
+      <p class="meta">Fill tables for battery, object detection, and control tests. Then click “Generate Graphs + KPIs”.</p>
+      <div class="controls">
+        <button onclick="generateAll()">Generate Graphs + KPIs</button>
+        <button onclick="saveData()">Save to Browser</button>
+        <button onclick="loadData()">Load Saved</button>
+        <button onclick="resetTables()">Reset Tables</button>
+      </div>
+      <p class="footnote">Tip: edit any table cell directly. Numeric cells are parsed automatically where possible.</p>
+    </section>
+
+    <section class="card">
+      <h2>1) Battery Test Data</h2>
+      <div class="table-wrap">
+        <table id="battery-table">
+          <thead>
+            <tr>
+              <th>Test ID</th>
+              <th>Time (s)</th>
+              <th>Voltage (V)</th>
+              <th>Current (A)</th>
+              <th>Battery Temp (°C)</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="kpis" id="battery-kpis"></div>
+      <div class="chart-grid">
+        <canvas id="battery-voltage-chart"></canvas>
+        <canvas id="battery-current-chart"></canvas>
+        <canvas id="battery-power-chart"></canvas>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>2) Object Detection (LiDAR) Test Data</h2>
+      <div class="table-wrap">
+        <table id="object-table">
+          <thead>
+            <tr>
+              <th>Test ID</th>
+              <th>Ground Truth Dist (m)</th>
+              <th>Detected Dist (m)</th>
+              <th>Angle (deg)</th>
+              <th>Detected? (1/0)</th>
+              <th>Latency (ms)</th>
+              <th>Surface Type</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="kpis" id="object-kpis"></div>
+      <div class="chart-grid">
+        <canvas id="object-error-chart"></canvas>
+        <canvas id="object-latency-chart"></canvas>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>3) Control Subsystem Test Data</h2>
+      <div class="table-wrap">
+        <table id="control-table">
+          <thead>
+            <tr>
+              <th>Test ID</th>
+              <th>Cmd Speed (m/s)</th>
+              <th>Measured Speed (m/s)</th>
+              <th>Cmd Steering (deg)</th>
+              <th>Measured Steering (deg)</th>
+              <th>Latency (ms)</th>
+              <th>Timeout Stop Delay (ms)</th>
+              <th>Left RPM</th>
+              <th>Right RPM</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="kpis" id="control-kpis"></div>
+      <div class="chart-grid">
+        <canvas id="control-speed-chart"></canvas>
+        <canvas id="control-steering-chart"></canvas>
+      </div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    const CHARTS = {};
+
+    function addRows(tableId, rowCount, seed = []) {
+      const body = document.querySelector(`#${tableId} tbody`);
+      body.innerHTML = '';
+      for (let i = 0; i < rowCount; i++) {
+        const tr = document.createElement('tr');
+        const row = seed[i] || [];
+        const cols = document.querySelectorAll(`#${tableId} thead th`).length;
+        for (let c = 0; c < cols; c++) {
+          const td = document.createElement('td');
+          td.contentEditable = 'true';
+          td.textContent = row[c] ?? '';
+          tr.appendChild(td);
+        }
+        body.appendChild(tr);
+      }
+    }
+
+    function tableData(tableId) {
+      const rows = Array.from(document.querySelectorAll(`#${tableId} tbody tr`));
+      return rows.map(row => Array.from(row.children).map(td => td.textContent.trim()));
+    }
+
+    function asNum(v) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    function mean(arr) {
+      const clean = arr.filter(v => Number.isFinite(v));
+      if (!clean.length) return null;
+      return clean.reduce((a, b) => a + b, 0) / clean.length;
+    }
+
+    function min(arr) {
+      const clean = arr.filter(v => Number.isFinite(v));
+      return clean.length ? Math.min(...clean) : null;
+    }
+
+    function max(arr) {
+      const clean = arr.filter(v => Number.isFinite(v));
+      return clean.length ? Math.max(...clean) : null;
+    }
+
+    function kpiCard(label, value) {
+      return `<div class="kpi"><small>${label}</small><strong>${value}</strong></div>`;
+    }
+
+    function destroyChart(id) {
+      if (CHARTS[id]) {
+        CHARTS[id].destroy();
+        delete CHARTS[id];
+      }
+    }
+
+    function makeLineChart(canvasId, labels, datasets, yLabel) {
+      destroyChart(canvasId);
+      CHARTS[canvasId] = new Chart(document.getElementById(canvasId), {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          interaction: { mode: 'nearest', intersect: false },
+          scales: {
+            x: { ticks: { color: '#cbd5e1' }, grid: { color: '#334155' } },
+            y: { title: { display: true, text: yLabel, color: '#cbd5e1' }, ticks: { color: '#cbd5e1' }, grid: { color: '#334155' } }
+          },
+          plugins: { legend: { labels: { color: '#e2e8f0' } } }
+        }
+      });
+    }
+
+    function generateBattery() {
+      const rows = tableData('battery-table');
+      const t = rows.map(r => asNum(r[1]));
+      const v = rows.map(r => asNum(r[2]));
+      const i = rows.map(r => asNum(r[3]));
+      const p = rows.map((r, idx) => {
+        const vv = v[idx]; const ii = i[idx];
+        return (vv !== null && ii !== null) ? vv * ii : null;
+      });
+
+      const kpis = document.getElementById('battery-kpis');
+      kpis.innerHTML = [
+        kpiCard('Min Voltage', fmt(min(v), 'V')),
+        kpiCard('Max Current', fmt(max(i), 'A')),
+        kpiCard('Avg Power', fmt(mean(p), 'W')),
+        kpiCard('Rows with Data', rows.filter(r => r.some(x => x !== '')).length)
+      ].join('');
+
+      const labels = t.map((x, idx) => x ?? idx);
+      makeLineChart('battery-voltage-chart', labels, [{ label: 'Voltage (V)', data: v, borderColor: '#22d3ee', pointRadius: 2 }], 'Voltage (V)');
+      makeLineChart('battery-current-chart', labels, [{ label: 'Current (A)', data: i, borderColor: '#f59e0b', pointRadius: 2 }], 'Current (A)');
+      makeLineChart('battery-power-chart', labels, [{ label: 'Power (W)', data: p, borderColor: '#a78bfa', pointRadius: 2 }], 'Power (W)');
+    }
+
+    function generateObject() {
+      const rows = tableData('object-table');
+      const gt = rows.map(r => asNum(r[1]));
+      const det = rows.map(r => asNum(r[2]));
+      const lat = rows.map(r => asNum(r[5]));
+      const found = rows.map(r => asNum(r[4]));
+      const err = rows.map((r, idx) => {
+        if (gt[idx] === null || det[idx] === null) return null;
+        return det[idx] - gt[idx];
+      });
+      const absErr = err.map(e => e === null ? null : Math.abs(e));
+
+      const detectionRate = (() => {
+        const valid = found.filter(v => v === 0 || v === 1);
+        if (!valid.length) return null;
+        return (valid.reduce((a, b) => a + b, 0) / valid.length) * 100;
+      })();
+
+      document.getElementById('object-kpis').innerHTML = [
+        kpiCard('MAE', fmt(mean(absErr), 'm')),
+        kpiCard('Max Abs Error', fmt(max(absErr), 'm')),
+        kpiCard('Detection Rate', detectionRate === null ? 'n/a' : `${detectionRate.toFixed(1)} %`),
+        kpiCard('Avg Latency', fmt(mean(lat), 'ms'))
+      ].join('');
+
+      const labels = gt.map((x, idx) => x ?? idx);
+      makeLineChart('object-error-chart', labels, [{ label: 'Distance Error (m)', data: err, borderColor: '#34d399', pointRadius: 3 }], 'Error (m)');
+      makeLineChart('object-latency-chart', labels, [{ label: 'Latency (ms)', data: lat, borderColor: '#f87171', pointRadius: 3 }], 'Latency (ms)');
+    }
+
+    function generateControl() {
+      const rows = tableData('control-table');
+      const cmdV = rows.map(r => asNum(r[1]));
+      const measV = rows.map(r => asNum(r[2]));
+      const cmdS = rows.map(r => asNum(r[3]));
+      const measS = rows.map(r => asNum(r[4]));
+      const latency = rows.map(r => asNum(r[5]));
+      const stopDelay = rows.map(r => asNum(r[6]));
+      const left = rows.map(r => asNum(r[7]));
+      const right = rows.map(r => asNum(r[8]));
+
+      const speedErr = rows.map((r, idx) => (cmdV[idx] !== null && measV[idx] !== null) ? measV[idx] - cmdV[idx] : null);
+      const steerErr = rows.map((r, idx) => (cmdS[idx] !== null && measS[idx] !== null) ? measS[idx] - cmdS[idx] : null);
+      const rpmMismatch = rows.map((r, idx) => {
+        if (left[idx] === null || right[idx] === null) return null;
+        const avg = (Math.abs(left[idx]) + Math.abs(right[idx])) / 2;
+        if (avg === 0) return 0;
+        return Math.abs(left[idx] - right[idx]) / avg * 100;
+      });
+
+      document.getElementById('control-kpis').innerHTML = [
+        kpiCard('Mean Speed Error', fmt(mean(speedErr), 'm/s')),
+        kpiCard('Mean Steering Error', fmt(mean(steerErr), 'deg')),
+        kpiCard('Avg Cmd->Act Latency', fmt(mean(latency), 'ms')),
+        kpiCard('Avg L/R RPM Mismatch', fmt(mean(rpmMismatch), '%')),
+        kpiCard('Avg Timeout Stop Delay', fmt(mean(stopDelay), 'ms'))
+      ].join('');
+
+      const labels = rows.map((_, idx) => idx + 1);
+      makeLineChart('control-speed-chart', labels,
+        [
+          { label: 'Cmd Speed', data: cmdV, borderColor: '#22d3ee', pointRadius: 2 },
+          { label: 'Measured Speed', data: measV, borderColor: '#34d399', pointRadius: 2 }
+        ],
+        'Speed (m/s)'
+      );
+
+      makeLineChart('control-steering-chart', labels,
+        [
+          { label: 'Cmd Steering', data: cmdS, borderColor: '#a78bfa', pointRadius: 2 },
+          { label: 'Measured Steering', data: measS, borderColor: '#f59e0b', pointRadius: 2 }
+        ],
+        'Steering (deg)'
+      );
+    }
+
+    function fmt(val, unit = '') {
+      if (val === null || Number.isNaN(val)) return 'n/a';
+      return `${val.toFixed(3)} ${unit}`.trim();
+    }
+
+    function generateAll() {
+      generateBattery();
+      generateObject();
+      generateControl();
+    }
+
+    function saveData() {
+      const payload = {
+        battery: tableData('battery-table'),
+        object: tableData('object-table'),
+        control: tableData('control-table')
+      };
+      localStorage.setItem('autonexa-subsystem-dashboard', JSON.stringify(payload));
+      alert('Saved locally in browser storage.');
+    }
+
+    function loadData() {
+      const raw = localStorage.getItem('autonexa-subsystem-dashboard');
+      if (!raw) {
+        alert('No saved data found.');
+        return;
+      }
+      const data = JSON.parse(raw);
+      addRows('battery-table', (data.battery || []).length || 12, data.battery || []);
+      addRows('object-table', (data.object || []).length || 12, data.object || []);
+      addRows('control-table', (data.control || []).length || 12, data.control || []);
+      generateAll();
+    }
+
+    function resetTables() {
+      if (!confirm('Reset all tables to default sample rows?')) return;
+      seedDefaults();
+      generateAll();
+    }
+
+    function seedDefaults() {
+      addRows('battery-table', 12, [
+        ['BAT-B2-T01', 0, 12.6, 0.9, 29, 'Idle baseline'],
+        ['BAT-B2-T01', 10, 12.4, 2.1, 30, 'Cruise'],
+        ['BAT-B2-T01', 20, 12.2, 3.4, 31, 'Steering load']
+      ]);
+      addRows('object-table', 12, [
+        ['OBJ-O1-T01', 0.5, 0.54, 0, 1, 65, 'Cardboard', ''],
+        ['OBJ-O1-T01', 1.0, 1.03, 10, 1, 68, 'Cardboard', ''],
+        ['OBJ-O1-T01', 1.5, 1.61, 20, 1, 71, 'Glossy', 'Slight reflection noise']
+      ]);
+      addRows('control-table', 12, [
+        ['CTRL-C3-T01', 0.20, 0.19, 0, 1, 48, 120, 92, 95, 'Straight'],
+        ['CTRL-C3-T01', 0.25, 0.23, 10, 11, 55, 118, 105, 112, 'Right turn'],
+        ['CTRL-C3-T01', 0.25, 0.21, -10, -8, 57, 121, 111, 103, 'Left turn']
+      ]);
+    }
+
+    seedDefaults();
+    generateAll();
+  </script>
+</body>
+</html>

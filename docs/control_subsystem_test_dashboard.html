@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoNexa Control Subsystem Test Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #131b2e;
+      --panel2: #1a2540;
+      --line: #34415f;
+      --text: #e7ecf8;
+      --muted: #a9b4cc;
+      --accent: #4dd0e1;
+      --accent2: #8f7cff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: linear-gradient(160deg, #090f1d 0%, #0b1020 50%, #111a30 100%);
+      color: var(--text);
+    }
+    .wrap {
+      width: min(1220px, 95vw);
+      margin: 22px auto 40px;
+      display: grid;
+      gap: 14px;
+    }
+    .card {
+      background: rgba(19, 27, 46, 0.95);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 8px 25px rgba(0,0,0,0.25);
+    }
+    h1 { margin: 0 0 8px; font-size: 1.5rem; }
+    h2 { margin: 0 0 8px; font-size: 1.15rem; color: var(--accent); }
+    p { margin: 6px 0; }
+    .muted { color: var(--muted); font-size: 0.93rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+    button {
+      border: 1px solid #486189;
+      background: var(--panel2);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 7px 12px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover { border-color: var(--accent); }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    th, td { border: 1px solid var(--line); padding: 7px; text-align: left; }
+    th { background: #1b2b4f; color: #bfe9ff; position: sticky; top: 0; }
+    td[contenteditable="true"] { background: #0f1830; }
+    td[contenteditable="true"]:focus { outline: none; box-shadow: inset 0 0 0 2px var(--accent2); }
+
+    .scroll { max-height: 285px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .kpi {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 9px;
+      background: #0e1730;
+    }
+    .kpi small { color: var(--muted); display: block; }
+
+    .charts {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+
+    canvas {
+      width: 100% !important;
+      background: #0e1730;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      max-height: 310px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>Control Subsystem Test Dashboard</h1>
+      <p>Use this page for your two requested control tests:</p>
+      <p>1) <strong>Servo test</strong>: send known steering angles and compare with measured wheel angles.</p>
+      <p>2) <strong>Pico motor-input test</strong>: choose/compare command input format from RPi5 navigation output, then measure real motor response.</p>
+      <p class="muted">All table cells are editable. Use the action buttons to calculate errors, generate graphs, and save data locally.</p>
+      <div class="controls">
+        <button onclick="generateAll()">Generate All Graphs + KPIs</button>
+        <button onclick="saveLocal()">Save Local</button>
+        <button onclick="loadLocal()">Load Local</button>
+        <button onclick="resetAll()">Reset Defaults</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>A) Servo Test Table (Known Angle Commands)</h2>
+      <div class="scroll">
+        <table id="servo-table">
+          <thead>
+            <tr>
+              <th>Test ID</th>
+              <th>Command Angle (deg)</th>
+              <th>Measured Angle (deg)</th>
+              <th>Error (deg)</th>
+              <th>Direction (CW/CCW)</th>
+              <th>Settling Time (ms)</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="controls">
+        <button onclick="generateServo()">Generate Servo Graphs</button>
+      </div>
+      <div class="kpis" id="servo-kpis"></div>
+      <div class="charts">
+        <canvas id="servo-cmd-vs-meas"></canvas>
+        <canvas id="servo-error-chart"></canvas>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>B) Pico Input Format Decision + Real-Life Motor Response</h2>
+      <p class="muted">Recommended candidate formats: <code>TwistStamped(vx,wz)</code>, <code>wheel speed setpoint (left/right rpm)</code>, <code>normalized PWM [-1..1]</code>.</p>
+      <div class="scroll">
+        <table id="input-decision-table">
+          <thead>
+            <tr>
+              <th>Candidate ID</th>
+              <th>Input Format</th>
+              <th>Example Payload</th>
+              <th>Ease of Integration (1-5)</th>
+              <th>Control Precision (1-5)</th>
+              <th>Safety Handling (1-5)</th>
+              <th>Final Score</th>
+              <th>Decision (Keep/Drop)</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="scroll" style="margin-top:10px;">
+        <table id="motor-response-table">
+          <thead>
+            <tr>
+              <th>Trial ID</th>
+              <th>Chosen Input Format</th>
+              <th>Cmd Value #1</th>
+              <th>Cmd Value #2</th>
+              <th>Left RPM</th>
+              <th>Right RPM</th>
+              <th>Measured Linear Speed (m/s)</th>
+              <th>Latency (ms)</th>
+              <th>Stop-on-Timeout Delay (ms)</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="controls">
+        <button onclick="generateInput()">Generate Input-Decision Graphs</button>
+        <button onclick="generateMotor()">Generate Motor-Response Graphs</button>
+      </div>
+
+      <div class="kpis" id="input-kpis"></div>
+      <div class="kpis" id="motor-kpis"></div>
+      <div class="charts">
+        <canvas id="input-score-chart"></canvas>
+        <canvas id="motor-rpm-chart"></canvas>
+        <canvas id="motor-latency-chart"></canvas>
+      </div>
+    </section>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script>
+    const charts = {};
+
+    function addRows(tableId, rows, seed = []) {
+      const tbody = document.querySelector(`#${tableId} tbody`);
+      tbody.innerHTML = '';
+      const cols = document.querySelectorAll(`#${tableId} thead th`).length;
+      for (let i = 0; i < rows; i++) {
+        const tr = document.createElement('tr');
+        for (let c = 0; c < cols; c++) {
+          const td = document.createElement('td');
+          td.contentEditable = 'true';
+          td.textContent = seed[i]?.[c] ?? '';
+          tr.appendChild(td);
+        }
+        tbody.appendChild(tr);
+      }
+    }
+
+    function tableData(id) {
+      return Array.from(document.querySelectorAll(`#${id} tbody tr`))
+        .map(row => Array.from(row.children).map(c => c.textContent.trim()));
+    }
+
+    function n(v) {
+      const x = Number(v);
+      return Number.isFinite(x) ? x : null;
+    }
+
+    function mean(a) {
+      const c = a.filter(v => Number.isFinite(v));
+      return c.length ? c.reduce((s,v) => s+v, 0) / c.length : null;
+    }
+
+    function max(a) {
+      const c = a.filter(v => Number.isFinite(v));
+      return c.length ? Math.max(...c) : null;
+    }
+
+    function fmt(v, unit='') {
+      return v === null ? 'n/a' : `${v.toFixed(3)} ${unit}`.trim();
+    }
+
+    function kpi(el, label, value) {
+      el.insertAdjacentHTML('beforeend', `<div class="kpi"><small>${label}</small><strong>${value}</strong></div>`);
+    }
+
+    function lineChart(id, labels, datasets, yLabel) {
+      if (charts[id]) charts[id].destroy();
+      charts[id] = new Chart(document.getElementById(id), {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          scales: {
+            x: { ticks: { color: '#cbd5e1' }, grid: { color: '#2a395b' } },
+            y: { title: { display: true, text: yLabel, color: '#cbd5e1' }, ticks: { color: '#cbd5e1' }, grid: { color: '#2a395b' } }
+          },
+          plugins: { legend: { labels: { color: '#e5e7eb' } } }
+        }
+      });
+    }
+
+    function barChart(id, labels, dataset, yLabel) {
+      if (charts[id]) charts[id].destroy();
+      charts[id] = new Chart(document.getElementById(id), {
+        type: 'bar',
+        data: { labels, datasets: [dataset] },
+        options: {
+          responsive: true,
+          scales: {
+            x: { ticks: { color: '#cbd5e1' }, grid: { color: '#2a395b' } },
+            y: { title: { display: true, text: yLabel, color: '#cbd5e1' }, ticks: { color: '#cbd5e1' }, grid: { color: '#2a395b' } }
+          },
+          plugins: { legend: { labels: { color: '#e5e7eb' } } }
+        }
+      });
+    }
+
+    function generateServo() {
+      const rows = tableData('servo-table');
+      const cmd = rows.map(r => n(r[1]));
+      const meas = rows.map(r => n(r[2]));
+      const err = rows.map((r, i) => (cmd[i] !== null && meas[i] !== null) ? (meas[i] - cmd[i]) : null);
+      const settling = rows.map(r => n(r[5]));
+      rows.forEach((r, i) => {
+        if (err[i] !== null) {
+          const cell = document.querySelectorAll('#servo-table tbody tr')[i].children[3];
+          cell.textContent = err[i].toFixed(2);
+        }
+      });
+
+      const k = document.getElementById('servo-kpis');
+      k.innerHTML = '';
+      kpi(k, 'Mean Abs Error', fmt(mean(err.map(v => v === null ? null : Math.abs(v))), 'deg'));
+      kpi(k, 'Max Abs Error', fmt(max(err.map(v => v === null ? null : Math.abs(v))), 'deg'));
+      kpi(k, 'Avg Settling Time', fmt(mean(settling), 'ms'));
+
+      const labels = cmd.map((v, i) => v ?? i + 1);
+      lineChart('servo-cmd-vs-meas', labels, [
+        { label: 'Commanded Angle', data: cmd, borderColor: '#4dd0e1', pointRadius: 2 },
+        { label: 'Measured Angle', data: meas, borderColor: '#8f7cff', pointRadius: 2 }
+      ], 'Angle (deg)');
+      lineChart('servo-error-chart', labels, [
+        { label: 'Error (Measured - Command)', data: err, borderColor: '#ff9f40', pointRadius: 2 }
+      ], 'Error (deg)');
+    }
+
+    function generateInput() {
+      const rows = tableData('input-decision-table');
+      const labels = rows.map(r => r[0] || 'candidate');
+      const score = rows.map(r => {
+        const s = [n(r[3]), n(r[4]), n(r[5])];
+        const valid = s.filter(v => v !== null);
+        const final = valid.length ? valid.reduce((a,b)=>a+b, 0) / valid.length : null;
+        return final;
+      });
+
+      rows.forEach((r, i) => {
+        const tr = document.querySelectorAll('#input-decision-table tbody tr')[i];
+        if (score[i] !== null) tr.children[6].textContent = score[i].toFixed(2);
+      });
+
+      const k = document.getElementById('input-kpis');
+      k.innerHTML = '';
+      kpi(k, 'Best Candidate Score', fmt(max(score), '/5'));
+      kpi(k, 'Avg Candidate Score', fmt(mean(score), '/5'));
+
+      barChart('input-score-chart', labels, {
+        label: 'Final Score',
+        data: score,
+        backgroundColor: '#4dd0e1'
+      }, 'Score (/5)');
+    }
+
+    function generateMotor() {
+      const rows = tableData('motor-response-table');
+      const left = rows.map(r => n(r[4]));
+      const right = rows.map(r => n(r[5]));
+      const speed = rows.map(r => n(r[6]));
+      const latency = rows.map(r => n(r[7]));
+      const stopDelay = rows.map(r => n(r[8]));
+      const mismatch = rows.map((r, i) => {
+        if (left[i] === null || right[i] === null) return null;
+        const avg = (Math.abs(left[i]) + Math.abs(right[i])) / 2;
+        if (avg === 0) return 0;
+        return Math.abs(left[i] - right[i]) / avg * 100;
+      });
+
+      const labels = rows.map((r, i) => r[0] || `trial-${i+1}`);
+      const k = document.getElementById('motor-kpis');
+      k.innerHTML = '';
+      kpi(k, 'Avg Left/Right RPM Mismatch', fmt(mean(mismatch), '%'));
+      kpi(k, 'Avg Measured Linear Speed', fmt(mean(speed), 'm/s'));
+      kpi(k, 'Avg Command Latency', fmt(mean(latency), 'ms'));
+      kpi(k, 'Avg Stop-on-Timeout Delay', fmt(mean(stopDelay), 'ms'));
+
+      lineChart('motor-rpm-chart', labels, [
+        { label: 'Left RPM', data: left, borderColor: '#4dd0e1', pointRadius: 2 },
+        { label: 'Right RPM', data: right, borderColor: '#8f7cff', pointRadius: 2 }
+      ], 'RPM');
+
+      lineChart('motor-latency-chart', labels, [
+        { label: 'Latency (ms)', data: latency, borderColor: '#ff6384', pointRadius: 2 },
+        { label: 'Stop Timeout Delay (ms)', data: stopDelay, borderColor: '#ffcd56', pointRadius: 2 }
+      ], 'ms');
+    }
+
+    function generateAll() {
+      generateServo();
+      generateInput();
+      generateMotor();
+    }
+
+    function saveLocal() {
+      const payload = {
+        servo: tableData('servo-table'),
+        decision: tableData('input-decision-table'),
+        motor: tableData('motor-response-table')
+      };
+      localStorage.setItem('autonexa-control-test-dashboard', JSON.stringify(payload));
+      alert('Dashboard data saved in browser local storage.');
+    }
+
+    function loadLocal() {
+      const raw = localStorage.getItem('autonexa-control-test-dashboard');
+      if (!raw) {
+        alert('No saved dashboard data found.');
+        return;
+      }
+      const d = JSON.parse(raw);
+      addRows('servo-table', (d.servo || []).length || 12, d.servo || []);
+      addRows('input-decision-table', (d.decision || []).length || 6, d.decision || []);
+      addRows('motor-response-table', (d.motor || []).length || 12, d.motor || []);
+      generateAll();
+    }
+
+    function resetAll() {
+      seed();
+      generateAll();
+    }
+
+    function seed() {
+      addRows('servo-table', 12, [
+        ['SERVO-T01', -25, -23.8, '', 'CCW', 170, ''],
+        ['SERVO-T01', -15, -14.3, '', 'CCW', 150, ''],
+        ['SERVO-T01', 0, 0.9, '', 'CW', 120, ''],
+        ['SERVO-T01', 15, 14.1, '', 'CW', 148, ''],
+        ['SERVO-T01', 25, 23.4, '', 'CW', 166, '']
+      ]);
+
+      addRows('input-decision-table', 6, [
+        ['INP-C1', 'TwistStamped(vx,wz)', '{vx:0.20,wz:0.10}', 5, 4, 5, '', 'Keep', 'Native with ROS2 Nav2 output'],
+        ['INP-C2', 'Left/Right wheel RPM', '{left:95,right:100}', 3, 5, 4, '', 'Keep', 'Good for direct motor tuning'],
+        ['INP-C3', 'Normalized PWM', '{left:0.35,right:0.40}', 4, 3, 3, '', 'Drop', 'Simple but less physical meaning']
+      ]);
+
+      addRows('motor-response-table', 12, [
+        ['MOTOR-T01', 'TwistStamped(vx,wz)', 0.20, 0.00, 92, 94, 0.19, 52, 118, 'Straight'],
+        ['MOTOR-T01', 'TwistStamped(vx,wz)', 0.25, 0.10, 108, 116, 0.23, 57, 121, 'Right turn'],
+        ['MOTOR-T01', 'TwistStamped(vx,wz)', 0.25, -0.10, 113, 104, 0.22, 58, 123, 'Left turn']
+      ]);
+    }
+
+    seed();
+    generateAll();
+  </script>
+</body>
+</html>
