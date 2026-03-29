@@ -1,0 +1,66 @@
+[
+  {
+    "id": "TC05",
+    "name": "Forward",
+    "duration_s": 3.0,
+    "packet": {
+      "state": "TRACKING_PATH",
+      "v_lin": 0.2,
+      "v_ang": 0.0,
+      "obstacle": {
+        "front_m": 1.0,
+        "left_m": 1.0,
+        "right_m": 1.0,
+        "emergency_stop": false
+      }
+    }
+  },
+  {
+    "id": "TC07",
+    "name": "Rotate right",
+    "duration_s": 2.0,
+    "packet": {
+      "state": "TRACKING_PATH",
+      "v_lin": 0.0,
+      "v_ang": -0.8,
+      "obstacle": {
+        "front_m": 1.0,
+        "left_m": 1.0,
+        "right_m": 1.0,
+        "emergency_stop": false
+      }
+    }
+  },
+  {
+    "id": "TC08",
+    "name": "Curve left",
+    "duration_s": 3.0,
+    "packet": {
+      "state": "TRACKING_PATH",
+      "v_lin": 0.18,
+      "v_ang": 0.4,
+      "obstacle": {
+        "front_m": 1.0,
+        "left_m": 1.0,
+        "right_m": 1.0,
+        "emergency_stop": false
+      }
+    }
+  },
+  {
+    "id": "TC10",
+    "name": "Emergency stop",
+    "duration_s": 1.0,
+    "packet": {
+      "state": "TRACKING_PATH",
+      "v_lin": 0.2,
+      "v_ang": 0.0,
+      "obstacle": {
+        "front_m": 1.0,
+        "left_m": 1.0,
+        "right_m": 1.0,
+        "emergency_stop": true
+      }
+    }
+  }
+]
