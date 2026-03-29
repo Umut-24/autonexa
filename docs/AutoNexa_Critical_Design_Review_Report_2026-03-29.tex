@@ -1,0 +1,447 @@
+\documentclass[12pt,a4paper]{report}
+
+% -------------------- PACKAGES --------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{multirow}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{pdflscape}
+\usepackage{appendix}
+\usepackage{xcolor}
+
+% -------------------- HYPERREF --------------------
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,
+    urlcolor=blue,
+    citecolor=blue,
+    pdftitle={AutoNexa Critical Design Review Report},
+    pdfauthor={AutoNexa Team},
+    pdfsubject={CDRR},
+    pdfkeywords={AutoNexa, CDRR, Intelligent Parking, Recall System}
+}
+
+% -------------------- SPACING --------------------
+\onehalfspacing
+
+% -------------------- HEADER / FOOTER --------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{AutoNexa}
+\fancyhead[R]{Critical Design Review Report}
+\fancyfoot[C]{\thepage}
+
+% -------------------- SECTION FORMATTING --------------------
+\titleformat{\chapter}[display]
+{\bfseries\Large}
+{\chaptertitlename\ \thechapter}{10pt}{\Huge}
+
+\titleformat{\section}
+{\bfseries\large}{\thesection}{1em}{}
+
+\titleformat{\subsection}
+{\bfseries\normalsize}{\thesubsection}{1em}{}
+
+\titleformat{\subsubsection}
+{\bfseries\normalsize\itshape}{\thesubsubsection}{1em}{}
+
+% -------------------- CUSTOM COMMANDS --------------------
+\newcommand{\projectname}{AutoNexa}
+\newcommand{\reporttitle}{Critical Design Review Report}
+\newcommand{\courseinfo}{EE493 / EE494}
+\newcommand{\versioninfo}{Version 1.1}
+\newcommand{\reportdate}{March 29, 2026}
+
+\begin{document}
+
+% ==================== TITLE PAGE ====================
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+
+    {\Huge \textbf{\projectname} \par}
+    \vspace{0.5cm}
+    {\LARGE Intelligent Parking and Recall System \par}
+    \vspace{1.5cm}
+
+    {\Huge \textbf{\reporttitle} \par}
+    \vspace{1cm}
+
+    {\Large \courseinfo \par}
+    \vspace{0.5cm}
+    {\Large \versioninfo \par}
+    \vspace{0.5cm}
+    {\Large \reportdate \par}
+
+    \vfill
+
+    \begin{flushleft}
+    \textbf{Design Studio Section:} X \\[0.4cm]
+    \textbf{Supervisor:} Name Surname \\[0.4cm]
+    \textbf{Presented by:} \\[0.2cm]
+    Anıl Salih Çolak \\
+    Doğukan Zorlu \\
+    Emre Mendeş \\
+    Ismayil Ibrahimli \\
+    Oghuz Novruzaliyev \\
+    Umut Kumral \\
+    \end{flushleft}
+
+    \vfill
+\end{titlepage}
+
+% ==================== FRONT MATTER ====================
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\listoffigures
+\clearpage
+\listoftables
+\clearpage
+\pagenumbering{arabic}
+
+% ==================== EXECUTIVE SUMMARY ====================
+\chapter*{Executive Summary}
+\addcontentsline{toc}{chapter}{Executive Summary}
+
+This report presents the Critical Design Review of the \projectname{} Intelligent Parking and Recall System using the latest repository state and validation notes. The project targets autonomous indoor parking by combining live LiDAR-based mapping, ROS~2 Nav2 planning, Ackermann-compatible control, and safety-focused command arbitration. The architecture uses Raspberry Pi~5 for high-level autonomy and Raspberry Pi Pico WH for deterministic low-level actuation.
+
+As of March~2026, core architecture maturity is estimated at approximately 80--85\%, while critical safety-command modules are functionally frozen. The command pipeline (\texttt{/cmd\_vel} $\rightarrow$ \texttt{/cmd\_vel\_smoothed} $\rightarrow$ \texttt{/cmd\_vel\_safe} $\rightarrow$ \texttt{/pico/control\_cmd}) is implemented and supported by duplicate publisher protection, timeout-to-zero behavior, and heartbeat-based supervision. Remaining work is concentrated on full physical closed-loop trials, control-source arbitration finalization, IMU-assisted fusion, and long-duration reliability testing.
+
+% ==================== INTRODUCTION ====================
+\chapter{Introduction}
+
+\section{Project Overview}
+\projectname{} is a small-scale autonomous vehicle platform designed for structured indoor parking scenarios. The system maps its local environment using LiDAR, localizes itself through SLAM and scan matching, plans a collision-aware path to a parking target, and executes safe low-speed maneuvers through a safety-filtered bridge to embedded actuators.
+
+\section{Current Status of the Project}
+Completed items include the live SLAM+Nav2 baseline, Pico bridge hardening, diagnostic scripts, and rosbag tooling. Optional EKF scaffolding without IMU has also been integrated. Partially complete items include physical e-stop characterization under motion, end-to-end autonomous field repetitions, and mode arbitration between Nav2 and mobile/manual control.
+
+\section{Scope and Organization of the Report}
+Chapter~2 explains top-down system design and subsystem interfaces. Chapter~3 documents tests and observed results. Chapter~4 summarizes cost, power, and schedule updates. Chapter~5 concludes with readiness and remaining risks. Appendices reserve space for raw logs, diagrams, and expanded plots.
+
+% ==================== SYSTEM DESIGN ====================
+\chapter{System Design}
+
+\section{Overall System Description}
+The operating principle is organized as a perception-to-actuation chain. LiDAR scans feed SLAM and localization. Nav2 generates body-frame motion commands that pass through velocity smoothing and collision monitoring before entering the Pico bridge. The bridge enforces limits and safety conditions, then transmits bounded commands to Pico firmware via micro-ROS transport.
+
+\subsection{System-Level Block Diagram}
+\begin{figure}[H]
+    \centering
+    \IfFileExists{figures/system_block_diagram.png}{\includegraphics[width=0.85\textwidth]{figures/system_block_diagram.png}}{\fbox{\parbox{0.8\textwidth}{\centering Placeholder: system block diagram not committed yet.}}}
+    \caption{Overall system block diagram of the AutoNexa platform.}
+    \label{fig:system_block}
+\end{figure}
+
+\subsection{Overall Data and Control Flow}
+Main sensing data are published on \texttt{/scan}. Navigation output from \texttt{/cmd\_vel} is shaped by velocity smoothing and collision monitoring, then forwarded as \texttt{/pico/control\_cmd}. Feedback channels include odometry, TF transforms, and bridge health topics (\texttt{/pico/enable}, \texttt{/pico/heartbeat}).
+
+\section{System Architecture}
+
+\subsection{Perception Subsystem}
+Perception is LiDAR-centered in the current baseline. SLAM Toolbox and scan-matcher pipelines provide map updates and odometry support. ArUco/camera workflows are maintained as optional future extensions but are not the primary dependency for current parking baseline behavior.
+
+\subsection{Control Subsystem}
+Control uses low-speed conservative limits for safe operation. Steering is generated with Ackermann conversion and servo PWM output. Drive control is passed to the motor driver through Pico-managed channels. Safety features include clamping, acceleration limiting, timeout stop, and heartbeat supervision.
+
+\subsection{Navigation Subsystem}
+Navigation uses ROS~2 Nav2 with conservative planner/controller settings (Navfn + DWB baseline). The system supports live map generation and pose-goal navigation, with tuning focused on stable convergence and reduced oscillation near parking goals.
+
+\subsection{Embedded Subsystem}
+Pico WH handles deterministic functions: command intake, Ackermann IK, PWM generation, I2C motor driver output, and encoder feedback processing. micro-ROS transport bridges high-level commands from Pi~5 to firmware topics/services.
+
+\subsection{Power Subsystem}
+The power tree separates logic and actuation rails (e.g., 5V logic, dedicated motor and servo rails). This separation reduces noise coupling and improves robustness during transient actuator loads.
+
+\section{Technical Drawings of the Expected Final Product}
+\begin{figure}[H]
+    \centering
+    \IfFileExists{figures/final_product_drawing.png}{\includegraphics[width=0.75\textwidth]{figures/final_product_drawing.png}}{\fbox{\parbox{0.72\textwidth}{\centering Placeholder: final product drawing not committed yet.}}}
+    \caption{Expected final product drawing.}
+    \label{fig:final_product}
+\end{figure}
+
+\section{System and Subsystem Requirements}
+\begin{table}[H]
+\centering
+\caption{System and subsystem requirements.}
+\label{tab:requirements}
+\begin{tabularx}{\textwidth}{|p{1.8cm}|X|p{3cm}|}
+\hline
+\textbf{ID} & \textbf{Requirement} & \textbf{Target} \\
+\hline
+SYS-01 & Autonomous navigation in constrained indoor parking environment & Functional completion \\
+\hline
+SYS-02 & Collision-aware command output with no unsafe direct path to actuators & Required \\
+\hline
+SYS-03 & Safe stop on command loss & Timeout $\leq$ 200 ms \\
+\hline
+SYS-04 & Deterministic command update & 30 Hz nominal bridge rate \\
+\hline
+SYS-05 & Modular subsystem interfaces & ROS2 topic-type compliance \\
+\hline
+SYS-06 & Incremental integration path & Independent subsystem testability \\
+\hline
+\end{tabularx}
+\end{table}
+
+\section{Design Modifications}
+\subsection{Modification 1: Runtime Architecture Refinement}
+\textbf{Original:} static-map-dominant flow emphasis.\\
+\textbf{Issue:} lower robustness during iterative bring-up and mapping updates.\\
+\textbf{Modification:} live SLAM + Nav2 baseline prioritized.\\
+\textbf{Justification:} improves integration observability and continuous mapping reliability.
+
+\subsection{Modification 2: Safety Chain Hardening}
+\textbf{Original:} basic bridge forwarding.\\
+\textbf{Issue:} potential unsafe behavior under duplicate publishers or command loss.\\
+\textbf{Modification:} lock file, graph duplicate checks, timeout-to-zero, and safe self-termination.\\
+\textbf{Justification:} containment of control conflicts and safer degraded operation.
+
+\section{Compatibility Analysis of Subsystems}
+\begin{itemize}
+    \item Signal interface compatibility: ROS2 topic typing and defined message contracts are enforced.
+    \item Voltage compatibility: logic/actuation rails are separated to manage transients.
+    \item Communication protocol compatibility: UART/USB micro-ROS path and I2C motor link are validated.
+    \item Timing and latency compatibility: nominal 30 Hz command updates and timeout policy are in place.
+    \item Middleware compatibility: ROS2 Jazzy, Nav2, and micro-ROS agent pipeline are aligned.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\caption{Subsystem interface compatibility summary.}
+\label{tab:compatibility}
+\begin{tabularx}{\textwidth}{|p{3cm}|p{3cm}|p{2.5cm}|X|}
+\hline
+\textbf{Source} & \textbf{Destination} & \textbf{Interface} & \textbf{Description} \\
+\hline
+Raspberry Pi 5 & Pico WH & USB Serial / micro-ROS & High-level command and telemetry exchange \\
+\hline
+Pico WH & Motor Driver & I2C + GPIO/PWM & Real-time drive actuation \\
+\hline
+Encoder & Pico WH & Digital input & Wheel feedback for odometry \\
+\hline
+LiDAR & Raspberry Pi 5 & USB/UART & Range sensing for mapping/navigation \\
+\hline
+\end{tabularx}
+\end{table}
+
+\section{Compliance with Requirements}
+\begin{table}[H]
+\centering
+\caption{Compliance of design decisions with requirements.}
+\label{tab:design_compliance}
+\begin{tabularx}{\textwidth}{|p{2cm}|X|X|p{1.8cm}|}
+\hline
+\textbf{Req. ID} & \textbf{Design Decision} & \textbf{Justification / Evidence} & \textbf{Status} \\
+\hline
+SYS-02 & Collision monitor + bridge safety clamping & Enforced filtered path and bounded command delivery & Met \\
+\hline
+SYS-03 & Timeout-to-zero + enable/heartbeat supervision & Safe stop behavior defined and tested in software & Partial/Met \\
+\hline
+SYS-04 & Nominal 30 Hz bridge publishing & Deterministic update loop in bridge implementation & Met \\
+\hline
+SYS-05 & Topic/type diagnostics scripts & Automated checks for contract compliance & Met \\
+\hline
+\end{tabularx}
+\end{table}
+
+Trade-offs favor deterministic and safe operation over early aggressive maneuvering. Residual risks remain in manual-vs-auto arbitration and full motion stress testing.
+
+% ==================== TEST PROCEDURES ====================
+\chapter{Test Procedures and Results}
+
+\section{Test Procedures for Subsystems}
+
+\subsection{Control Subsystem Test}
+\textbf{Objective:} verify steering tracking, low-speed drive behavior, and control-path robustness.\\
+\textbf{Procedure highlights:} fixed steering setpoints ($-25,-15,0,+15,+25$ deg), repeated trials, bidirectional hysteresis checks, and response timing capture.\\
+\textbf{Candidate command-interface decision:} compare \texttt{TwistStamped}, wheel-speed setpoints, and normalized PWM based on integration ease, precision, and safety behavior.
+
+\subsection{Perception Subsystem Test}
+LiDAR stability validation focused on timeout fault reproduction/recovery and stable \texttt{/scan} continuity during SLAM operation.
+
+\subsection{Communication Subsystem Test}
+Tests cover launch argument contracts, bridge duplicate-publisher prevention, and topic-type integrity via diagnostic scripts.
+
+\subsection{Power Subsystem Test}
+Current stage includes estimated budgeting and rail partition validation. Extended thermal and long-duration runtime characterization remains pending.
+
+\section{Assessment of Test Results}
+
+\subsection{Control Subsystem Assessment}
+Bridge safety behavior (timeout and duplicate detection) is validated at software integration level. Full physical closed-loop repetitions are still pending.
+
+\subsection{Perception Subsystem Assessment}
+LiDAR instability was traced to stale process ownership of \texttt{/dev/ttyUSB0}. Recovery workflow validated improved stability.
+
+\subsection{Communication Subsystem Assessment}
+Topic checks pass in strict mode. Live-flow mode fails without active command source (expected) and passes under command publication.
+
+\subsection{Power Subsystem Assessment}
+Power design is structurally adequate for current load envelope but needs extended soak tests and optional undervoltage telemetry integration.
+
+\section{Crosscheck of Tests with Requirements}
+\begin{table}[H]
+\centering
+\caption{Crosscheck of tests with system requirements.}
+\label{tab:test_crosscheck}
+\begin{tabularx}{\textwidth}{|p{2cm}|p{3cm}|X|p{2cm}|}
+\hline
+\textbf{Req. ID} & \textbf{Related Test} & \textbf{Result / Evidence} & \textbf{Status} \\
+\hline
+SYS-02 & Collision/safety chain checks & Safety-filtered command flow verified in diagnostics & Met \\
+\hline
+SYS-03 & Timeout and duplicate publisher tests & Safe-stop and self-shutdown behaviors observed & Partial/Met \\
+\hline
+SYS-05 & Topic/type diagnostic test & Required topics and message types validated & Met \\
+\hline
+SYS-06 & Staged launch and optional bridge tests & Independent subsystem bring-up verified & Met \\
+\hline
+\end{tabularx}
+\end{table}
+
+% ==================== RESOURCE MANAGEMENT ====================
+\chapter{Resource Management}
+
+\section{Cost Breakdown and Analysis}
+\begin{table}[H]
+\centering
+\caption{Updated cost breakdown (engineering estimate).}
+\label{tab:cost}
+\begin{tabularx}{\textwidth}{|X|p{1.8cm}|p{1.6cm}|p{2.1cm}|}
+\hline
+\textbf{Component} & \textbf{Unit Cost} & \textbf{Qty} & \textbf{Total Cost} \\
+\hline
+Raspberry Pi 5 (8GB) & 90 USD & 1 & 90 USD \\
+\hline
+Raspberry Pi Pico WH & 10 USD & 1 & 10 USD \\
+\hline
+Slamtec C1 LiDAR & 130 USD & 1 & 130 USD \\
+\hline
+Ackermann chassis + linkage & 120 USD & 1 & 120 USD \\
+\hline
+Rear motors with encoders & 25 USD & 2 & 50 USD \\
+\hline
+Steering servo (LD-1501MG class) & 18 USD & 1 & 18 USD \\
+\hline
+Hiwonder motor driver & 30 USD & 1 & 30 USD \\
+\hline
+Battery + regulation modules & 55 USD & 1 & 55 USD \\
+\hline
+Wiring/connectors/misc. & 35 USD & 1 & 35 USD \\
+\hline
+Contingency (10\%) & -- & -- & 54 USD \\
+\hline
+\textbf{Total} &  &  & \textbf{592 USD} \\
+\hline
+\end{tabularx}
+\end{table}
+
+\section{Power Distribution and Management Analysis}
+\begin{figure}[H]
+    \centering
+    \IfFileExists{figures/power_distribution_diagram.png}{\includegraphics[width=0.85\textwidth]{figures/power_distribution_diagram.png}}{\fbox{\parbox{0.8\textwidth}{\centering Placeholder: power distribution diagram not committed yet.}}}
+    \caption{Power distribution diagram of the AutoNexa system.}
+    \label{fig:power_distribution}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Power consumption summary (estimated).}
+\label{tab:power}
+\begin{tabularx}{\textwidth}{|X|p{2.2cm}|p{2.1cm}|p{2cm}|}
+\hline
+\textbf{Component} & \textbf{Nominal} & \textbf{Peak} & \textbf{Notes} \\
+\hline
+Raspberry Pi 5 & 8--12 W & 15 W & Compute-dependent \\
+\hline
+Slamtec C1 LiDAR & 2--3 W & 3.5 W & Continuous scan \\
+\hline
+Pico WH & $<$1 W & 1 W & Low-power MCU \\
+\hline
+Steering servo & 2--5 W & 10 W & Transient-heavy \\
+\hline
+Motors + driver & 10--25 W & 40+ W & Load dependent \\
+\hline
+\textbf{System Total} & 22--46 W & $\sim$70 W & Margin required \\
+\hline
+\end{tabularx}
+\end{table}
+
+\section{Updated Project Schedule}
+\begin{figure}[H]
+    \centering
+    \IfFileExists{figures/gantt_chart.png}{\includegraphics[width=\textwidth]{figures/gantt_chart.png}}{\fbox{\parbox{0.92\textwidth}{\centering Placeholder: Gantt chart image not committed yet. Milestones currently tracked in markdown using Mermaid.}}}
+    \caption{Updated project schedule and Gantt chart.}
+    \label{fig:gantt}
+\end{figure}
+
+\noindent Key windows (from current planning):
+\begin{itemize}
+    \item Completed: live SLAM baseline, bridge safety hardening, diagnostics/bagging.
+    \item In progress: control-source arbitration policy, physical e-stop verification.
+    \item Planned: EKF staged validation, soak/latency profiling, final parking tuning.
+\end{itemize}
+
+% ==================== CONCLUSION ====================
+\chapter{Conclusion}
+\projectname{} has reached a robust CDR stage with low architectural uncertainty and clear subsystem boundaries. Safety foundations and command conditioning are implemented, and the remaining scope is primarily test-depth, robustness characterization, and integration policy closure rather than fundamental redesign. The project is ready to move from design-heavy iteration to structured final integration and acceptance testing.
+
+% ==================== APPENDICES ====================
+\begin{appendices}
+
+\chapter{System Block Diagrams and Flowcharts}
+Include finalized exported diagrams from repository assets when available.
+
+\chapter{Test Results and Supporting Data}
+Attach rosbag-based plots, diagnostic logs, and measured subsystem traces.
+
+\chapter{Updated Gantt Chart}
+Attach full-page Gantt export generated from the project planner.
+
+\chapter{Additional Drawings / Mechanical Details}
+Attach CAD renders, assembly sketches, and wiring details.
+
+\end{appendices}
+
+% ==================== REFERENCES ====================
+\begin{thebibliography}{99}
+
+\bibitem{autonexa_cdrr}
+AutoNexa CDRR Draft (2026-03-24), project repository documentation.
+
+\bibitem{impl_status}
+AutoNexa Implementation Status and Remaining Plan (2026-03-14), project repository documentation.
+
+\bibitem{control_test_protocol}
+AutoNexa Control Subsystem Test Protocol, project repository documentation.
+
+\bibitem{ros2}
+ROS 2 Documentation, \url{https://docs.ros.org/}
+
+\bibitem{micro_ros}
+micro-ROS Documentation, \url{https://micro.ros.org/}
+
+\bibitem{nav2}
+Navigation2 Documentation, \url{https://navigation.ros.org/}
+
+\end{thebibliography}
+
+\end{document}
