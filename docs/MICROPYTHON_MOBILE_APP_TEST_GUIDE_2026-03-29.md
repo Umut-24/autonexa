@@ -2,6 +2,10 @@
 
 Date: March 29, 2026
 
+> Legacy path via USB serial bridge (`micropython_bridge.py` + host machine).
+> For the new RPi-free path, use:
+> `docs/PICO_W_DIRECT_WIFI_CONTROL_GUIDE_2026-03-29.md`
+
 This guide validates end-to-end control and telemetry:
 
 `Mobile App -> micropython_bridge.py -> Pico (MicroPython) -> telemetry back to Mobile App`

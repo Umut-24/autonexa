@@ -46,9 +46,10 @@ class _ControlTabState extends State<ControlTab> {
     final url = widget.bridgeUrl;
     if (url == null || url.isEmpty) return null;
     if (!widget.micropythonMode) return url;
-    // In MicroPython mode, replace port with 5001
+    // In MicroPython mode, default to port 5001 only when no explicit port exists.
     try {
       final uri = Uri.parse(url);
+      if (uri.hasPort) return url;
       return uri.replace(port: 5001).toString();
     } catch (_) {
       return url;

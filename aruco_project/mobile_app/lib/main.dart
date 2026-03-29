@@ -98,7 +98,13 @@ class _HomePageState extends State<HomePage> {
   Timer? _pollTimer;
   Map<String, dynamic> _state = {};
   int _currentTab = 3; // Start on Control tab
-  bool _micropythonMode = false;
+  bool _micropythonMode = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _serverController.text = '192.168.4.1:5001';
+  }
 
   @override
   void dispose() {
@@ -111,6 +117,13 @@ class _HomePageState extends State<HomePage> {
     if (text.isEmpty) return;
     var url = text;
     if (!url.startsWith('http')) url = 'http://$url';
+    try {
+      var uri = Uri.parse(url);
+      if (!uri.hasPort) {
+        uri = uri.replace(port: _micropythonMode ? 5001 : 5000);
+      }
+      url = uri.toString();
+    } catch (_) {}
     url = url.replaceAll(RegExp(r'/*\z'), '');
 
     setState(() => _baseUrl = url);
@@ -431,7 +444,7 @@ class _HomePageState extends State<HomePage> {
                         TextField(
                           controller: _serverController,
                           decoration: const InputDecoration(
-                            hintText: 'e.g. 192.168.1.5:5000',
+                            hintText: 'e.g. 192.168.4.1:5001 (Pico W)',
                             prefixIcon: Icon(Icons.dns_rounded, size: 20, color: AppColors.textSecondary),
                           ),
                         ),
@@ -502,19 +515,22 @@ class _HomePageState extends State<HomePage> {
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           title: Text(
-                            _micropythonMode ? 'MicroPython Direct' : 'ROS2 Bridge',
+                            _micropythonMode ? 'Pico W Direct Wi-Fi' : 'ROS2 Bridge (Legacy)',
                             style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
                           ),
                           subtitle: Text(
                             _micropythonMode
-                                ? 'Lightweight bridge on port 5001 (no ROS2 needed)'
-                                : 'Full Nav2 stack via ros2_mobile_bridge',
+                                ? 'Direct phone -> Pico W on port 5001 (no RPi needed)'
+                                : 'Legacy mode through ros2_mobile_bridge',
                             style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
                           ),
                           value: _micropythonMode,
                           activeTrackColor: AppColors.accent,
                           onChanged: (val) {
                             setState(() => _micropythonMode = val);
+                            if (_serverController.text.trim().isNotEmpty) {
+                              _connect();
+                            }
                           },
                         ),
                         if (_micropythonMode)
@@ -531,8 +547,8 @@ class _HomePageState extends State<HomePage> {
                                 SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
-                                    'Run micropython_bridge.py on RPi5. '
-                                    'Pico must be connected via USB.',
+                                    'Connect phone to Pico W Wi-Fi and use '
+                                    'its IP (default AP: 192.168.4.1:5001).',
                                     style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
                                   ),
                                 ),
@@ -558,8 +574,8 @@ class _HomePageState extends State<HomePage> {
                         ),
                         const SizedBox(height: 4),
                         const Text(
-                          'Connects to the RPi5 ROS2 bridge for joystick control, '
-                          'LIDAR map visualization, and system telemetry.',
+                          'Directly controls Pico W over Wi-Fi (MicroPython API) '
+                          'or optionally supports legacy ROS2 bridge mode.',
                           style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
                         ),
                       ],

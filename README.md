@@ -2,6 +2,12 @@
 
 An autonomous parking system using ROS2, SLAM Toolbox, and Nav2 for Raspberry Pi 5 with Slamtec C1 LIDAR.
 
+## Pico W Direct Control (No RPi5)
+
+For direct phone -> Pico W control over Wi-Fi (MicroPython API, no ROS2 bridge), use:
+
+- `docs/PICO_W_DIRECT_WIFI_CONTROL_GUIDE_2026-03-29.md`
+
 ## Hardware Components
 
 - **Raspberry Pi 5** (Ubuntu Desktop 24.04)

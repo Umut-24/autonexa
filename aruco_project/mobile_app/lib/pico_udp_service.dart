@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
-/// Telemetry data received from the RPi5 bridge (Pico via ROS2 or MicroPython).
+/// Telemetry data received from Pico control endpoint (direct Wi-Fi or bridge).
 class PicoTelemetry {
   final double leftVel;
   final double rightVel;
@@ -59,10 +59,10 @@ class PicoTelemetry {
   }
 }
 
-/// HTTP service for communicating with the RPi5 ROS2 bridge.
+/// HTTP service for communicating with control endpoint.
 ///
 /// Sends joystick commands as HTTP POST to /api/control and polls
-/// /api/telemetry for Pico motor/encoder data routed through the RPi5.
+/// /api/telemetry for Pico motor/encoder data.
 /// Includes a safety watchdog: the RPi5 bridge auto-zeros cmd_vel
 /// if no command arrives within 500ms.
 class PicoUdpService {
