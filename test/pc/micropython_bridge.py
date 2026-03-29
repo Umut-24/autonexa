@@ -39,6 +39,7 @@ telem_lock = threading.Lock()     # guards telemetry dict
 ser_port: serial.Serial | None = None
 pico_connected = False
 seq_counter = 0
+last_control_time = 0.0
 
 latest_telemetry = {
     "t_ms": 0,
@@ -57,6 +58,18 @@ def next_seq() -> int:
     global seq_counter
     seq_counter += 1
     return seq_counter
+
+
+def _normalized_pico_state(t: dict) -> str:
+    """Map watchdog-idle FAILED state to IDLE for clearer mobile UX."""
+    raw = str(t.get("state", "UNKNOWN"))
+    left_pwm = int(t.get("left_pwm", 0))
+    right_pwm = int(t.get("right_pwm", 0))
+    moving = (left_pwm != 0) or (right_pwm != 0)
+    recently_commanded = (time.time() - last_control_time) < 1.5
+    if raw == "FAILED" and (not moving) and (not recently_commanded):
+        return "IDLE"
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -150,17 +163,21 @@ def index():
 @app.route("/api/status", methods=["GET"])
 def api_status():
     with telem_lock:
-        state = latest_telemetry.get("state", "UNKNOWN")
+        t = dict(latest_telemetry)
+    state = _normalized_pico_state(t)
     return jsonify({
         "mode": "micropython",
         "pico_connected": pico_connected,
         "pico_state": state,
+        "pico_state_raw": t.get("state", "UNKNOWN"),
+        "last_control_age_ms": int(max(0.0, (time.time() - last_control_time) * 1000.0)),
     })
 
 
 @app.route("/api/control", methods=["POST"])
 def api_control():
     """Joystick control — same format as ros2_mobile_bridge."""
+    global last_control_time
     data = request.get_json(silent=True) or {}
     x = float(data.get("x", 0.0))
     y = float(data.get("y", 0.0))
@@ -174,8 +191,9 @@ def api_control():
         v_ang = -x * MAX_V_ANG * speed_limit
         pkt = make_velocity_pkt(v_lin, v_ang)
 
-    serial_write(json.dumps(pkt))
-    return jsonify({"status": "ok"})
+    ok = serial_write(json.dumps(pkt))
+    last_control_time = time.time()
+    return jsonify({"status": "ok" if ok else "serial_error"})
 
 
 @app.route("/api/telemetry", methods=["GET"])
@@ -187,6 +205,7 @@ def api_telemetry():
     left_norm = t["left_pwm"] / MAX_PWM if MAX_PWM else 0
     right_norm = t["right_pwm"] / MAX_PWM if MAX_PWM else 0
 
+    state = _normalized_pico_state(t)
     return jsonify({
         # Fields expected by PicoTelemetry.fromJson()
         "left_wheel_vel": left_norm,
@@ -198,17 +217,20 @@ def api_telemetry():
         "odom_y": 0,
         "odom_yaw": math.radians(t["heading_deg"]),
         # Extra MicroPython-specific fields
-        "pico_state": t["state"],
+        "pico_state": state,
+        "pico_state_raw": t["state"],
         "left_ticks": t["left_ticks"],
         "right_ticks": t["right_ticks"],
         "heading_deg": t["heading_deg"],
         "goal_type": t["goal_type"],
+        "last_control_age_ms": int(max(0.0, (time.time() - last_control_time) * 1000.0)),
     })
 
 
 @app.route("/api/goal", methods=["POST"])
 def api_goal():
     """Forward goal commands (DRIVE, TURN, STOP, RESET_ODOM) to Pico."""
+    global last_control_time
     data = request.get_json(silent=True) or {}
     cmd = data.get("cmd", "").upper()
 
@@ -225,17 +247,21 @@ def api_goal():
         pkt["speed"] = float(data.get("speed", 0.20))
 
     ok = serial_write(json.dumps(pkt))
+    if ok:
+        last_control_time = time.time()
     return jsonify({"status": "ok" if ok else "serial_error", "sent": pkt})
 
 
 @app.route("/api/estop", methods=["POST"])
 def api_estop():
     """Emergency stop — sends STOP command to Pico."""
+    global last_control_time
     pkt = {"cmd": "STOP", "seq": next_seq()}
     serial_write(json.dumps(pkt))
     # Also send zero velocity with estop flag
     vel_pkt = make_velocity_pkt(0.0, 0.0, estop=True)
     serial_write(json.dumps(vel_pkt))
+    last_control_time = time.time()
     return jsonify({"status": "stopped"})
 
 

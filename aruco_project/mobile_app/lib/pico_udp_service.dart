@@ -17,6 +17,8 @@ class PicoTelemetry {
   final int leftTicks;         // MicroPython mode: raw encoder ticks
   final int rightTicks;
   final double headingDeg;     // MicroPython mode: heading in degrees
+  final String picoStateRaw;   // Raw state from bridge/Pico
+  final int lastControlAgeMs;  // Time since last control packet seen by bridge
 
   const PicoTelemetry({
     this.leftVel = 0,
@@ -32,6 +34,8 @@ class PicoTelemetry {
     this.leftTicks = 0,
     this.rightTicks = 0,
     this.headingDeg = 0,
+    this.picoStateRaw = '',
+    this.lastControlAgeMs = 0,
   });
 
   factory PicoTelemetry.fromJson(Map<String, dynamic> json) {
@@ -49,6 +53,8 @@ class PicoTelemetry {
       leftTicks: (json['left_ticks'] ?? 0).toInt(),
       rightTicks: (json['right_ticks'] ?? 0).toInt(),
       headingDeg: (json['heading_deg'] ?? 0).toDouble(),
+      picoStateRaw: (json['pico_state_raw'] ?? '').toString(),
+      lastControlAgeMs: (json['last_control_age_ms'] ?? 0).toInt(),
     );
   }
 }
@@ -251,9 +257,29 @@ class PicoUdpService {
       if (resp.statusCode == 200) {
         _markHealthy();
       } else {
+        // Fallback to telemetry in case status endpoint is flaky.
+        try {
+          final telem = await http.get(
+            Uri.parse('$_baseUrl/api/telemetry'),
+          ).timeout(_telemetryTimeout);
+          if (telem.statusCode == 200) {
+            _markHealthy();
+            return;
+          }
+        } catch (_) {}
         _onHealthFailure();
       }
     } catch (_) {
+      // Fallback to telemetry in case status endpoint is flaky.
+      try {
+        final telem = await http.get(
+          Uri.parse('$_baseUrl/api/telemetry'),
+        ).timeout(_telemetryTimeout);
+        if (telem.statusCode == 200) {
+          _markHealthy();
+          return;
+        }
+      } catch (_) {}
       _onHealthFailure();
     }
   }

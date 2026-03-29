@@ -24,7 +24,7 @@ class _ControlTabState extends State<ControlTab> {
   bool _isConnected = false;
   bool _emergencyStopped = false;
   bool _fullscreenMode = false;
-  double _speedLimit = 0.5;
+  double _speedLimit = 0.8;
   double _currentX = 0;
   double _currentY = 0;
   PicoTelemetry _telemetry = const PicoTelemetry();
@@ -133,6 +133,7 @@ class _ControlTabState extends State<ControlTab> {
       _currentX = 0;
       _currentY = 0;
     });
+    _controlService.updateJoystick(0, 0);
   }
 
   @override
@@ -658,6 +659,7 @@ class _ControlTabState extends State<ControlTab> {
       child: Row(
         children: [
           _microTelemetryItem('STATE', _telemetry.picoState),
+          _microTelemetryItem('CMD', '${(_telemetry.lastControlAgeMs / 1000).toStringAsFixed(1)}s'),
           _microTelemetryItem('DIST', '${_telemetry.odomX.toStringAsFixed(3)}m'),
           _microTelemetryItem('HDG', '${_telemetry.headingDeg.toStringAsFixed(1)}°'),
           _microTelemetryItem('L TK', '${_telemetry.leftTicks}'),
