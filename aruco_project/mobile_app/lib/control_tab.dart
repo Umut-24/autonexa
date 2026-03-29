@@ -81,8 +81,11 @@ class _ControlTabState extends State<ControlTab> {
   void _toggleConnection() async {
     if (_isConnected) {
       await _controlService.disconnect();
-    } else if (widget.bridgeUrl != null && widget.bridgeUrl!.isNotEmpty) {
-      await _controlService.connect(widget.bridgeUrl!);
+    } else {
+      final url = _effectiveUrl;
+      if (url != null && url.isNotEmpty) {
+        await _controlService.connect(url);
+      }
     }
   }
 

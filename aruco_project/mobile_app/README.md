@@ -46,6 +46,18 @@ python3 test/pc/micropython_bridge.py --port /dev/ttyACM0 --http-port 5001
 
 This serves the same mobile endpoints as ROS2 bridge and forwards control packets to Pico over serial.
 
+## Pico firmware upload bundle (for mobile app tests)
+
+Use the ready bundle in `test/pico/mobile_app_bundle/`:
+
+```bash
+./test/pico/upload_mobile_bundle.sh /dev/ttyACM0
+```
+
+Detailed test flow:
+
+- `docs/MICROPYTHON_MOBILE_APP_TEST_GUIDE_2026-03-29.md`
+
 ---
 
 ## Build APK (release)
