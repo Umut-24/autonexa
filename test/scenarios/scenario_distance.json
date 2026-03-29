@@ -1,0 +1,61 @@
+[
+  {
+    "id": "TC-D01",
+    "name": "Forward 1.0 m",
+    "description": "Drive straight forward 1 meter. Measure actual travel with tape. Target: <5% error.",
+    "packet": {"cmd": "DRIVE", "distance_m": 1.0, "speed": 0.25},
+    "timeout_s": 12,
+    "pass_criteria": "travelled >= 0.95 m and travelled <= 1.05 m"
+  },
+  {
+    "id": "TC-D02",
+    "name": "Turn right 15 degrees",
+    "description": "Rotate right 15 degrees in place. Mark start heading on floor. Target: <3 deg error.",
+    "packet": {"cmd": "TURN", "angle_deg": 15.0, "speed": 0.20},
+    "timeout_s": 6,
+    "pass_criteria": "heading_delta in [12, 18] deg"
+  },
+  {
+    "id": "TC-D03",
+    "name": "Turn left 30 degrees",
+    "description": "Rotate left 30 degrees in place. Target: <3 deg error.",
+    "packet": {"cmd": "TURN", "angle_deg": -30.0, "speed": 0.20},
+    "timeout_s": 8,
+    "pass_criteria": "heading_delta in [-27, -33] deg"
+  },
+  {
+    "id": "TC-D04",
+    "name": "Forward 0.5 m",
+    "description": "Drive straight forward 0.5 meters. Target: <5% error.",
+    "packet": {"cmd": "DRIVE", "distance_m": 0.5, "speed": 0.25},
+    "timeout_s": 8,
+    "pass_criteria": "travelled in [0.475, 0.525] m"
+  },
+  {
+    "id": "TC-D05",
+    "name": "Reverse 0.3 m",
+    "description": "Drive in reverse 0.3 meters. Target: <5% error.",
+    "packet": {"cmd": "DRIVE", "distance_m": -0.3, "speed": 0.20},
+    "timeout_s": 6,
+    "pass_criteria": "travelled in [-0.285, -0.315] m"
+  },
+  {
+    "id": "TC-D06",
+    "name": "Turn right 90 degrees",
+    "description": "Rotate right 90 degrees in place. Target: <5 deg error.",
+    "packet": {"cmd": "TURN", "angle_deg": 90.0, "speed": 0.20},
+    "timeout_s": 12,
+    "pass_criteria": "heading_delta in [85, 95] deg"
+  },
+  {
+    "id": "TC-D07",
+    "name": "Emergency stop mid-drive",
+    "description": "Start a 2m drive, send STOP after 1s. Robot must halt immediately.",
+    "sequence": [
+      {"cmd": "DRIVE", "distance_m": 2.0, "speed": 0.25},
+      {"delay_s": 1.0},
+      {"cmd": "STOP"}
+    ],
+    "pass_criteria": "motors stop within 300ms of STOP command"
+  }
+]
