@@ -281,6 +281,7 @@ class _ControlTabState extends State<ControlTab> {
 
   Widget _connectionBadge() {
     final modeLabel = widget.micropythonMode ? 'MPY' : 'ROS2';
+    final linked = _isConnected || _telemetry.connected;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
@@ -296,14 +297,14 @@ class _ControlTabState extends State<ControlTab> {
             height: 7,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: _isConnected ? AppColors.success : AppColors.error,
+              color: linked ? AppColors.success : AppColors.error,
             ),
           ),
           const SizedBox(width: 6),
           Text(
-            _isConnected ? 'LINKED' : 'NO LINK',
+            linked ? 'LINKED' : 'NO LINK',
             style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
-                color: _isConnected ? AppColors.success : AppColors.error),
+                color: linked ? AppColors.success : AppColors.error),
           ),
           const SizedBox(width: 6),
           Container(

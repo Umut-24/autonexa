@@ -60,6 +60,10 @@ class PicoTelemetry {
 /// Includes a safety watchdog: the RPi5 bridge auto-zeros cmd_vel
 /// if no command arrives within 500ms.
 class PicoUdpService {
+  static const Duration _sendTimeout = Duration(milliseconds: 1000);
+  static const Duration _telemetryTimeout = Duration(milliseconds: 1500);
+  static const Duration _healthTimeout = Duration(seconds: 3);
+
   String? _baseUrl;
   Timer? _sendTimer;
   Timer? _telemetryTimer;
@@ -98,12 +102,25 @@ class PicoUdpService {
       normalized = normalized.replaceAll(RegExp(r'/*$'), '');
       _baseUrl = normalized;
 
-      // Health check
-      final resp = await http.get(
-        Uri.parse('$_baseUrl/api/status'),
-      ).timeout(const Duration(seconds: 3));
+      // Health check: prefer /api/status, fall back to /api/telemetry.
+      bool healthy = false;
+      try {
+        final resp = await http.get(
+          Uri.parse('$_baseUrl/api/status'),
+        ).timeout(_healthTimeout);
+        healthy = resp.statusCode == 200;
+      } catch (_) {}
 
-      if (resp.statusCode != 200) {
+      if (!healthy) {
+        try {
+          final resp = await http.get(
+            Uri.parse('$_baseUrl/api/telemetry'),
+          ).timeout(_telemetryTimeout);
+          healthy = resp.statusCode == 200;
+        } catch (_) {}
+      }
+
+      if (!healthy) {
         _baseUrl = null;
         return false;
       }
@@ -123,9 +140,7 @@ class PicoUdpService {
         _checkHealth();
       });
 
-      _isConnected = true;
-      _consecutiveFailures = 0;
-      onConnectionChanged?.call(true);
+      _markHealthy();
       return true;
     } catch (e) {
       _baseUrl = null;
@@ -205,7 +220,7 @@ class PicoUdpService {
       Uri.parse('$_baseUrl/api/control'),
       headers: {'Content-Type': 'application/json'},
       body: data,
-    ).timeout(const Duration(milliseconds: 200)).catchError((_) {
+    ).timeout(_sendTimeout).catchError((_) {
       return http.Response('', 500);
     });
   }
@@ -215,11 +230,12 @@ class PicoUdpService {
     try {
       final resp = await http.get(
         Uri.parse('$_baseUrl/api/telemetry'),
-      ).timeout(const Duration(milliseconds: 500));
+      ).timeout(_telemetryTimeout);
 
       if (resp.statusCode == 200) {
         final json = jsonDecode(resp.body) as Map<String, dynamic>;
         telemetry = PicoTelemetry.fromJson(json);
+        _markHealthy();
         onTelemetryUpdate?.call(telemetry);
       }
     } catch (_) {}
@@ -230,14 +246,10 @@ class PicoUdpService {
     try {
       final resp = await http.get(
         Uri.parse('$_baseUrl/api/status'),
-      ).timeout(const Duration(seconds: 2));
+      ).timeout(_healthTimeout);
 
       if (resp.statusCode == 200) {
-        _consecutiveFailures = 0;
-        if (!_isConnected) {
-          _isConnected = true;
-          onConnectionChanged?.call(true);
-        }
+        _markHealthy();
       } else {
         _onHealthFailure();
       }
@@ -248,11 +260,19 @@ class PicoUdpService {
 
   void _onHealthFailure() {
     _consecutiveFailures++;
-    if (_consecutiveFailures >= 3 && _isConnected) {
+    if (_consecutiveFailures >= 5 && _isConnected) {
       _isConnected = false;
       telemetry = const PicoTelemetry(connected: false);
       onConnectionChanged?.call(false);
       onTelemetryUpdate?.call(telemetry);
+    }
+  }
+
+  void _markHealthy() {
+    _consecutiveFailures = 0;
+    if (!_isConnected) {
+      _isConnected = true;
+      onConnectionChanged?.call(true);
     }
   }
 }

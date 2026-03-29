@@ -248,7 +248,7 @@ def api_estop_clear():
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    global ser_port
+    global ser_port, seq_counter
 
     parser = argparse.ArgumentParser(description="MicroPython HTTP bridge for AutoNexa")
     parser.add_argument("--port", default="/dev/ttyACM0",
@@ -257,6 +257,12 @@ def main():
     parser.add_argument("--http-port", type=int, default=5001,
                         help="HTTP server port (default: 5001)")
     args = parser.parse_args()
+
+    # Start from a very large monotonic-ish value so Pico doesn't reject
+    # commands as "old" after bridge restarts.
+    # Use microseconds (not milliseconds) to stay far above any previous
+    # ms-based counter values.
+    seq_counter = int(time.time() * 1_000_000)
 
     print(f"[bridge] Opening serial {args.port} @ {args.baud}")
     try:
