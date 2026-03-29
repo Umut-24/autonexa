@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
-/// Telemetry data received from the RPi5 bridge (Pico via ROS2).
+/// Telemetry data received from the RPi5 bridge (Pico via ROS2 or MicroPython).
 class PicoTelemetry {
   final double leftVel;
   final double rightVel;
@@ -13,6 +13,10 @@ class PicoTelemetry {
   final double odomY;
   final double odomYaw;
   final bool connected;
+  final String picoState;      // MicroPython mode: IDLE, DRIVE, TURN, FAILED
+  final int leftTicks;         // MicroPython mode: raw encoder ticks
+  final int rightTicks;
+  final double headingDeg;     // MicroPython mode: heading in degrees
 
   const PicoTelemetry({
     this.leftVel = 0,
@@ -24,6 +28,10 @@ class PicoTelemetry {
     this.odomY = 0,
     this.odomYaw = 0,
     this.connected = false,
+    this.picoState = '',
+    this.leftTicks = 0,
+    this.rightTicks = 0,
+    this.headingDeg = 0,
   });
 
   factory PicoTelemetry.fromJson(Map<String, dynamic> json) {
@@ -37,6 +45,10 @@ class PicoTelemetry {
       odomY: (json['odom_y'] ?? 0).toDouble(),
       odomYaw: (json['odom_yaw'] ?? 0).toDouble(),
       connected: true,
+      picoState: (json['pico_state'] ?? '').toString(),
+      leftTicks: (json['left_ticks'] ?? 0).toInt(),
+      rightTicks: (json['right_ticks'] ?? 0).toInt(),
+      headingDeg: (json['heading_deg'] ?? 0).toDouble(),
     );
   }
 }

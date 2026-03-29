@@ -98,6 +98,7 @@ class _HomePageState extends State<HomePage> {
   Timer? _pollTimer;
   Map<String, dynamic> _state = {};
   int _currentTab = 3; // Start on Control tab
+  bool _micropythonMode = false;
 
   @override
   void dispose() {
@@ -170,7 +171,7 @@ class _HomePageState extends State<HomePage> {
           _buildCameraTab(),
           _buildDashboardTab(),
           _buildMapTab(),
-          ControlTab(bridgeUrl: _baseUrl),
+          ControlTab(bridgeUrl: _baseUrl, micropythonMode: _micropythonMode),
           _buildSettingsTab(),
         ],
       ),
@@ -485,6 +486,59 @@ class _HomePageState extends State<HomePage> {
                             ],
                           ),
                         ],
+                      ],
+                    ),
+                  ),
+                ),
+                // Control Mode
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _sectionTitle('Control Mode'),
+                        const SizedBox(height: 10),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(
+                            _micropythonMode ? 'MicroPython Direct' : 'ROS2 Bridge',
+                            style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+                          ),
+                          subtitle: Text(
+                            _micropythonMode
+                                ? 'Lightweight bridge on port 5001 (no ROS2 needed)'
+                                : 'Full Nav2 stack via ros2_mobile_bridge',
+                            style: const TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                          ),
+                          value: _micropythonMode,
+                          activeTrackColor: AppColors.accent,
+                          onChanged: (val) {
+                            setState(() => _micropythonMode = val);
+                          },
+                        ),
+                        if (_micropythonMode)
+                          Container(
+                            margin: const EdgeInsets.only(top: 8),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: AppColors.accentDim.withValues(alpha: 0.3),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(Icons.developer_board, size: 16, color: AppColors.accent),
+                                SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Run micropython_bridge.py on RPi5. '
+                                    'Pico must be connected via USB.',
+                                    style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                       ],
                     ),
                   ),

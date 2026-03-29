@@ -10,8 +10,9 @@ import 'pico_udp_service.dart';
 /// Two modes: normal (portrait) and fullscreen (landscape).
 class ControlTab extends StatefulWidget {
   final String? bridgeUrl;
+  final bool micropythonMode;
 
-  const ControlTab({super.key, this.bridgeUrl});
+  const ControlTab({super.key, this.bridgeUrl, this.micropythonMode = false});
 
   @override
   State<ControlTab> createState() => _ControlTabState();
@@ -41,16 +42,31 @@ class _ControlTabState extends State<ControlTab> {
     _autoConnect();
   }
 
+  String? get _effectiveUrl {
+    final url = widget.bridgeUrl;
+    if (url == null || url.isEmpty) return null;
+    if (!widget.micropythonMode) return url;
+    // In MicroPython mode, replace port with 5001
+    try {
+      final uri = Uri.parse(url);
+      return uri.replace(port: 5001).toString();
+    } catch (_) {
+      return url;
+    }
+  }
+
   void _autoConnect() async {
-    if (widget.bridgeUrl != null && widget.bridgeUrl!.isNotEmpty) {
-      await _controlService.connect(widget.bridgeUrl!);
+    final url = _effectiveUrl;
+    if (url != null && url.isNotEmpty) {
+      await _controlService.connect(url);
     }
   }
 
   @override
   void didUpdateWidget(covariant ControlTab oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.bridgeUrl != oldWidget.bridgeUrl) {
+    if (widget.bridgeUrl != oldWidget.bridgeUrl ||
+        widget.micropythonMode != oldWidget.micropythonMode) {
       _controlService.disconnect().then((_) => _autoConnect());
     }
   }
@@ -261,6 +277,7 @@ class _ControlTabState extends State<ControlTab> {
   }
 
   Widget _connectionBadge() {
+    final modeLabel = widget.micropythonMode ? 'MPY' : 'ROS2';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
@@ -285,6 +302,34 @@ class _ControlTabState extends State<ControlTab> {
             style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
                 color: _isConnected ? AppColors.success : AppColors.error),
           ),
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            decoration: BoxDecoration(
+              color: widget.micropythonMode
+                  ? AppColors.accent.withValues(alpha: 0.15)
+                  : AppColors.accentDim.withValues(alpha: 0.3),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              modeLabel,
+              style: TextStyle(fontSize: 8, fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5,
+                  color: widget.micropythonMode ? AppColors.accent : AppColors.textSecondary),
+            ),
+          ),
+          if (widget.micropythonMode && _telemetry.picoState.isNotEmpty) ...[
+            const SizedBox(width: 6),
+            Text(
+              _telemetry.picoState,
+              style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600,
+                  color: _telemetry.picoState == 'IDLE'
+                      ? AppColors.success
+                      : _telemetry.picoState == 'FAILED'
+                          ? AppColors.error
+                          : AppColors.warning),
+            ),
+          ],
         ],
       ),
     );
@@ -337,9 +382,18 @@ class _ControlTabState extends State<ControlTab> {
                   _estopButton(compact: false),
                   const SizedBox(height: 10),
 
-                  // Nav2 Goal
+                  // MicroPython telemetry extras
+                  if (widget.micropythonMode && _telemetry.picoState.isNotEmpty) ...[
+                    _buildMicroPythonTelemetry(),
+                    const SizedBox(height: 10),
+                  ],
+
+                  // Goal buttons (mode-dependent)
                   if (widget.bridgeUrl != null) ...[
-                    _buildNavGoalButton(),
+                    if (widget.micropythonMode)
+                      _buildMicroPythonGoalButtons()
+                    else
+                      _buildNavGoalButton(),
                     const SizedBox(height: 10),
                   ],
                 ],
@@ -585,6 +639,204 @@ class _ControlTabState extends State<ControlTab> {
     );
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //  MICROPYTHON MODE WIDGETS
+  // ═══════════════════════════════════════════════════════════════════════
+
+  Widget _buildMicroPythonTelemetry() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(
+        children: [
+          _microTelemetryItem('STATE', _telemetry.picoState),
+          _microTelemetryItem('DIST', '${_telemetry.odomX.toStringAsFixed(3)}m'),
+          _microTelemetryItem('HDG', '${_telemetry.headingDeg.toStringAsFixed(1)}°'),
+          _microTelemetryItem('L TK', '${_telemetry.leftTicks}'),
+          _microTelemetryItem('R TK', '${_telemetry.rightTicks}'),
+        ],
+      ),
+    );
+  }
+
+  Widget _microTelemetryItem(String label, String value) {
+    return Expanded(
+      child: Column(
+        children: [
+          Text(value,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                  fontFamily: 'monospace', color: AppColors.textPrimary)),
+          const SizedBox(height: 1),
+          Text(label,
+              style: const TextStyle(fontSize: 8, letterSpacing: 0.5,
+                  color: AppColors.textSecondary)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMicroPythonGoalButtons() {
+    return Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: _goalButton('DRIVE', Icons.arrow_forward_rounded, AppColors.accentDim, () {
+                _showDriveDialog();
+              }),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _goalButton('TURN', Icons.rotate_right_rounded, AppColors.accentDim, () {
+                _showTurnDialog();
+              }),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: _goalButton('STOP', Icons.stop_rounded, AppColors.error.withValues(alpha: 0.7), () {
+                _sendGoalCommand({'cmd': 'STOP'});
+              }),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _goalButton('RESET ODOM', Icons.restart_alt_rounded, AppColors.surfaceLight, () {
+                _sendGoalCommand({'cmd': 'RESET_ODOM'});
+              }),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _goalButton(String label, IconData icon, Color bg, VoidCallback onTap) {
+    return SizedBox(
+      height: 42,
+      child: ElevatedButton.icon(
+        onPressed: onTap,
+        icon: Icon(icon, size: 16),
+        label: Text(label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: bg,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          elevation: 0,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _sendGoalCommand(Map<String, dynamic> cmd) async {
+    final url = _effectiveUrl;
+    if (url == null) return;
+    try {
+      await http.post(
+        Uri.parse('$url/api/goal'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(cmd),
+      ).timeout(const Duration(seconds: 3));
+    } catch (_) {}
+  }
+
+  void _showDriveDialog() {
+    final distCtrl = TextEditingController(text: '0.5');
+    final speedCtrl = TextEditingController(text: '0.20');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Drive Command'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: distCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+              decoration: const InputDecoration(labelText: 'Distance (m)', hintText: 'Negative = reverse'),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: speedCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(labelText: 'Speed (m/s)'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final dist = double.tryParse(distCtrl.text);
+              final speed = double.tryParse(speedCtrl.text);
+              if (dist == null || speed == null) return;
+              Navigator.pop(ctx);
+              _sendGoalCommand({'cmd': 'DRIVE', 'distance_m': dist, 'speed': speed});
+            },
+            child: const Text('Send'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showTurnDialog() {
+    final angleCtrl = TextEditingController(text: '15');
+    final speedCtrl = TextEditingController(text: '0.20');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Turn Command'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: angleCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+              decoration: const InputDecoration(labelText: 'Angle (degrees)', hintText: 'Positive = right, Negative = left'),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: speedCtrl,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              decoration: const InputDecoration(labelText: 'Speed (m/s)'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.textSecondary)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final angle = double.tryParse(angleCtrl.text);
+              final speed = double.tryParse(speedCtrl.text);
+              if (angle == null || speed == null) return;
+              Navigator.pop(ctx);
+              _sendGoalCommand({'cmd': 'TURN', 'angle_deg': angle, 'speed': speed});
+            },
+            child: const Text('Send'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showNavGoalDialog() {
     final xCtrl = TextEditingController();
     final yCtrl = TextEditingController();
@@ -632,7 +884,7 @@ class _ControlTabState extends State<ControlTab> {
               Navigator.pop(ctx);
               try {
                 await http.post(
-                  Uri.parse('${widget.bridgeUrl}/api/nav_goal'),
+                  Uri.parse('${_effectiveUrl}/api/nav_goal'),
                   headers: {'Content-Type': 'application/json'},
                   body: jsonEncode({'x': x, 'y': y, 'yaw': yaw}),
                 ).timeout(const Duration(seconds: 3));
