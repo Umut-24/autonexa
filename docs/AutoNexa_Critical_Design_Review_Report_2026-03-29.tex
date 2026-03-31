@@ -309,6 +309,92 @@ Pico $\rightarrow$ RPi5 & micro-ROS over USB serial & Encoder / telemetry topics
 \end{tabularx}
 \end{table}
 
+\subsection{Exact Data Communication (Implemented Topics and Fields)}
+The implemented RPi5$\leftrightarrow$Pico communication is topic-based over micro-ROS. For clarity, Table~\ref{tab:exact_fields_rpi5_pico} specifies the fields transmitted on the cable link. The same values can be logged or bridged in JSON for debugging and post-run analysis.
+
+\begin{table}[H]
+\centering
+\caption{Exact transmitted fields for RPi5 $\leftrightarrow$ Pico communication.}
+\label{tab:exact_fields_rpi5_pico}
+\begin{tabularx}{\textwidth}{|p{2.7cm}|p{2.8cm}|p{3.2cm}|p{2.1cm}|X|}
+\hline
+\textbf{Topic} & \textbf{Direction} & \textbf{Field(s)} & \textbf{Unit} & \textbf{Purpose} \\
+\hline
+\texttt{/pico/control\_cmd} & RPi5 $\rightarrow$ Pico & \texttt{linear.x} & m/s & Target longitudinal speed command after safety filtering. \\
+\cline{3-5}
+ &  & \texttt{linear.y} & m/s & Reserved (set to 0 in Ackermann mode). \\
+\cline{3-5}
+ &  & \texttt{linear.z} & m/s & Reserved (set to 0). \\
+\cline{3-5}
+ &  & \texttt{angular.x} & rad/s & Reserved (set to 0). \\
+\cline{3-5}
+ &  & \texttt{angular.y} & rad/s & Reserved (set to 0). \\
+\cline{3-5}
+ &  & \texttt{angular.z} & rad/s & Yaw-rate/steering request used by Ackermann conversion. \\
+\hline
+\texttt{/pico/heartbeat} & Pico $\rightarrow$ RPi5 & \texttt{stamp.sec}, \texttt{stamp.nanosec} & s, ns & Liveness timestamp for watchdog supervision. \\
+\cline{3-5}
+ &  & \texttt{alive} & bool/int & Explicit heartbeat alive flag. \\
+\hline
+\texttt{/pico/enable} & Pico $\rightarrow$ RPi5 & \texttt{enabled} & bool & Indicates whether actuation is enabled in firmware. \\
+\cline{3-5}
+ &  & \texttt{fault\_code} & int & Reports firmware-side safety fault state (0 means nominal). \\
+\hline
+Encoder/telemetry topic(s) & Pico $\rightarrow$ RPi5 & \texttt{left\_ticks}, \texttt{right\_ticks} & ticks & Wheel feedback for odometry and motion validation. \\
+\cline{3-5}
+ &  & \texttt{wheel\_speed\_left}, \texttt{wheel\_speed\_right} & m/s or rad/s & Measured wheel speeds for closed-loop monitoring. \\
+\hline
+\end{tabularx}
+\end{table}
+
+\textbf{JSON examples for logging/bridge diagnostics:}
+\begin{itemize}
+    \item \textbf{RPi5 $\rightarrow$ Pico control command (\texttt{/pico/control\_cmd}):}
+\begin{verbatim}
+{
+  "topic": "/pico/control_cmd",
+  "msg_type": "geometry_msgs/Twist",
+  "linear":  { "x": 0.22, "y": 0.0, "z": 0.0 },
+  "angular": { "x": 0.0,  "y": 0.0, "z": 0.35 },
+  "source": "cmd_vel_safe_bridge",
+  "stamp": { "sec": 1711838400, "nanosec": 120000000 }
+}
+\end{verbatim}
+
+    \item \textbf{Pico $\rightarrow$ RPi5 heartbeat (\texttt{/pico/heartbeat}):}
+\begin{verbatim}
+{
+  "topic": "/pico/heartbeat",
+  "alive": true,
+  "loop_hz": 30.0,
+  "stamp": { "sec": 1711838400, "nanosec": 150000000 }
+}
+\end{verbatim}
+
+    \item \textbf{Pico $\rightarrow$ RPi5 enable status (\texttt{/pico/enable}):}
+\begin{verbatim}
+{
+  "topic": "/pico/enable",
+  "enabled": true,
+  "fault_code": 0,
+  "reason": "nominal_operation",
+  "stamp": { "sec": 1711838400, "nanosec": 150500000 }
+}
+\end{verbatim}
+
+    \item \textbf{Pico $\rightarrow$ RPi5 encoder telemetry (example):}
+\begin{verbatim}
+{
+  "topic": "/pico/encoder_feedback",
+  "left_ticks": 15234,
+  "right_ticks": 15198,
+  "wheel_speed_left": 0.21,
+  "wheel_speed_right": 0.20,
+  "stamp": { "sec": 1711838400, "nanosec": 151000000 }
+}
+\end{verbatim}
+\end{itemize}
+
 Compatibility is ensured by message-type agreement (ROS2 contracts), shared timing assumptions (nominal command/update rates), and deterministic timeout behavior on both ends of the cable interface.
 
 \begin{table}[H]
