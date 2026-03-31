@@ -153,7 +153,7 @@ The diagram is designed to be review-traceable: each block corresponds to a conc
 \begin{figure}[H]
     \centering
     \begin{tikzpicture}[
-        node distance=8mm and 9mm,
+        node distance=8mm,
         block/.style={draw, rounded corners, minimum width=2.6cm, minimum height=0.95cm, align=center, fill=blue!8},
         safety/.style={draw, rounded corners, minimum width=2.6cm, minimum height=0.95cm, align=center, fill=red!10},
         hw/.style={draw, rounded corners, minimum width=2.6cm, minimum height=0.95cm, align=center, fill=orange!12},
@@ -161,22 +161,22 @@ The diagram is designed to be review-traceable: each block corresponds to a conc
         line/.style={-Latex, thick}
     ]
     \node[hw] (lidar) {LiDAR\\Sensor};
-    \node[block, right=of lidar] (perception) {Perception\\SLAM + Localization};
-    \node[block, right=of perception] (nav2) {Navigation\\Nav2 Planner/Controller};
+    \node[block, below=of lidar] (perception) {Perception\\SLAM + Localization};
+    \node[block, below=of perception] (nav2) {Navigation\\Nav2 Planner/Controller};
     \node[safety, below=of nav2] (safety) {Safety Chain\\Smoother + Collision Monitor};
-    \node[io, right=of nav2] (bridge) {ROS Bridge\\cmd\_vel\_to\_pico};
-    \node[hw, right=of bridge] (pico) {Pico WH\\Real-Time Firmware};
+    \node[io, below=of safety] (bridge) {ROS Bridge\\cmd\_vel\_to\_pico};
+    \node[hw, below=of bridge] (pico) {Pico WH\\Real-Time Firmware};
     \node[hw, below=of pico] (act) {Actuation\\Servo + Motor};
-    \node[io, below=of bridge] (health) {Health Feedback\\Heartbeat + Enable};
+    \node[io, right=26mm of pico] (health) {Health Feedback\\Heartbeat + Enable};
 
-    \draw[line] (lidar) -- node[above,sloped]{\texttt{/scan}} (perception);
-    \draw[line] (perception) -- node[above]{map, odom, tf} (nav2);
+    \draw[line] (lidar) -- node[right]{\texttt{/scan}} (perception);
+    \draw[line] (perception) -- node[right]{map, odom, tf} (nav2);
     \draw[line] (nav2) -- node[right]{\texttt{/cmd\_vel}} (safety);
-    \draw[line] (safety) -- node[below,sloped]{\texttt{/cmd\_vel\_safe}} (bridge);
-    \draw[line] (bridge) -- node[above]{\texttt{/pico/control\_cmd}} (pico);
-    \draw[line] (pico) -- (act);
-    \draw[line] (pico) -- (health);
-    \draw[line] (health) -- (bridge);
+    \draw[line] (safety) -- node[right]{\texttt{/cmd\_vel\_safe}} (bridge);
+    \draw[line] (bridge) -- node[right]{\texttt{/pico/control\_cmd}} (pico);
+    \draw[line] (pico) -- node[right]{PWM/I2C/GPIO} (act);
+    \draw[line] (pico.east) -- (health.west);
+    \draw[line] (health.north) |- node[pos=0.2,right]{\texttt{/pico/heartbeat}, \texttt{/pico/enable}} (bridge.east);
     \end{tikzpicture}
     \caption{Overall system block diagram of the AutoNexa platform.}
     \label{fig:system_block}
@@ -205,6 +205,16 @@ Operationally, this design prevents direct high-level-to-hardware coupling, cont
     \item Pico executes actuator commands and enforces firmware-level timeout fallback.
     \item Heartbeat/enable telemetry closes the supervision loop for runtime safety.
 \end{enumerate}
+
+\textbf{Signal-level control flow (with interfaces):}
+\begin{itemize}
+    \item LiDAR $\rightarrow$ RPi5 perception: \texttt{/scan} (\texttt{sensor\_msgs/LaserScan}).
+    \item Perception $\rightarrow$ Nav2: \texttt{/map}, \texttt{/odom}, \texttt{/tf} (localization and frame consistency).
+    \item Nav2 $\rightarrow$ safety chain: \texttt{/cmd\_vel} (\texttt{geometry\_msgs/Twist} request command).
+    \item Safety chain $\rightarrow$ bridge: \texttt{/cmd\_vel\_safe} (filtered command).
+    \item RPi5 bridge $\rightarrow$ Pico via USB serial cable (micro-ROS): \texttt{/pico/control\_cmd} (bounded steering/speed command).
+    \item Pico $\rightarrow$ RPi5 via USB serial cable (micro-ROS): \texttt{/pico/heartbeat}, \texttt{/pico/enable}, and status/feedback topics for watchdog supervision.
+\end{itemize}
 
 \section{System Architecture}
 
@@ -276,6 +286,30 @@ SYS-06 & Incremental integration path & Independent subsystem testability \\
     \item Timing and latency compatibility: nominal 30 Hz command updates and timeout policy are in place.
     \item Middleware compatibility: ROS2 Jazzy, Nav2, and micro-ROS agent pipeline are aligned.
 \end{itemize}
+
+\subsection{Raspberry Pi 5 -- Pico Cable Signal Compatibility and Purpose}
+The RPi5 and Pico communicate through a USB serial cable carrying micro-ROS traffic. Table~\ref{tab:rpi5_pico_signals} lists the key signals exchanged on this link and the operational purpose of each transmitted data channel.
+
+\begin{table}[H]
+\centering
+\caption{Signal compatibility and purpose for RPi5 $\leftrightarrow$ Pico cable communication.}
+\label{tab:rpi5_pico_signals}
+\begin{tabularx}{\textwidth}{|p{2.2cm}|p{2.2cm}|p{3.1cm}|p{2.8cm}|X|}
+\hline
+\textbf{Direction} & \textbf{Layer} & \textbf{Signal / Topic} & \textbf{Data Type} & \textbf{Purpose} \\
+\hline
+RPi5 $\rightarrow$ Pico & micro-ROS over USB serial & \texttt{/pico/control\_cmd} & Control command message & Sends bounded steering/speed request from safety-filtered autonomy stack to firmware executor. \\
+\hline
+Pico $\rightarrow$ RPi5 & micro-ROS over USB serial & \texttt{/pico/heartbeat} & Heartbeat/status message & Confirms firmware liveness and communication continuity for watchdog supervision. \\
+\hline
+Pico $\rightarrow$ RPi5 & micro-ROS over USB serial & \texttt{/pico/enable} & Enable/state message & Indicates whether actuation path is enabled; used by bridge and supervisor for safe gating. \\
+\hline
+Pico $\rightarrow$ RPi5 & micro-ROS over USB serial & Encoder / telemetry topics & Feedback telemetry message(s) & Returns low-level execution feedback for monitoring, diagnostics, and closed-loop validation. \\
+\hline
+\end{tabularx}
+\end{table}
+
+Compatibility is ensured by message-type agreement (ROS2 contracts), shared timing assumptions (nominal command/update rates), and deterministic timeout behavior on both ends of the cable interface.
 
 \begin{table}[H]
 \centering
