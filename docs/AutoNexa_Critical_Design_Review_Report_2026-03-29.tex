@@ -22,6 +22,8 @@
 \usepackage{pdflscape}
 \usepackage{appendix}
 \usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
 
 % -------------------- HYPERREF --------------------
 \hypersetup{
@@ -142,32 +144,94 @@ Chapter~2 explains top-down system design and subsystem interfaces. Chapter~3 do
 The operating principle is organized as a perception-to-actuation chain. LiDAR scans feed SLAM and localization. Nav2 generates body-frame motion commands that pass through velocity smoothing and collision monitoring before entering the Pico bridge. The bridge enforces limits and safety conditions, then transmits bounded commands to Pico firmware via micro-ROS transport.
 
 \subsection{System-Level Block Diagram}
+Figure~\ref{fig:system_block} presents the finalized system-level block diagram of AutoNexa and maps each functional stage from sensing to actuation. The architecture is intentionally partitioned into perception, planning, safety conditioning, bridge logic, and embedded execution so each interface can be validated independently during integration.
+
+At top level, LiDAR data enters the ROS~2 perception stack, feeds SLAM/localization, and is consumed by Nav2 for path and velocity generation. Commands from Nav2 are never sent directly to hardware; they are routed through the safety chain (\texttt{/cmd\_vel} $\rightarrow$ \texttt{/cmd\_vel\_smoothed} $\rightarrow$ \texttt{/cmd\_vel\_safe}) and then forwarded by the bridge as \texttt{/pico/control\_cmd}. The Pico firmware enforces deterministic command execution and generates steering/motor outputs while publishing heartbeat and enable status back to the supervisory stack.
+
+The diagram is designed to be review-traceable: each block corresponds to a concrete subsystem owner, and each arrow corresponds to a topic or hardware interface that can be checked in runtime diagnostics.
+
 \begin{figure}[H]
     \centering
-    \IfFileExists{figures/system_block_diagram.png}{\includegraphics[width=0.85\textwidth]{figures/system_block_diagram.png}}{\fbox{\parbox{0.8\textwidth}{\centering Placeholder: system block diagram not committed yet.}}}
+    \begin{tikzpicture}[
+        node distance=8mm,
+        block/.style={draw, rounded corners, minimum width=2.6cm, minimum height=0.95cm, align=center, fill=blue!8},
+        safety/.style={draw, rounded corners, minimum width=2.6cm, minimum height=0.95cm, align=center, fill=red!10},
+        hw/.style={draw, rounded corners, minimum width=2.6cm, minimum height=0.95cm, align=center, fill=orange!12},
+        io/.style={draw, rounded corners, minimum width=2.6cm, minimum height=0.95cm, align=center, fill=purple!9},
+        line/.style={-Latex, thick}
+    ]
+    \node[hw] (lidar) {LiDAR\\Sensor};
+    \node[block, below=of lidar] (perception) {Perception\\SLAM + Localization};
+    \node[block, below=of perception] (nav2) {Navigation\\Nav2 Planner/Controller};
+    \node[safety, below=of nav2] (safety) {Safety Chain\\Smoother + Collision Monitor};
+    \node[io, below=of safety] (bridge) {ROS Bridge\\cmd\_vel\_to\_pico};
+    \node[hw, below=of bridge] (pico) {Pico WH\\Real-Time Firmware};
+    \node[hw, below=of pico] (act) {Actuation\\Servo + Motor};
+    \node[io, right=26mm of pico] (health) {Health Feedback\\Heartbeat + Enable};
+
+    \draw[line] (lidar) -- node[right]{\texttt{/scan}} (perception);
+    \draw[line] (perception) -- node[right]{map, odom, tf} (nav2);
+    \draw[line] (nav2) -- node[right]{\texttt{/cmd\_vel}} (safety);
+    \draw[line] (safety) -- node[right]{\texttt{/cmd\_vel\_safe}} (bridge);
+    \draw[line] (bridge) -- node[right]{\texttt{/pico/control\_cmd}} (pico);
+    \draw[line] (pico) -- node[right]{PWM/I2C/GPIO} (act);
+    \draw[line] (pico.east) -- (health.west);
+    \draw[line] (health.north) |- node[pos=0.2,right]{\texttt{/pico/heartbeat}, \texttt{/pico/enable}} (bridge.east);
+    \end{tikzpicture}
     \caption{Overall system block diagram of the AutoNexa platform.}
     \label{fig:system_block}
 \end{figure}
 
 \subsection{Overall Data and Control Flow}
-Main sensing data are published on \texttt{/scan}. Navigation output from \texttt{/cmd\_vel} is shaped by velocity smoothing and collision monitoring, then forwarded as \texttt{/pico/control\_cmd}. Feedback channels include odometry, TF transforms, and bridge health topics (\texttt{/pico/enable}, \texttt{/pico/heartbeat}).
+The overall flow is organized as a strict, safety-gated command pipeline with explicit feedback closure. Data flow begins with LiDAR scan acquisition and continues through SLAM/localization, where environment and pose estimates are produced for Nav2 planning. Nav2 outputs candidate motion commands on \texttt{/cmd\_vel}, but these are treated as \emph{requests} rather than directly executable actuation signals.
+
+Before any command can reach hardware, it is filtered by two consecutive guards: velocity smoothing (rate and acceleration shaping) and collision monitoring (obstacle-aware command suppression). This produces \texttt{/cmd\_vel\_safe}, which is then translated by the bridge into embedded command format on \texttt{/pico/control\_cmd}. Bridge logic also enforces timeout-to-zero, duplicate publisher protection, and enable-state checks, ensuring stale or conflicting command streams are rejected.
+
+At embedded level, Pico firmware executes a deterministic control loop that maps bounded command inputs into servo PWM and motor outputs. In parallel, status and liveness signals are returned through heartbeat/enable channels so the ROS-side supervisor can detect degraded states quickly.
+
+From a control-theoretic perspective, the architecture separates:
+\begin{itemize}
+    \item \textbf{Forward control path:} perception $\rightarrow$ planning $\rightarrow$ safety filters $\rightarrow$ bridge $\rightarrow$ firmware $\rightarrow$ actuators.
+    \item \textbf{Backward supervision path:} firmware/bridge health $\rightarrow$ diagnostics/monitoring $\rightarrow$ operator or autonomy fallback behavior.
+\end{itemize}
+
+Operationally, this design prevents direct high-level-to-hardware coupling, contains faults to specific stages, and allows verification per interface during staged integration. The end-to-end sequence is summarized below for implementation traceability:
+\begin{enumerate}[label=\textbf{Step \arabic*:}, leftmargin=2.2cm]
+    \item LiDAR publishes \texttt{/scan}; TF-validity checks ensure frame consistency.
+    \item SLAM/localization updates map and pose (map--odom--base\_link chain).
+    \item Nav2 generates motion request on \texttt{/cmd\_vel}.
+    \item Velocity smoother and collision monitor produce \texttt{/cmd\_vel\_safe}.
+    \item Bridge validates freshness/single-source control and outputs \texttt{/pico/control\_cmd}.
+    \item Pico executes actuator commands and enforces firmware-level timeout fallback.
+    \item Heartbeat/enable telemetry closes the supervision loop for runtime safety.
+\end{enumerate}
+
+\textbf{Signal-level control flow (with interfaces):}
+\begin{itemize}
+    \item LiDAR $\rightarrow$ RPi5 perception: \texttt{/scan} (\texttt{sensor\_msgs/LaserScan}).
+    \item Perception $\rightarrow$ Nav2: \texttt{/map}, \texttt{/odom}, \texttt{/tf} (localization and frame consistency).
+    \item Nav2 $\rightarrow$ safety chain: \texttt{/cmd\_vel} (\texttt{geometry\_msgs/Twist} request command).
+    \item Safety chain $\rightarrow$ bridge: \texttt{/cmd\_vel\_safe} (filtered command).
+    \item RPi5 bridge $\rightarrow$ Pico via USB serial cable (micro-ROS): \texttt{/pico/control\_cmd} (bounded steering/speed command).
+    \item Pico $\rightarrow$ RPi5 via USB serial cable (micro-ROS): \texttt{/pico/heartbeat}, \texttt{/pico/enable}, and status/feedback topics for watchdog supervision.
+\end{itemize}
 
 \section{System Architecture}
 
 \subsection{Perception Subsystem}
-Perception is LiDAR-centered in the current baseline. SLAM Toolbox and scan-matcher pipelines provide map updates and odometry support. ArUco/camera workflows are maintained as optional future extensions but are not the primary dependency for current parking baseline behavior.
+The perception subsystem provides LiDAR-based scan, map, and pose outputs required by Nav2, with camera/Aruco support kept optional.
 
 \subsection{Control Subsystem}
-Control uses low-speed conservative limits for safe operation. Steering is generated with Ackermann conversion and servo PWM output. Drive control is passed to the motor driver through Pico-managed channels. Safety features include clamping, acceleration limiting, timeout stop, and heartbeat supervision.
+The control subsystem converts planned velocity into bounded actuation intents using Ackermann-compatible mapping and safety constraints.
 
 \subsection{Navigation Subsystem}
-Navigation uses ROS~2 Nav2 with conservative planner/controller settings (Navfn + DWB baseline). The system supports live map generation and pose-goal navigation, with tuning focused on stable convergence and reduced oscillation near parking goals.
+The navigation subsystem (Nav2) handles goal-to-path-to-command generation with conservative tuning for stable indoor parking maneuvers.
 
 \subsection{Embedded Subsystem}
-Pico WH handles deterministic functions: command intake, Ackermann IK, PWM generation, I2C motor driver output, and encoder feedback processing. micro-ROS transport bridges high-level commands from Pi~5 to firmware topics/services.
+The embedded subsystem on Pico WH executes deterministic firmware loops, drives steering/motor hardware, and reports health feedback.
 
 \subsection{Power Subsystem}
-The power tree separates logic and actuation rails (e.g., 5V logic, dedicated motor and servo rails). This separation reduces noise coupling and improves robustness during transient actuator loads.
+The power subsystem separates logic and actuation rails to improve noise immunity and maintain stable operation under transient motor loads.
 
 \section{Technical Drawings of the Expected Final Product}
 \begin{figure}[H]
@@ -222,6 +286,30 @@ SYS-06 & Incremental integration path & Independent subsystem testability \\
     \item Timing and latency compatibility: nominal 30 Hz command updates and timeout policy are in place.
     \item Middleware compatibility: ROS2 Jazzy, Nav2, and micro-ROS agent pipeline are aligned.
 \end{itemize}
+
+\subsection{Raspberry Pi 5 -- Pico Cable Signal Compatibility and Purpose}
+The RPi5 and Pico communicate through a USB serial cable carrying micro-ROS traffic. Table~\ref{tab:rpi5_pico_signals} lists the key signals exchanged on this link and the operational purpose of each transmitted data channel.
+
+\begin{table}[H]
+\centering
+\caption{Signal compatibility and purpose for RPi5 $\leftrightarrow$ Pico cable communication.}
+\label{tab:rpi5_pico_signals}
+\begin{tabularx}{\textwidth}{|p{2.2cm}|p{2.2cm}|p{3.1cm}|p{2.8cm}|X|}
+\hline
+\textbf{Direction} & \textbf{Layer} & \textbf{Signal / Topic} & \textbf{Data Type} & \textbf{Purpose} \\
+\hline
+RPi5 $\rightarrow$ Pico & micro-ROS over USB serial & \texttt{/pico/control\_cmd} & Control command message & Sends bounded steering/speed request from safety-filtered autonomy stack to firmware executor. \\
+\hline
+Pico $\rightarrow$ RPi5 & micro-ROS over USB serial & \texttt{/pico/heartbeat} & Heartbeat/status message & Confirms firmware liveness and communication continuity for watchdog supervision. \\
+\hline
+Pico $\rightarrow$ RPi5 & micro-ROS over USB serial & \texttt{/pico/enable} & Enable/state message & Indicates whether actuation path is enabled; used by bridge and supervisor for safe gating. \\
+\hline
+Pico $\rightarrow$ RPi5 & micro-ROS over USB serial & Encoder / telemetry topics & Feedback telemetry message(s) & Returns low-level execution feedback for monitoring, diagnostics, and closed-loop validation. \\
+\hline
+\end{tabularx}
+\end{table}
+
+Compatibility is ensured by message-type agreement (ROS2 contracts), shared timing assumptions (nominal command/update rates), and deterministic timeout behavior on both ends of the cable interface.
 
 \begin{table}[H]
 \centering
