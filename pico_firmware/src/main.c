@@ -240,15 +240,19 @@ static void process_serial_command(const char *cmd)
     else if (strcmp(cmd, "HELP") == 0) {
         printf("Commands:\n");
         printf("  SERVO_PWM <us>       - Raw servo PWM (500-2500)\n");
-        printf("  SERVO_ANGLE <rad>    - Servo angle\n");
+        printf("  SERVO_ANGLE <rad>    - Servo angle (±0.52 rad = ±30 deg)\n");
         printf("  SERVO_CENTER         - Center steering\n");
-        printf("  SPEED <-100..100>    - Both motors speed\n");
-        printf("  SPEED_L <-100..100>  - Left motor speed\n");
-        printf("  SPEED_R <-100..100>  - Right motor speed\n");
+        printf("  SPEED <-30..30>      - Both motors (closed-loop, pulses/10ms)\n");
+        printf("  SPEED_L <-30..30>    - Left motor speed\n");
+        printf("  SPEED_R <-30..30>    - Right motor speed\n");
         printf("  STEER <rad>          - Steering angle\n");
-        printf("  VEL <vx> <wz>        - Ackermann velocity cmd\n");
+        printf("  VEL <vx> <wz>        - Ackermann velocity cmd (m/s, rad/s)\n");
         printf("  ENC_READ             - Read encoder counts\n");
+        printf("  RAW_PWM <m1..m4>     - Open-loop PWM bypass (reg 0x1F)\n");
+        printf("  RAW_PID <m1..m4>     - Closed-loop bypass (reg 0x33)\n");
         printf("  I2C_SCAN             - Scan I2C bus\n");
+        printf("  I2C_WRITE <reg> <val> - Raw I2C write\n");
+        printf("  I2C_READ <reg> <len> - Raw I2C read\n");
         printf("  ENABLE               - Enable motors\n");
         printf("  DISABLE              - Disable motors\n");
         printf("  STOP                 - Stop all + center\n");

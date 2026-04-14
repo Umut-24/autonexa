@@ -10,32 +10,34 @@
  * The Hiwonder motor driver board has its own MCU (YX-4055AM) that
  * handles motor PID and encoder counting internally. We communicate
  * via I2C to:
- *   - Set motor speed for each channel (M1–M4)
- *   - Read encoder counts from each channel
+ *   - Configure motor type and encoder polarity (registers 0x14, 0x15)
+ *   - Set motor speed for each channel M1–M4 (closed-loop: register 0x33)
+ *   - Read accumulated encoder counts (register 0x3C, 4×int32 LE)
  *   - Stop all motors
  *
  * Motor channel mapping:
  *   M2 = left rear wheel
  *   M4 = right rear wheel
  *
- * Speed range: -100 to +100 (negative = reverse)
+ * Speed units: encoder pulses per 10ms (closed-loop PID on the board).
+ * Clamped to MOTOR_SPEED_MIN..MOTOR_SPEED_MAX (see config.h).
  */
 
 /** Initialise I2C bus and verify communication with driver board. */
 bool hiwonder_driver_init(void);
 
 /**
- * Set motor speed on a specific channel.
+ * Set motor speed on a specific channel (closed-loop PID).
  * @param channel  Motor channel (1–4)
- * @param speed    Speed value [-100 .. +100]. 0 = stop.
+ * @param speed    Speed in pulses/10ms [MOTOR_SPEED_MIN..MOTOR_SPEED_MAX]. 0 = stop.
  * @return         true if I2C write succeeded.
  */
 bool hiwonder_set_speed(uint8_t channel, int8_t speed);
 
 /**
- * Set left and right rear motor speeds simultaneously.
- * @param speed_left   Left motor speed [-100 .. +100]
- * @param speed_right  Right motor speed [-100 .. +100]
+ * Set left and right rear motor speeds simultaneously (closed-loop PID).
+ * @param speed_left   Left motor speed in pulses/10ms
+ * @param speed_right  Right motor speed in pulses/10ms
  * @return             true if both I2C writes succeeded.
  */
 bool hiwonder_set_speeds(int8_t speed_left, int8_t speed_right);
