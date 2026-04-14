@@ -32,9 +32,13 @@
 #define MOTOR_CHANNEL_LEFT   2       /* M2 = left rear                     */
 #define MOTOR_CHANNEL_RIGHT  4       /* M4 = right rear                    */
 
-/* Speed range for driver board commands */
-#define MOTOR_SPEED_MAX      100     /* max forward speed value            */
-#define MOTOR_SPEED_MIN     -100     /* max reverse speed value            */
+/* Motor type for driver board init (register 0x14) */
+#define MOTOR_TYPE_JGB37     3       /* JGB37-520 series with Hall encoder */
+#define ENCODER_POLARITY_DEFAULT 0   /* default encoder counting direction */
+
+/* Speed range for driver board commands (closed-loop: pulses per 10ms) */
+#define MOTOR_SPEED_MAX      30      /* max forward speed value            */
+#define MOTOR_SPEED_MIN     -30      /* max reverse speed value            */
 
 /* ---------- Servo (Steering) — LD-1501MG ---------- */
 #define SERVO_PIN            12      /* GPIO 12 (Hiwonder standard)        */

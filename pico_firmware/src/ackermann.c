@@ -57,6 +57,11 @@ void ackermann_forward(float v_left, float v_right, float steer,
                        float dt, odom_state_t *odom)
 {
     /*
+     * NOTE: 'steer' is the commanded servo angle from servo_get_angle(),
+     * not a measured angle (no servo feedback sensor). This is the only
+     * option without feedback hardware, but is a known source of odometry
+     * drift at large steering angles where servo nonlinearity is worst.
+     *
      * Average velocity and yaw rate from bicycle model:
      *   v_avg  = (v_left + v_right) / 2
      *   wz     = v_avg * tan(steer) / L

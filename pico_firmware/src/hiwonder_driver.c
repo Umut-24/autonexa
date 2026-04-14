@@ -10,25 +10,19 @@
 /* ═══════════════════════════════════════════════════════════════
  * Hiwonder 4-Channel Motor Driver — I2C Register Map
  *
- * Based on reverse-engineering the Hiwonder chassis_control ROS1
- * package and the YX-4055AM driver board protocol.
+ * Confirmed against official Hiwonder MentorPi source code and
+ * the YX-4055AM driver board protocol.
  *
- * Register layout (write):
- *   0x01 : Motor 1 speed (int8_t, -100 to +100)
- *   0x02 : Motor 2 speed
- *   0x03 : Motor 3 speed
- *   0x04 : Motor 4 speed
- *   0x10 : Set all speeds to 0 (any value)
+ * Register layout:
+ *   0x14 (20): Motor type config      (W, 4 bytes M1-M4, 3=JGB)
+ *   0x15 (21): Encoder polarity       (W, 4 bytes M1-M4, 0=default)
+ *   0x1F (31): Open-loop PWM          (W, 4×int8 M1-M4, -100..+100)
+ *   0x33 (51): Closed-loop speed      (W, 4×int8 M1-M4, pulses/10ms)
+ *   0x3C (60): Encoder total read     (R, 16 bytes, 4×int32 LE)
  *
- * Register layout (read):
- *   0x11 : Motor 1 encoder count (4 bytes, little-endian int32)
- *   0x12 : Motor 2 encoder count
- *   0x13 : Motor 3 encoder count
- *   0x14 : Motor 4 encoder count
- *
- * NOTE: These register addresses are based on Hiwonder's protocol.
- * If the actual board uses different registers, update the defines
- * below after testing with an I2C scan and protocol analysis.
+ * Closed-loop speed mode (0x33) uses the board's onboard PID with
+ * encoder feedback to maintain the commanded speed. Preferred over
+ * open-loop PWM (0x1F) which varies with battery voltage and load.
  * ═══════════════════════════════════════════════════════════════ */
 
 /* Register addresses (Hiwonder YX-4055AM 4-Channel Controller) */
@@ -94,7 +88,7 @@ static bool write_motor_cache(void)
     for (int i = 0; i < 4; i++) {
         payload[i] = (uint8_t)motor_cmd_cache[i];
     }
-    return i2c_write_reg(REG_OPEN_LOOP_PWM, payload, 4);
+    return i2c_write_reg(REG_CLOSED_LOOP_SPD, payload, 4);
 }
 
 /* ── Public API ──────────────────────────────────────────────── */
@@ -114,8 +108,25 @@ bool hiwonder_driver_init(void)
     if (driver_connected) {
         printf("[HW_DRV] Motor driver board detected at 0x%02X\n",
                MOTOR_DRIVER_ADDR);
+
+        /* Configure motor type: JGB37-520 series with Hall encoder */
+        uint8_t motor_type[4] = {
+            MOTOR_TYPE_JGB37, MOTOR_TYPE_JGB37,
+            MOTOR_TYPE_JGB37, MOTOR_TYPE_JGB37
+        };
+        i2c_write_reg(REG_MOTOR_TYPE, motor_type, 4);
+
+        /* Configure encoder polarity: default direction */
+        uint8_t enc_polarity[4] = {
+            ENCODER_POLARITY_DEFAULT, ENCODER_POLARITY_DEFAULT,
+            ENCODER_POLARITY_DEFAULT, ENCODER_POLARITY_DEFAULT
+        };
+        i2c_write_reg(REG_ENCODER_POLARITY, enc_polarity, 4);
+
         /* Stop all motors on init */
         hiwonder_stop_all();
+
+        printf("[HW_DRV] Motor type=JGB37, encoder polarity=default\n");
     } else {
         printf("[HW_DRV] WARNING: Motor driver board NOT detected at 0x%02X\n",
                MOTOR_DRIVER_ADDR);
