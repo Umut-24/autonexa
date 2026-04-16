@@ -6,17 +6,19 @@ Subscribes to ROS2 topics (/scan, /map, /amcl_pose, /odometry/filtered)
 and serves data via Flask HTTP endpoints for the Flutter mobile app.
 
 Endpoints:
-  /api/scan      - Latest LIDAR scan as (x,y) points in map frame (JSON)
-  /api/map       - Real SLAM occupancy grid (PNG)
-  /api/map_info  - Map metadata: resolution, origin, dimensions (JSON)
-  /api/pose      - Robot pose from AMCL/EKF (JSON)
-  /api/status    - Combined status (JSON)
-  /api/markers   - Currently visible ArUco markers (JSON)
-  /api/nav_goal  - POST a Nav2 goal (JSON {x, y, yaw})
-  /api/control   - POST joystick commands (JSON {x, y, e, speed_limit})
-  /api/telemetry - GET Pico telemetry (motors, encoders, odom)
-  /api/estop     - POST emergency stop
-  /video_feed    - Camera MJPEG stream
+  /api/scan        - Latest LIDAR scan as (x,y) points in map frame (JSON)
+  /api/map         - Real SLAM occupancy grid (PNG)
+  /api/map_info    - Map metadata: resolution, origin, dimensions (JSON)
+  /api/pose        - Robot pose from AMCL/EKF/odom (JSON)
+  /api/status      - Combined status (JSON)
+  /api/markers     - Currently visible ArUco markers (JSON)
+  /api/nav_goal    - POST a Nav2 goal (JSON {x, y, yaw})
+  /api/cancel_nav  - POST to cancel current Nav2 goal (stops autonomous motion)
+  /api/control     - POST joystick commands (JSON {x, y, e, speed_limit})
+  /api/telemetry   - GET Pico telemetry (motors, encoders, odom)
+  /api/estop       - POST emergency stop
+  /api/estop_clear - POST to clear the Pico E-STOP latch
+  /video_feed      - Camera MJPEG stream
 """
 
 import threading
@@ -34,6 +36,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool
+from action_msgs.srv import CancelGoal
 from flask import Flask, Response, jsonify, request, send_file
 
 # Optional: ArUco detection
@@ -92,11 +95,23 @@ class MobileBridgeNode(Node):
             OccupancyGrid, '/map', self._map_cb, map_qos)
         self.create_subscription(
             PoseWithCovarianceStamped, '/amcl_pose', self._amcl_cb, 10)
+        # Fuse either /odometry/filtered (EKF, when launched) or /odom
+        # (laser_scan_matcher output — active in live-SLAM mode). First
+        # callback to fire wins; AMCL takes priority when available.
         self.create_subscription(
             Odometry, '/odometry/filtered', self._odom_cb, 10)
+        self.create_subscription(
+            Odometry, '/odom', self._odom_cb, 10)
 
         # --- Nav2 goal publisher ---
         self._goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
+
+        # --- Nav2 cancel service client ---
+        # The BT navigator exposes /navigate_to_pose/_action/cancel_goal.
+        # An empty CancelGoal.Request cancels *all* active goals — which
+        # is exactly the "stop autonomous motion" behavior the app wants.
+        self._nav_cancel_client = self.create_client(
+            CancelGoal, '/navigate_to_pose/_action/cancel_goal')
 
         # --- Joystick control: publish to /cmd_vel ---
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
@@ -436,6 +451,52 @@ class MobileBridgeNode(Node):
         self._goal_pub.publish(msg)
         self.get_logger().info(f'Published nav goal: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
 
+    def cancel_nav_goal(self):
+        """Cancel any in-flight NavigateToPose goal and stop motion.
+
+        Strategy:
+          1. Publish a zero Twist on /cmd_vel so the controller chain
+             halts immediately even if the cancel service round-trip
+             is slow or unavailable.
+          2. Ask the BT navigator to cancel all active goals via the
+             action cancel service (graceful teardown of the plan).
+        """
+        # Immediate safety: zero velocity flows through the same safety
+        # chain Nav2 uses (velocity_smoother -> collision_monitor ->
+        # cmd_vel_to_pico_bridge). Guarantees wheels stop even if the
+        # cancel service isn't live.
+        zero = Twist()
+        self._cmd_vel_pub.publish(zero)
+        with self._control_lock:
+            self._last_control_time = 0.0
+
+        # Graceful cancel via action cancel service (non-blocking).
+        if not self._nav_cancel_client.wait_for_service(timeout_sec=0.1):
+            self.get_logger().warning(
+                'Nav2 cancel service not available — zero cmd_vel sent only')
+            return
+
+        # Empty CancelGoal.Request with zero UUID + zero stamp means
+        # "cancel everything".
+        req = CancelGoal.Request()
+        future = self._nav_cancel_client.call_async(req)
+
+        def _cancel_done(fut):
+            try:
+                res = fut.result()
+                if res is None:
+                    self.get_logger().error('Nav2 cancel returned None')
+                    return
+                # return_code: 0=NONE, 1=REJECTED, 2=UNKNOWN_GOAL_ID,
+                # 3=GOAL_TERMINATED. 0 is success.
+                self.get_logger().info(
+                    f'Nav2 cancel: return_code={res.return_code}, '
+                    f'cancelled={len(res.goals_canceling)}')
+            except Exception as exc:
+                self.get_logger().error(f'Nav2 cancel failed: {exc}')
+
+        future.add_done_callback(_cancel_done)
+
 
 # =============================================================================
 #  Flask HTTP Server
@@ -541,6 +602,12 @@ def api_nav_goal():
     return jsonify({'status': 'ok'})
 
 
+@flask_app.route('/api/cancel_nav', methods=['POST'])
+def api_cancel_nav():
+    bridge_node.cancel_nav_goal()
+    return jsonify({'status': 'cancelled'})
+
+
 @flask_app.route('/video_feed')
 def video_feed():
     def generate():
@@ -571,6 +638,8 @@ def index():
 <li>POST /api/control — joystick control (JSON: x, y, e, speed_limit)</li>
 <li>POST /api/estop — emergency stop (latching)</li>
 <li>POST /api/estop_clear — clear emergency stop</li>
+<li>POST /api/nav_goal — send Nav2 goal (JSON: x, y, yaw)</li>
+<li>POST /api/cancel_nav — cancel active Nav2 goal</li>
 <li><a href="/video_feed">/video_feed</a> — camera MJPEG</li>
 </ul>
 </body></html>'''

@@ -31,9 +31,20 @@ def generate_launch_description():
     serial_port_arg = DeclareLaunchArgument('serial_port', default_value='/dev/ttyUSB0')
     serial_baudrate_arg = DeclareLaunchArgument('serial_baudrate', default_value='460800')
     use_rviz_arg = DeclareLaunchArgument('use_rviz', default_value='true')
-    # Keep LiDAR+SLAM stable by default; enable Pico path explicitly when needed.
-    use_pico_bridge_arg = DeclareLaunchArgument('use_pico_bridge', default_value='false')
+    # Enable the Pico path by default so Nav2 commands reach the motors out of
+    # the box. Pass use_pico_bridge:=false to run a headless simulation without
+    # hardware.
+    use_pico_bridge_arg = DeclareLaunchArgument('use_pico_bridge', default_value='true')
     pico_serial_port_arg = DeclareLaunchArgument('pico_serial_port', default_value='/dev/ttyACM0')
+    # Flask HTTP bridge for the Flutter mobile app (joystick, telemetry, map).
+    # Publishes joystick to /cmd_vel so the manual path shares the autonomous
+    # safety chain: /cmd_vel -> velocity_smoother -> collision_monitor
+    # -> /cmd_vel_safe -> cmd_vel_to_pico_bridge -> /pico/control_cmd.
+    use_mobile_bridge_arg = DeclareLaunchArgument(
+        'use_mobile_bridge',
+        default_value='true',
+        description='Launch the Flask HTTP bridge (ros2_mobile_bridge) for the Flutter app'
+    )
     enforce_single_pub_arg = DeclareLaunchArgument(
         'enforce_single_publisher',
         default_value='true',
@@ -244,6 +255,17 @@ def generate_launch_description():
         }],
     )
 
+    # HTTP bridge for Flutter mobile app: /api/control (joystick), /api/status,
+    # /api/map, /api/nav_goal, /api/estop, /video_feed. Joystick input becomes
+    # a Twist on /cmd_vel so it flows through the same safety chain as Nav2.
+    mobile_bridge = Node(
+        package='parking_system',
+        executable='ros2_mobile_bridge.py',
+        name='mobile_bridge',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_mobile_bridge')),
+    )
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
@@ -262,6 +284,7 @@ def generate_launch_description():
         enforce_single_pub_arg,
         bridge_lock_file_arg,
         bridge_cmd_vel_topic_arg,
+        use_mobile_bridge_arg,
         static_tf_base_to_laser,
         lidar,
         laser_scan_matcher,
@@ -278,5 +301,6 @@ def generate_launch_description():
         lifecycle_manager_navigation,
         micro_ros_agent,
         cmd_vel_to_pico_bridge,
+        mobile_bridge,
         rviz,
     ])

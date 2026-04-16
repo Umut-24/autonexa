@@ -1,0 +1,826 @@
+## Executive Summary
+
+AutoNexa is a small-scale autonomous parking and recall system designed for indoor use. The aim of the project is to develop a vehicle that can understand its environment, move safely, detect obstacles, and complete parking-related tasks with good accuracy. In the conceptual design stage, the project was divided into main subsystems such as perception, localization, navigation, control, power management, and wireless communication. This modular structure helped the team develop and test each part in a clear and systematic way.
+
+Since the conceptual design report, the project has moved from design planning to implementation and full prototype testing. The first important step was to test the LiDAR-based localization and navigation subsystems separately. These tests showed that the vehicle could estimate its position with acceptable accuracy and reach target points successfully in most cases. At the same time, the results also showed some limitations, such as performance loss near boundaries and failures in narrow areas. These findings helped the team understand the weak points of the system before full integration.
+
+After these subsystem tests, the project entered a more critical stage. The vehicle was assembled with all major hardware and software components, and system-level tests were performed on the integrated platform. These tests included motor control, obstacle detection, and power endurance. This stage was important because a subsystem may work well alone, but full system performance depends on the compatibility and timing of all parts working together. For this reason, the critical design review focuses not only on subsystem success, but also on the behavior of the complete vehicle. 
+
+This report presents the current maturity of the AutoNexa system and explains how the design has been validated through testing. It shows that the project is no longer only a conceptual solution. It is now an integrated engineering system that has been tested under realistic operating conditions. The remaining challenge is not to prove that the idea works in theory, but to show that the complete system can operate safely, reliably, and repeatedly as one autonomous platform.
+
+## Introduction
+
+## Project Overview
+
+AutoNexa is a small-scale autonomous parking and recall system for indoor environments. The main goal of the project is to develop a vehicle that can localize itself, navigate safely, detect obstacles, and perform parking-related tasks in a reliable way. In the conceptual design stage, the project was defined as a modular system with main subsystems such as localization, navigation, control, power, and communication. The earlier report also showed that LiDAR-based localization and navigation were feasible for the project.
+
+## Current Situation About the Work on the Project
+
+At the current stage, the project has moved beyond the first feasibility studies. The LiDAR-based localization and navigation tests were already completed and presented in the conceptual design report. In this period, the main work was focused on the other subsystems and on preparing the project for the final integrated stage. The team tested important subsystems such as motor control, obstacle detection, and power endurance separately. In addition, the team worked on integration methods and compatibility between subsystems to make sure that the final full-system integration can be done in a stable and efficient way. At this stage, the main expectation is to validate the subsystems, study their interfaces, and confirm that they can work together correctly before final tuning of the complete system. This matches the CDRR focus on the current situation of the project, subsystem testing, and compatibility analysis.
+
+## Scope of the Report
+
+This report presents the current design maturity of the AutoNexa project after the conceptual design stage. It covers the updated condition of the subsystems, the tests carried out during this period, and the studies related to subsystem compatibility. The report does not present the system as a fully finalized and fine-tuned integrated product yet. Instead, it shows that the main subsystems were tested separately, that their performance was evaluated, and that the required methods for future integration were studied. In this way, the report explains what has already been validated and what work still remains for the next stage.
+
+## Organization of the Report
+
+The report is organized as follows. After this introduction, the updated overall system design is presented. Then, the report explains the implemented subsystems and their current status. After that, the subsystem tests and their results are discussed, including motor control, obstacle detection, and power endurance studies, together with compatibility-related observations. Later sections evaluate the design with respect to the project requirements and discuss the remaining technical issues. Finally, the report presents the next steps for full system integration and fine-tuning before the final stage of the project.
+
+The operation of the AutoNexa system can be simply understood as a flow where the vehicle **perceives its environment, makes decisions, and then acts accordingly**. Instead of thinking of it as a complex system, it is easier to see it as a step-by-step pipeline that continuously runs while the vehicle is active.
+
+At the first stage, the vehicle tries to understand its surroundings. For this purpose, the LiDAR sensor continuously scans the environment and produces distance data. These raw measurements are processed by SLAM and localization algorithms on the Raspberry Pi. As a result, the vehicle can both **build a map of the environment** and **estimate its own position on that map in real time**. In simple terms, this is where the vehicle answers the questions: *“Where am I?”* and *“What is around me?”* This step is very important because all later decisions depend on having correct environmental information.
+
+After this, the processed information is passed to Nav2. Nav2 can be thought of as the “decision-making” part of the system. Based on the current map, the target location (such as a parking spot), and detected obstacles, it determines how the vehicle should move. However, Nav2 does not directly control the motors. Instead, it generates **velocity commands** (linear and angular), which describe the desired motion of the vehicle in a more abstract way.
+
+Before these commands are sent to the hardware, they go through some additional checks. First, in the **velocity smoothing stage**, sudden changes in speed or direction are reduced so that the vehicle moves more smoothly. Then, the **collision monitoring stage** checks whether the given commands could lead to a risky situation. If a possible collision is detected, the system can modify or limit the commands to keep the vehicle safe.
+
+Next, the commands are passed to the **Pico bridge layer**, which acts as an interface between the high-level software and the low-level controller. This part is responsible for enforcing system limits and safety rules. For example, it ensures that the commands do not exceed maximum speed or steering limits and that unsafe commands are not sent to the hardware. This layer basically acts as a final safety checkpoint before execution.
+
+Finally, the validated commands are transmitted to the Raspberry Pi Pico via **micro-ROS communication**. On the Pico side, real-time control is performed. The received commands are converted into **PWM signals for the DC motor** and control signals for the steering servo. At this point, the system completes the cycle by physically moving the vehicle.
+
+In short, the system follows this flow:
+
+**sensing → localization → decision-making → command checking → actuation**
+
+This structure makes the system easier to manage and more reliable, since each part has a clear role and can be improved independently if needed.
+
+The operation of the AutoNexa system can be simply understood as a flow where the vehicle **perceives its environment, makes decisions, and then acts accordingly**. Instead of thinking of it as a complex system, it is easier to see it as a step-by-step pipeline that continuously runs while the vehicle is active.
+
+At the first stage, the vehicle tries to understand its surroundings. For this purpose, the LiDAR sensor continuously scans the environment and produces distance data. These raw measurements are processed by SLAM and localization algorithms on the Raspberry Pi. As a result, the vehicle can both **build a map of the environment** and **estimate its own position on that map in real time**. In simple terms, this is where the vehicle answers the questions: *“Where am I?”* and *“What is around me?”* This step is very important because all later decisions depend on having correct environmental information.
+
+After this, the processed information is passed to Nav2. Nav2 can be thought of as the “decision-making” part of the system. Based on the current map, the target location (such as a parking spot), and detected obstacles, it determines how the vehicle should move. However, Nav2 does not directly control the motors. Instead, it generates **velocity commands** (linear and angular), which describe the desired motion of the vehicle in a more abstract way.
+
+Before these commands are sent to the hardware, they go through some additional checks. First, in the **velocity smoothing stage**, sudden changes in speed or direction are reduced so that the vehicle moves more smoothly. Then, the **collision monitoring stage** checks whether the given commands could lead to a risky situation. If a possible collision is detected, the system can modify or limit the commands to keep the vehicle safe.
+
+Next, the commands are passed to the **Pico bridge layer**, which acts as an interface between the high-level software and the low-level controller. This part is responsible for enforcing system limits and safety rules. For example, it ensures that the commands do not exceed maximum speed or steering limits and that unsafe commands are not sent to the hardware. This layer basically acts as a final safety checkpoint before execution.
+
+Finally, the validated commands are transmitted to the Raspberry Pi Pico via **micro-ROS communication**. On the Pico side, real-time control is performed. The received commands are converted into **PWM signals for the DC motor** and control signals for the steering servo. At this point, the system completes the cycle by physically moving the vehicle.
+
+In short, the system follows this flow:
+
+**sensing → localization → decision-making → command checking → actuation**
+
+This structure makes the system easier to manage and more reliable, since each part has a clear role and can be improved independently if needed.
+
+## Overview
+
+The perception subsystem is responsible for two things: building a consistent geometric model of the environment in real time, and providing the rest of the system with a reliable pose estimate so the robot knows where it is within that model. Everything downstream — path planning, obstacle avoidance, velocity commands — depends on what perception produces. If the map is noisy or the odometry drifts, the navigation stack will not recover gracefully.
+
+AutoNexa uses a **LiDAR-first architecture**. The 2D rotating LiDAR is the single source of truth for both mapping (via SLAM Toolbox) and incremental dead-reckoning (via laser scan matching). Wheel encoders exist in the firmware and publish raw odometry, but they are not yet fused into the ROS2 odometry chain — that integration is staged for when the IMU arrives.
+
+The system is designed from the start to support two operational modes:
+
+| Mode | Active Sensors | Odometry Source | Map Source | Use Case |
+| --- | --- | --- | --- | --- |
+| **A — LiDAR Only** | SLAMTEC C1 | laser_scan_matcher | SLAM Toolbox | Current default; fully functional |
+| **B — LiDAR + Camera** | SLAMTEC C1 + IMX219 | EKF (LiDAR + IMU) | SLAM Toolbox | Planned; camera adds ArUco marker detection for precise parking slot identification |
+
+Mode B is not yet active. The camera link is already defined in the URDF, the mobile app already decodes ArUco markers, and the ROS2 bridge node exists — the remaining work is wiring the camera feed into a ROS2 image publisher and feeding its pose output into the navigation goal pipeline. Switching between modes will be controlled by a launch argument, not a code change.
+
+---
+
+## Sensor Hardware — SLAMTEC C1 LiDAR
+
+The primary sensor is a SLAMTEC C1, a compact 2D rotating LiDAR that covers a full 360° field of view. It communicates with the Raspberry Pi 5 over USB serial using the SLAMTEC serial protocol, and the `sllidar_ros2` driver handles everything from transport to topic publication.
+
+**Physical mounting** is defined in `src/parking_system/urdf/robot.urdf`:
+
+- Forward offset from `base_link`: **+150 mm**
+- Height above `base_link` origin: **+120 mm**
+- Mounted axially so the scan plane is horizontal
+
+| Property | Value |
+| --- | --- |
+| Sensor model | SLAMTEC C1 |
+| Measurement principle | ToF / triangulation (rotating 2D) |
+| Field of view | 360° |
+| Operational range (configured) | 0.05 m – 4.0 m |
+| Scan frequency | ~10 Hz (C1 default) |
+| ROS2 driver | `sllidar_ros2` |
+| Published topic | `/scan` (`sensor_msgs/LaserScan`) |
+| Frame ID | `laser_link` |
+| Serial interface | USB CDC at **460,800 baud** |
+| Default device node | `/dev/ttyUSB0` |
+| Recommended device node | `/dev/serial/by-id/<lidar-id>` |
+
+**Serial port stability note.** In testing, we encountered a specific failure mode: if the `sllidar_node` is killed without a clean shutdown, the OS does not always release the file descriptor on `/dev/ttyUSB0`. The next launch attempt then hits an `SL_RESULT_OPERATION_TIMEOUT` during initialization. The fix is straightforward — kill any leftover processes and relaunch — but it's worth noting that using the by-id path (`/dev/serial/by-id/`) makes this easier to diagnose because the path is deterministic regardless of USB enumeration order. The launch file already accepts a `serial_port` argument to override the default; for deployment the by-id path should be hardcoded.
+
+---
+
+## Raw Scan Processing — Filter Chain
+
+The raw `/scan` topic coming off the driver is not used directly by SLAM or the costmaps. It goes through a four-stage `laser_filters` chain first, configured in `config/scan_filter.yaml`. The chain runs synchronously — every incoming scan goes through all four stages before anything downstream sees it.
+
+```
+/scan (raw, from sllidar_node)
+         │
+         ▼
+ ┌───────────────────────────────┐
+ │  Stage 1: Range Filter        │
+ │  min: 0.05 m  max: 4.0 m     │
+ └──────────────┬────────────────┘
+                │
+                ▼
+ ┌───────────────────────────────┐
+ │  Stage 2: Shadow Filter       │
+ │  angle: 10°–170°, nbrs: 20   │
+ └──────────────┬────────────────┘
+                │
+                ▼
+ ┌───────────────────────────────┐
+ │  Stage 3: Median Filter       │
+ │  observations: 5, queue: 10  │
+ └──────────────┬────────────────┘
+                │
+                ▼
+ ┌───────────────────────────────┐
+ │  Stage 4: Outlier Filter      │
+ │  threshold: 0.5 m, window: 5 │
+ └──────────────┬────────────────┘
+                │
+                ▼
+    /scan (filtered, used by SLAM,
+     scan matcher, and costmaps)
+```
+
+| Stage | Filter Type | Key Parameters | Why It's There |
+| --- | --- | --- | --- |
+| 1 | `LaserScanRangeFilter` | min: 0.05 m, max: 4.0 m | The C1 produces garbage returns below ~5 cm (too close to the optical center) and beyond its reliable range. These points confuse SLAM and mark walls as obstacles. |
+| 2 | `ScanShadowsFilter` | angle range: 10°–170°, neighbors: 20 | When a scan ray grazes the edge of an object, the return point lands on the background surface but appears to float in space. Shadow filtering removes these grazing-angle artifacts by checking whether neighboring beams agree. |
+| 3 | `MedianFilter` | observations: 5, queue: 10 | Applies a temporal median over the last 5 scans per beam angle. This kills flickering returns on reflective surfaces and glass — something the C1 is susceptible to in indoor environments. |
+| 4 | `LaserScanOutlierFilter` | threshold: 0.5 m, window: 5 | Removes isolated spikes that differ from their neighbors by more than 50 cm. These are usually multi-path reflections or scanner motor artifacts, not real objects. |
+
+The output of this chain is the filtered `/scan` topic. Both the laser scan matcher and SLAM Toolbox subscribe to this cleaned version, as do both costmaps.
+
+---
+
+## Laser Scan Matcher — Odometry
+
+Since wheel encoder odometry is not yet integrated into the ROS2 side, all incremental dead-reckoning is done by matching consecutive LiDAR scans using ICP (Iterative Closest Point). The node used is `ros2_laser_scan_matcher`, and it publishes both a `/odom` topic and the `odom→base_link` TF transform.
+
+**How it works.** The matcher keeps a keyframe — a stored scan used as the reference. As new scans arrive, ICP is run between the incoming scan and the keyframe to compute the relative rigid-body transform (translation + rotation). Once the robot has moved more than a threshold distance or angle from the keyframe, the current scan is promoted to the new keyframe. This prevents drift from compounding in place but still generates a new pose estimate every scan cycle.
+
+| Parameter | Value | Meaning |
+| --- | --- | --- |
+| Keyframe distance threshold | 0.10 m | New keyframe after 10 cm of motion |
+| Keyframe angle threshold | 10° | New keyframe after 10° of rotation |
+| ICP max iterations | 30 | Convergence cap per scan |
+| Max correspondence distance | 0.30 m | Points further apart than 30 cm are not matched |
+| Max angular correction | 45° | Guards against catastrophically wrong initial alignment |
+| Scan queue size | 10 | Buffered scan history |
+| Output topic | `/odom` | `nav_msgs/Odometry` with covariance |
+| Output TF edge | `odom → base_link` | Published continuously |
+
+**Covariance.** The node computes covariance estimates from the ICP residual and includes them in the Odometry message. SLAM Toolbox and Nav2 both read these covariances when deciding how much to trust the odometry. If ICP converges poorly (e.g., in a featureless corridor), the covariance grows and the system places less weight on the odometry estimate.
+
+**Current limitation.** Because this is scan-to-scan matching only, there is an inherent drift accumulation over time. For short parking maneuvers (a few meters of travel), the drift is negligible. For a robot that drives continuously for several minutes, it will be noticeable — SLAM Toolbox's loop closure will correct the map, but the local odometry frame itself accumulates error. This is the main motivation for the IMU fusion work described in Section 3.8.
+
+---
+
+## SLAM Toolbox — Live Mapping
+
+SLAM Toolbox runs in **asynchronous mapping mode** (`async_slam_toolbox_node`). In this mode, it continuously incorporates incoming scans to refine the map without blocking the main processing pipeline. There is no pre-loaded map. The map starts empty and grows as the robot explores.
+
+The configuration lives in `config/slam_toolbox_mapping.yaml`.
+
+| Parameter | Value | Notes |
+| --- | --- | --- |
+| Mode | `mapping` | Live SLAM; no saved-map localization |
+| Map resolution | **0.02 m (2 cm/pixel)** | Chosen deliberately for parking precision |
+| Update distance | 0.05 m | Map updated after 5 cm of motion |
+| Update heading | 0.05 rad (~3°) | Map updated after small rotations |
+| Fallback update interval | 1.0 s | Update even if robot is stationary |
+| TF wait timeout | 0.5 s | How long to wait for a TF before skipping scan |
+| TF buffer duration | 30 s | Transform history kept for delayed scan processing |
+| Scan buffer size | 20 scans | History used for scan-to-map correlation |
+| Use scan matching | `true` | Trusts laser_scan_matcher for local odometry |
+| Provide odometry frame | `false` | laser_scan_matcher owns `odom→base_link` |
+| Loop closure search radius | 3.0 m | Candidates within 3 m are evaluated |
+
+**Why 2 cm resolution?** A parking space for this robot class is roughly 0.5 m × 1.0 m. At 2 cm/pixel, a slot occupies about 25 × 50 cells in the occupancy grid — enough to represent the geometry clearly without being computationally prohibitive. At 5 cm (the more common choice for mobile robots), a parking slot would only be 10 × 20 cells, which is too coarse for the planned ArUco-refined docking sequence.
+
+**Outputs:**
+
+- `/map` (`nav_msgs/OccupancyGrid`) — the live occupancy grid, published at the configured update rate
+- `map → odom` TF transform — published continuously; represents the correction between the cumulative map frame and the local odometry frame
+
+---
+
+## TF Tree
+
+The transform tree for the perception subsystem is kept intentionally simple. There are only two dynamic TF publishers and one static one.
+
+```
+map
+ │
+ │  ← published by: SLAM Toolbox (async_slam_toolbox_node)
+ │    (represents map-level pose correction; updated as map refines)
+ │
+odom
+ │
+ │  ← published by: laser_scan_matcher
+ │    (represents incremental dead-reckoning; updated at ~10 Hz)
+ │
+base_link
+ │
+ │  ← static transform; published by: static_transform_publisher in launch file
+ │    (represents fixed sensor placement on chassis)
+ │
+laser_link
+```
+
+**Why the split between `map→odom` and `odom→base_link`?**
+This is the standard ROS2 convention. `odom→base_link` is the best continuous estimate of motion since the last reset — it never jumps. `map→odom` is the correction layer; SLAM Toolbox adjusts it to keep the robot's position consistent with the built map. Nav2 reads the full chain (`map→odom→base_link`) for planning and control, but the continuity guarantee on `odom→base_link` prevents sudden jumps in the velocity commands.
+
+**EKF note.** When the IMU is integrated, `robot_localization` (EKF) will take over publishing `odom→base_link` using fused laser + IMU data. The `ekf_fusion.launch.py` and `ekf_2d_no_imu.yaml` files already exist as the skeleton for this. The EKF is configured with `publish_tf: false` in the meantime to avoid conflicting with laser_scan_matcher.
+
+---
+
+## Perception Data Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        SLAMTEC C1 LiDAR                             │
+│             USB serial @ 460,800 baud → /dev/ttyUSB0                │
+└──────────────────────────────┬──────────────────────────────────────┘
+                               │  sllidar_ros2 driver
+                               ▼
+                         /scan  (raw LaserScan)
+                               │
+                               ▼
+                    ┌──────────────────────┐
+                    │   laser_filters      │
+                    │   4-stage chain      │
+                    │   (range → shadow →  │
+                    │    median → outlier) │
+                    └──────────┬───────────┘
+                               │  /scan  (filtered)
+               ┌───────────────┴──────────────────┐
+               │                                  │
+               ▼                                  ▼
+  ┌─────────────────────────┐        ┌────────────────────────────┐
+  │  laser_scan_matcher     │        │  async_slam_toolbox_node   │
+  │  (ICP scan-to-scan)     │        │  (async mapping mode)      │
+  │                         │        │                            │
+  │  → /odom                │        │  → /map  (OccupancyGrid)   │
+  │  → odom→base_link TF    │        │  → map→odom TF             │
+  └─────────────────────────┘        └────────────────────────────┘
+               │                                  │
+               └─────────────┬────────────────────┘
+                             │
+                             ▼
+              Full TF chain: map → odom → base_link → laser_link
+              /odom topic: consumed by Nav2, velocity smoother
+              /map topic:  consumed by global costmap, planner
+```
+
+---
+
+## Planned Extensions
+
+### IMU Fusion (in progress)
+
+The EKF integration skeleton is already in the repository (`ekf_fusion.launch.py`, `ekf_2d_no_imu.yaml`). Once an IMU is physically connected and a ROS2 IMU driver is running, the plan is:
+
+1. Feed `/imu/data` and laser_scan_matcher's `/odom` into `robot_localization` EKF
+2. EKF publishes `/odometry/filtered` + the new `odom→base_link` TF (with `publish_tf: true`)
+3. Disable laser_scan_matcher's TF output to avoid the conflict
+4. Nav2 and SLAM Toolbox are pointed at `/odometry/filtered` instead of `/odom`
+
+The immediate benefit is significantly reduced drift during sharp turns and acceleration events — situations where scan matching alone tends to slip because the scan changes too fast between frames.
+
+### Camera Integration (planned — Mode B)
+
+The IMX219 camera link is already defined in the URDF at +100 mm forward, +50 mm up from `base_link`. The Flutter mobile app already decodes ArUco markers in its camera feed and sends the detected marker pose to the ROS2 bridge via HTTP. The remaining work on the robot side is:
+
+1. Add a ROS2 node that streams the IMX219 feed as `/camera/image_raw`
+2. Optionally run an onboard ArUco detector to produce `/aruco/detected_pose`
+3. In the parking maneuver node, use the detected marker pose to refine the Nav2 goal before commanding the final approach
+
+The system is designed so that this addition does not change the SLAM or odometry pipeline at all — the camera output feeds into the goal-setting logic, not into the map or TF chain. Mode A (LiDAR-only) continues to work unmodified.
+
+---
+
+## Known Limitations and Open Items
+
+| Item | Severity | Current Behavior | Resolution Path |
+| --- | --- | --- | --- |
+| Scan-only odometry drift | Medium | Accumulates over multi-minute runs; SLAM loop closure corrects map but not local odom | Resolved by IMU fusion (Section 3.8) |
+| LiDAR serial port lock | Medium | Stale `sllidar_node` process can block the serial device on next launch | Kill stale processes; enforce `/dev/serial/by-id/` path discipline |
+| No camera feed yet | Low | ArUco-based parking refinement unavailable | Camera integration planned; mobile app already handles marker detection as interim |
+| Scan matching in featureless areas | Low | ICP diverges in corridors with no geometric features; odometry jumps | Park in environments with distinguishable features; longer-term: use IMU to bridge featureless segments |
+| Differential motion model mismatch | Low | Laser scan matcher assumes small incremental motion; aggressive steering can cause scan registration errors | Limit angular velocity in bridge node (currently capped at 0.8 rad/s) |
+
+The control subsystem is responsible for transforming high-level navigation decisions into real-time motor and steering actions of the vehicle. The architecture is designed in a hierarchical manner, where the Raspberry Pi generates motion commands, and the Raspberry Pi Pico executes these commands with precise timing and feedback control.
+
+At the interface level, the Pico receives commands in the form of structured JSON packets over a serial communication link. Two types of inputs are supported: continuous velocity streams and discrete goal-based commands. The velocity stream provides real-time linear and angular velocity references (`v_lin`, `v_ang`), allowing smooth trajectory tracking during autonomous navigation. In contrast, goal commands such as DRIVE, TURN, and STOP are used for executing specific maneuvers like moving a fixed distance or rotating by a given angle.
+
+Each incoming packet includes a sequence number (`seq`) to ensure data consistency. This mechanism prevents outdated or duplicated commands from affecting the system, which is especially important under communication delays or packet loss. Additionally, the input packets include obstacle and system health information. These fields allow the Pico to make local safety decisions without fully relying on the Raspberry Pi, improving robustness.
+
+At the low-level control layer, the Pico handles all time-critical operations. Steering is implemented using an Ackermann-based kinematic model, where the desired angular velocity is converted into a steering angle and then mapped to servo PWM signals. This ensures realistic vehicle motion and smooth turning behavior.
+
+For drive control, the DC motor is regulated using encoder feedback. The encoder measurements are used to estimate the current wheel speed, and a PID-based controller is applied to track the desired velocity. This closed-loop approach improves accuracy and stability, especially under disturbances such as friction changes or battery voltage variations.
+
+The subsystem also integrates multiple safety mechanisms. If an obstacle is detected within a critical distance or if the `emergency_stop` flag is triggered, the system immediately overrides all commands and stops the vehicle. Similarly, if the system health flags indicate a failure in localization, planning, or control, the vehicle transitions into a safe stop state.
+
+To further enhance safety, a timeout mechanism is implemented. If no new command is received within a predefined time window, the system assumes communication loss and stops the motors. In addition, all input commands are subjected to saturation and rate limiting to prevent sudden or unsafe movements.
+
+Overall, this control subsystem combines communication, real-time embedded control, and safety-aware decision-making. By distributing responsibilities between the Raspberry Pi and Pico, the system achieves both flexibility in high-level planning and reliability in low-level execution, which is essential for accurate and safe autonomous parking and recall operations
+
+## Overview
+
+The navigation subsystem takes a goal pose — either from a user clicking in RViz or from the mobile app sending a parking command — and produces motor velocity commands that move the robot to that goal while avoiding obstacles. It uses the ROS2 Nav2 stack, running on top of the live SLAM map produced by the perception subsystem.
+
+There is no pre-loaded map and no separate localization phase. The robot starts SLAM when it boots, builds the map as it drives, and navigation requests can be sent at any point once the TF tree is healthy. This is the only supported operational mode — the static-map and AMCL-based workflows from earlier development phases have been archived.
+
+The full pipeline from goal to motor output involves several nodes in sequence:
+
+```
+Goal (RViz / mobile app)
+        │
+        ▼
+   BT Navigator          ← orchestrates planner and controller
+        │
+        ├── Planner Server (NavfnPlanner)     ← computes global path
+        │
+        ├── Controller Server (DWBLocalPlanner) ← generates /cmd_vel
+        │
+        ├── Velocity Smoother                  ← rate-limits acceleration
+        │
+        ├── Collision Monitor                  ← safety veto on velocity
+        │
+        └── cmd_vel_to_pico_bridge             ← final clamping + Pico publish
+```
+
+Each stage is described in detail below.
+
+---
+
+## Global Planner — NavfnPlanner
+
+The global planner computes a path from the robot's current pose to the goal pose using the live `/map` from SLAM Toolbox. The planner used is `nav2_navfn_planner::NavfnPlanner`, which implements a wavefront A* expansion over the global costmap.
+
+| Parameter | Value | Notes |
+| --- | --- | --- |
+| Plugin | `nav2_navfn_planner::NavfnPlanner` | Standard Nav2 A* planner |
+| Goal tolerance | 0.05 m | Accepts path endpoints within 5 cm of the requested goal |
+| Allow planning through unknown cells | `false` | Robot does not speculatively plan through unmapped space |
+| Input | Global costmap (`/map` + live obstacles) | Replanned on each new goal or significant map change |
+| Output | `/plan` (`nav_msgs/Path`) | Sequence of poses from current position to goal |
+
+**Practical behavior.** Because `allow_unknown` is false, the robot will refuse to plan a path into areas that SLAM has not yet mapped. This is intentional for a parking use case — we want the robot to first survey the lot before attempting to navigate to a slot, not drive blind into unmapped space. In practice this means the operator should do a slow drive-through first to populate the map before sending a parking goal.
+
+---
+
+## Local Controller — DWB Local Planner
+
+The local controller runs at 10 Hz and is responsible for actually tracking the global path while reacting to obstacles that weren't on the map when the path was planned. It uses the **DWB (Dynamic Window-Based) local planner**, which works by sampling a set of short-horizon velocity trajectories, scoring each one against a set of critics, and commanding the highest-scoring trajectory.
+
+### Velocity and Acceleration Limits
+
+| Parameter | Value | Notes |
+| --- | --- | --- |
+| Max forward speed (`max_vel_x`) | 0.30 m/s | Conservative for parking precision |
+| Max reverse speed (`min_vel_x`) | −0.10 m/s | Limited reverse available |
+| Max lateral speed | 0.0 m/s | No holonomic motion |
+| Max yaw rate (`max_vel_theta`) | 0.50 rad/s | ~28°/s |
+| Forward acceleration limit | 1.5 m/s² |  |
+| Angular acceleration limit | 2.0 rad/s² |  |
+| Forward deceleration limit | −1.5 m/s² |  |
+| Angular deceleration limit | −2.0 rad/s² |  |
+
+### Goal Tolerance
+
+| Axis | Tolerance | Notes |
+| --- | --- | --- |
+| XY position | 0.05 m (5 cm) | Tight enough for parking without being unreachable |
+| Yaw | 0.10 rad (~6°) | Reasonable heading precision for the servo hardware |
+
+### DWB Critics
+
+DWB scores each candidate trajectory by summing weighted critic scores. The seven critics active in this configuration are:
+
+| Critic | Weight | What It Penalizes |
+| --- | --- | --- |
+| `PathAlign` | 32.0 | Trajectories that deviate from the planned path direction |
+| `PathDist` | 32.0 | Distance from the trajectory endpoint to the nearest planned path point |
+| `RotateToGoal` | 32.0 | Not rotating toward the goal heading when close |
+| `GoalAlign` | 24.0 | Heading misalignment with the goal pose |
+| `GoalDist` | 24.0 | Distance from trajectory endpoint to the final goal |
+| `BaseObstacle` | 0.02 | Closeness to obstacles in the local costmap |
+| `Oscillation` | (default) | Penalizes repetitive back-and-forth motion |
+
+The high weights on `PathAlign`, `PathDist`, and `RotateToGoal` bias the controller toward path-following behavior, which is appropriate for a structured parking lot. `BaseObstacle` has a low absolute weight, but the collision monitor downstream provides an independent hard veto on any trajectory that would actually hit something.
+
+---
+
+## Costmap Configuration
+
+Both the global and local costmaps use the same resolution as the SLAM map (2 cm/pixel) so there is no resampling artifact when obstacle data is transferred between them.
+
+### Local Costmap
+
+The local costmap is a rolling window that follows the robot. It is used exclusively by the local controller for real-time obstacle avoidance.
+
+| Parameter | Value |
+| --- | --- |
+| Frame | `odom` |
+| Window size | 2.0 m × 2.0 m |
+| Resolution | 0.02 m |
+| Update frequency | 5.0 Hz |
+| Publish frequency | 2.0 Hz |
+| Robot radius | 0.10 m |
+
+**Layers:**
+
+| Layer | Configuration | Purpose |
+| --- | --- | --- |
+| `obstacle_layer` | Source: `/scan`; raytrace range: 2.5 m; obstacle range: 2.0 m | Marks and clears obstacles based on live LiDAR |
+| `inflation_layer` | Radius: **0.20 m**; cost scaling: 5.0 | Expands obstacles so the planner path keeps clearance |
+
+The 20 cm inflation radius on the local costmap is relatively generous for a robot with a 10 cm physical radius. The extra margin accounts for the fact that the URDF footprint describes the chassis only — the servo linkage and any attached hardware add a few centimeters in practice, and parking maneuvers involve close-range approach to static structures.
+
+### Global Costmap
+
+The global costmap covers the full mapped area and is used by NavfnPlanner to compute the initial path.
+
+| Parameter | Value |
+| --- | --- |
+| Frame | `map` |
+| Coverage | Full map extent (follows `/map` size) |
+| Resolution | 0.02 m |
+| Update frequency | 1.0 Hz |
+| Publish frequency | 1.0 Hz |
+
+**Layers:**
+
+| Layer | Configuration | Purpose |
+| --- | --- | --- |
+| `static_layer` | Source: `/map` | Brings in the SLAM-generated occupancy grid |
+| `obstacle_layer` | Source: `/scan` | Adds live obstacles on top of the static map |
+| `inflation_layer` | Radius: **0.15 m**; cost scaling: 3.5 | Expands obstacles for path planning clearance |
+
+The global costmap uses a slightly smaller inflation radius (15 cm vs 20 cm) than the local one because it is used for path computation, not real-time collision checking. Making it too large in the global costmap would cause the planner to route unnecessarily wide paths in tight parking spaces.
+
+---
+
+## Velocity Pipeline
+
+Between the controller output and the Pico microcontroller, the velocity command passes through three additional nodes. Each one adds either smoothing or safety filtering.
+
+```
+Controller Server
+      │  /cmd_vel  (Twist, ~10 Hz)
+      ▼
+Velocity Smoother
+      │  /cmd_vel_smoothed  (Twist, 20 Hz)
+      ▼
+Collision Monitor
+      │  /cmd_vel_safe  (Twist)
+      ▼
+cmd_vel_to_pico_bridge
+      │  /pico/control_cmd  (TwistStamped, 30 Hz)
+      │  /pico/enable       (Bool)
+      │  /pico/heartbeat    (Bool)
+      ▼
+micro-ROS agent  (USB serial, 115,200 baud)
+      ▼
+Pico firmware  (50 Hz control loop)
+      ▼
+Motors + Steering Servo
+```
+
+| Node | Input | Output | Key Behavior |
+| --- | --- | --- | --- |
+| **Velocity Smoother** | `/cmd_vel` from controller | `/cmd_vel_smoothed` at 20 Hz | Limits acceleration; runs in OPEN_LOOP mode (does not feed back from `/odom`) |
+| **Collision Monitor** | `/cmd_vel_smoothed` + `/scan` | `/cmd_vel_safe` | Simulates trajectory 1.2 s forward; reduces or stops velocity if collision is predicted |
+| **cmd_vel_to_pico_bridge** | `/cmd_vel_safe` | `/pico/control_cmd` at 30 Hz | Final velocity clamping, per-cycle acceleration limiting, 200 ms timeout |
+
+**Velocity Smoother parameters:**
+
+| Parameter | Value |
+| --- | --- |
+| Output frequency | 20.0 Hz |
+| Max linear velocity | 0.30 m/s |
+| Max angular velocity | 0.50 rad/s |
+| Max linear acceleration | 1.5 m/s² |
+| Max angular acceleration | 2.0 rad/s² |
+| Feedback mode | `OPEN_LOOP` |
+
+**Collision Monitor parameters:**
+
+| Parameter | Value |
+| --- | --- |
+| Polygon type | `FootprintApproach` |
+| Lookahead time | 1.2 s |
+| Simulation step | 0.1 s |
+| LiDAR source topic | `/scan` |
+
+---
+
+## cmd_vel_to_pico_bridge
+
+This node (`scripts/cmd_vel_to_pico_bridge.py`) is the last software stage before commands leave the RPi5 and go to the Pico over USB serial. It has several responsibilities that the upstream Nav2 nodes do not cover.
+
+### Velocity Clamping
+
+The bridge enforces hard velocity limits independently of what Nav2 is configured to send. This provides a second layer of protection against misconfiguration upstream.
+
+| Limit | Value | Notes |
+| --- | --- | --- |
+| Max forward speed | ±0.35 m/s | Slightly higher than DWB limit; bridge is the hard floor |
+| Max yaw rate | ±0.80 rad/s | Hard cap regardless of Nav2 config |
+
+### Per-Cycle Acceleration Limiting
+
+Even after the velocity smoother, the bridge applies its own acceleration cap per 33 ms cycle (at 30 Hz). This is because the velocity smoother operates at 20 Hz and the smoother output can still have sharp edges when viewed at 30 Hz. The bridge rate-limits at:
+
+| Parameter | Value |
+| --- | --- |
+| Max linear acceleration step | 0.8 m/s² |
+| Max angular acceleration step | 1.2 rad/s² |
+
+The algorithm each cycle:
+
+```
+delta = target - current
+clamp delta to ± (max_accel × dt)
+new_command = current + clamped_delta
+```
+
+### Command Timeout
+
+If no new message arrives on `/cmd_vel_safe` for more than 200 ms, the bridge immediately ramps the output to zero and publishes `enable = false`. This protects against the situation where Nav2 freezes or the topic stops publishing for any reason — the robot does not continue at its last commanded velocity indefinitely.
+
+### Single-Publisher Guard
+
+Multiple bridge instances publishing simultaneously would fight over the Pico, potentially alternating between incompatible commands. The guard works at two levels:
+
+1. **File-based lock:** On startup, the bridge acquires an exclusive lock on `/tmp/cmd_vel_to_pico_bridge.lock`. A second instance trying to acquire the same lock gets an `OSError` and exits immediately.
+2. **ROS graph monitoring:** Every 1.0 s (after a 3.0 s startup delay), the bridge counts the number of publishers on `/pico/control_cmd`. If more than one is detected, the bridge publishes a zero-velocity safe stop and then shuts itself down.
+
+### Published Outputs
+
+| Topic | Type | Rate | Content |
+| --- | --- | --- | --- |
+| `/pico/control_cmd` | `geometry_msgs/TwistStamped` | 30 Hz | Rate-limited vx and wz; `frame_id: base_link` |
+| `/pico/enable` | `std_msgs/Bool` | 30 Hz | `true` when commands are active; `false` on timeout or error |
+| `/pico/heartbeat` | `std_msgs/Bool` | 5 Hz | Liveness signal; Pico watchdog times out at 200 ms if missing |
+
+---
+
+## Safety Layer Stack
+
+Safety in this system is layered. No single layer is expected to catch everything; the design assumes that any layer can fail and the next one will still prevent damage. The layers from outermost to innermost are:
+
+| Layer | Node | Mechanism | Trigger | Action |
+| --- | --- | --- | --- | --- |
+| 1 | Velocity Smoother | Acceleration limiting | Any commanded velocity change | Ramps output rather than stepping; prevents sudden motor torque |
+| 2 | Collision Monitor | Forward trajectory simulation | Predicted collision within 1.2 s | Reduces or zeros velocity before the obstacle is reached |
+| 3 | cmd_vel_to_pico_bridge | Velocity clamping | Any command exceeding limits | Hard clips vx and wz to configured maximums |
+| 4 | cmd_vel_to_pico_bridge | Per-cycle acceleration cap | Excessive delta between cycles | Smooths any step changes the smoother missed |
+| 5 | cmd_vel_to_pico_bridge | Command timeout | No command for 200 ms | Ramps to zero, disables motors via `enable = false` |
+| 6 | Pico firmware | Command timeout watchdog | No `/pico/control_cmd` for 200 ms | Disables motors at the hardware level; steering returns to center |
+| 7 | Pico firmware | E-STOP | E-STOP signal received | Latching motor disable; persists until explicitly cleared via `safety_estop_clear()` |
+
+**Layers 5 and 6 both use the same 200 ms threshold**, but they operate independently. Layer 5 acts in software on the RPi5 side; layer 6 acts on the Pico itself. If the USB serial link drops (killing micro-ROS communication), layer 5 will not even be aware — but layer 6 will still fire because the Pico's watchdog sees no incoming messages.
+
+**E-STOP behavior.** The Pico firmware implements a latching E-STOP: once activated, it does not automatically clear when commands resume. The `safety_estop_clear()` function must be called explicitly. During E-STOP the on-board LED flashes at 5 Hz; normal operation blinks at 1 Hz. This provides a visual indicator without requiring a serial connection to check state.
+
+---
+
+## Full Navigation Data Flow
+
+```
+                         ┌─────────────┐
+  RViz goal click ──────►│ BT Navigator│
+  Mobile app command ───►│ (nav2_bt_   │
+                         │  navigator) │
+                         └──────┬──────┘
+                                │
+               ┌────────────────┼────────────────┐
+               │                                 │
+               ▼                                 ▼
+    ┌─────────────────────┐           ┌──────────────────────┐
+    │   Planner Server    │           │  Global Costmap       │
+    │   NavfnPlanner      │◄──────────│  static_layer         │
+    │                     │           │  + obstacle_layer     │
+    │  Input: /map, pose  │           │  + inflation_layer    │
+    │  Output: /plan      │           └──────────────────────┘
+    └──────────┬──────────┘
+               │  /plan
+               ▼
+    ┌─────────────────────┐           ┌──────────────────────┐
+    │  Controller Server  │           │  Local Costmap        │
+    │  DWBLocalPlanner    │◄──────────│  obstacle_layer       │
+    │                     │           │  + inflation_layer    │
+    │  Input: /plan, /odom│           └──────────────────────┘
+    │  Output: /cmd_vel   │                     ▲
+    └──────────┬──────────┘                     │ /scan (filtered)
+               │  /cmd_vel  (~10 Hz)             │
+               ▼
+    ┌─────────────────────┐
+    │  Velocity Smoother  │
+    │  nav2_velocity_     │
+    │  smoother           │
+    │  Output: /cmd_vel_  │
+    │         smoothed    │
+    └──────────┬──────────┘
+               │  /cmd_vel_smoothed  (20 Hz)
+               ▼
+    ┌─────────────────────┐
+    │  Collision Monitor  │◄───── /scan (filtered)
+    │  nav2_collision_    │
+    │  monitor            │
+    │  Simulates 1.2 s    │
+    │  Output: /cmd_vel_  │
+    │         safe        │
+    └──────────┬──────────┘
+               │  /cmd_vel_safe
+               ▼
+    ┌─────────────────────┐
+    │  cmd_vel_to_pico_   │
+    │  bridge (RPi5)      │
+    │  - velocity clamp   │
+    │  - accel limiting   │
+    │  - 200 ms timeout   │
+    │  - duplicate guard  │
+    └──────────┬──────────┘
+               │  USB serial (115,200 baud)
+               │  XRCE-DDS via micro-ROS agent
+               ▼
+    ┌─────────────────────────────────────────────┐
+    │  Pico Firmware  (50 Hz control loop)         │
+    │                                              │
+    │  1. Receive /pico/control_cmd (vx, wz)       │
+    │  2. Ackermann IK:                            │
+    │       steer = atan(L × wz / vx)             │
+    │       v_L = vx × (R − W/2) / R              │
+    │       v_R = vx × (R + W/2) / R              │
+    │  3. Steering servo → GPIO 12 PWM (50 Hz)    │
+    │  4. Motors → I2C Hiwonder driver (0x34)     │
+    │  5. Encoders → /pico/odom (20 Hz)           │
+    └──────────┬──────────────────────────────────┘
+               │
+      ┌────────┴────────┐
+      ▼                 ▼
+  Rear DC Motors   Steering Servo
+  (Hiwonder I2C)   (PWM, ±30°)
+      │
+      ▼
+  Robot motion
+```
+
+---
+
+## Update Rates and End-to-End Latency
+
+The table below shows the typical operating rate and latency contribution of each processing stage. The end-to-end latency from a Nav2 goal being accepted to motors responding is approximately 500–800 ms under normal conditions.
+
+| Stage | Update Rate | Typical Latency |
+| --- | --- | --- |
+| LiDAR scan publication | ~10 Hz | < 100 ms from physical measurement |
+| Scan filter chain | Inline with scan | ~20–30 ms |
+| Laser scan matcher | Per keyframe (variable) | 20–50 ms per ICP solve |
+| SLAM Toolbox map update | 1.0 Hz (configurable) | 100–200 ms |
+| NavfnPlanner (goal received) | On-demand | ~200 ms first path |
+| DWB Controller | 10 Hz | 100 ms per cycle |
+| Velocity Smoother | 20 Hz | ~50 ms |
+| Collision Monitor | Async (scan-driven) | ~100 ms |
+| cmd_vel_to_pico_bridge | 30 Hz | ~33 ms |
+| micro-ROS serial transport | Up to 30 Hz | 10–50 ms |
+| Pico control loop | 50 Hz | 20 ms |
+
+**Total goal-to-motor latency:** ~500–800 ms. This is dominated by the planner computation and DWB's 10 Hz cycle. For steady-state path following, the controller is producing commands continuously and the latency is simply the pipeline delay — about 200–300 ms from an obstacle appearing in `/scan` to the motor responding.
+
+---
+
+## Planned Extensions
+
+### IMU Integration
+
+The `robot_localization` EKF skeleton is already present in the repository. Once an IMU is connected and its ROS2 driver is running, the integration steps are:
+
+1. Enable `robot_localization` node in `ekf_fusion.launch.py`
+2. Set `publish_tf: true` in `ekf_2d_no_imu.yaml`; disable TF from laser_scan_matcher
+3. Point Nav2's `odom_topic` parameter at `/odometry/filtered`
+4. Tune EKF process and measurement noise matrices against real hardware
+
+The navigation stack itself does not need to change. Only the odometry source changes.
+
+### Camera-Guided Parking Refinement
+
+Once the camera is integrated into Mode B, the parking flow will change slightly:
+
+1. Operator selects a parking slot in the mobile app (identified by ArUco marker ID)
+2. Mobile app sends the detected marker pose (via the HTTP bridge, `ros2_mobile_bridge.py`) to the RPi5
+3. A parking coordinator node converts the marker pose to a Nav2 goal and calls the navigation action
+4. For the final approach (last ~0.5 m), the goal is refined using the live marker detection rather than dead-reckoned SLAM pose
+
+This architecture keeps SLAM and Nav2 unchanged. The camera only influences goal selection, not the underlying path planning or control.
+
+### Smac Hybrid-A* Migration
+
+The DWBLocalPlanner was chosen because it is well-tested and stable in Nav2. However, it uses a differential-drive motion model internally — it does not know that this robot has Ackermann kinematics and cannot make zero-radius turns. In practice, the velocity limits are conservative enough that this mismatch rarely causes problems. But for tighter parking spaces or sharper maneuvers, the Smac Hybrid-A* planner (which explicitly models non-holonomic constraints including minimum turning radius) would produce better trajectories. This migration is identified but deferred until the basic parking workflow is validated end-to-end.
+
+---
+
+## Known Limitations and Open Items
+
+| Item | Severity | Current Behavior | Resolution Path |
+| --- | --- | --- | --- |
+| DWB uses differential-drive model | Medium | Cannot plan geometrically correct Ackermann paths; sharp turns may be physically unreachable | Smac Hybrid-A* migration planned (Section 4.10) |
+| EKF not active | Medium | Odometry susceptible to drift; Nav2 odometry quality limited | IMU integration resolves this |
+| Control-source arbitration undefined | Medium | No formal policy for manual vs. autonomous vs. e-stop priority; currently enforced by single-publisher guard only | Explicit state machine (AUTO / MANUAL / ESTOP) planned before final system demo |
+| Long-duration drift not validated | Low | Only short parking runs tested; multi-minute SLAM sessions not soak-tested | Field endurance tests scheduled |
+| Planner replanning latency | Low | First path after a new goal takes ~200 ms; rapid goal changes feel sluggish | Acceptable for parking use case; not a priority |
+
+The robotic vehicle is powered by a **12.8 V lead-acid battery** with a **7 Ah capacity**. The power from the battery first passes through an **on/off switch** and a **15 A fuse** for manual control and circuit protection. After that, the power is distributed through terminal blocks to different parts of the system. We initially planned to use a **lithium-ion battery with a BMS**, but this caused **current fluctuations** in the line supplying the Raspberry Pi, leading to **instability and lag on the display**. For this reason, we switched to a lead-acid battery, which is **more stable and more cost-effective** for our setup.
+
+The power is divided into three main branches. One branch goes to a **buck converter** that reduces the voltage to **7.4 V** for the servo motor, since the servo cannot work safely at the full battery voltage. A second branch goes to a **5 V DC-DC converter** that powers the **Raspberry Pi**. The third branch is connected directly to the **motor driver**, which supplies power to the **DC motors**. In the wiring design, **14 AWG cables** are used for high-current lines, while **20 AWG cables** are used for lower-current connections such as the servo supply.
+
+The control system includes both a **Raspberry Pi** and a **Raspberry Pi Pico**. The Raspberry Pi is used for higher-level processing, while the Pico is used for low-level motor control. The motor driver is connected to the Pico and controlled with **PWM signals**. In addition, a **SLAMTEC RPLiDAR** sensor is connected directly to the Raspberry Pi for sensing and navigation. The whole system is built with a **common ground connection** to ensure stable operation between all components.
+
+System Level Requirements
+
+| System Requirement | Description |
+| --- | --- |
+| Safe low-speed operation | The vehicle shall operate safely at speeds below **0.5 m/s** and shall support very low-speed motion around **0.1 m/s** for precise parking. |
+| Real-time motion control | The system shall provide real-time steering, acceleration, and braking control for stable autonomous motion. |
+| Precise autonomous parking | The vehicle shall autonomously park inside a **40 cm × 20 cm** parking area with a final position error of **±5 cm**. |
+| Summon / recall operation | The vehicle shall return to a user-defined location after receiving a summon command, without manual driving. |
+| Obstacle detection | The sensing system shall detect static and moving obstacles with minimum dimensions of **5 cm** in diameter and height. |
+| Path planning response | The system shall detect a parking space and generate a navigation path within **5 seconds**. |
+| Perception performance | The system shall achieve approximately **90% obstacle and path detection accuracy** under normal operating conditions. |
+| Wireless user interaction | The system shall support wireless command transmission and system monitoring through a mobile interface. |
+| Communication range | The wireless interface shall operate reliably at a minimum distance of **3 meters** from the testbed. |
+| Endurance | The onboard power system shall support all subsystems for at least **15 minutes** of continuous operation. |
+| Autonomous reliability | All subsystems shall work consistently during repeated tests without unsafe behavior, unstable operation, or frequent resets. |
+| Compact onboard implementation | The system shall remain self-contained and use onboard computation suitable for a compact autonomous test vehicle. |
+
+Subsystem Requirements
+
+Localization Subsystem Requirements
+
+| Subsystem Requirement | Description |
+| --- | --- |
+| Scan precision | The subsystem shall resolve geometric features with a minimum resolution of **2 cm**. |
+| Update frequency | The localization estimate shall be updated at a minimum rate of **10 Hz** to support real-time control. |
+| Blind spot minimization | The sensor shall detect obstacles as close as **0.05 m** for safe maneuvering in tight areas. |
+| Map consistency | The generated map shall remain consistent after repeated passes and loop closure. |
+| Processing efficiency | The scan-to-map matching algorithm shall use onboard computational resources efficiently so that real-time operation is preserved. |
+| Stable pose estimation | The subsystem shall provide a stable and repeatable pose estimate for the navigation subsystem during low-speed operation. |
+
+Navigation Subsystem Requirements
+
+| Subsystem Requirement | Description |
+| --- | --- |
+| Pose input handling | The subsystem shall receive and use the current vehicle pose from the localization subsystem. |
+| Goal-based path generation | The subsystem shall generate a path after a valid parking or recall target is defined. |
+| Collision-free path planning | The subsystem shall generate collision-free paths on the map under normal operating conditions. |
+| Real-time operation | The subsystem shall update path information without blocking the localization process or freezing the interface. |
+| Map-coordinate consistency | The subsystem shall correctly transform localization data into the saved map coordinate system. |
+| Navigation accuracy | The subsystem shall guide the vehicle to the target position with acceptable final distance error for parking and recall tasks. |
+| Narrow-space robustness | The subsystem shall remain functional in constrained indoor paths and shall minimize invalid path generation in corner or narrow regions. |
+
+Control Subsystem Requirements
+
+| Subsystem Requirement | Description |
+| --- | --- |
+| Ackermann steering actuation | The subsystem shall control the front-wheel steering angle according to the Ackermann steering structure. |
+| Low-speed propulsion control | The subsystem shall control forward and backward motion at low speed, including precision motion around **0.1 m/s**. |
+| Smooth acceleration and braking | The subsystem shall apply gradual acceleration and deceleration to avoid wheel slip and unstable motion. |
+| Steering limit protection | The subsystem shall apply mechanical or software limits to the steering angle to prevent unsafe turns. |
+| Closed-loop motor regulation | The subsystem shall support encoder-based feedback control for stable motor speed under changing load and battery conditions. |
+| Motion command execution | The subsystem shall convert high-level commands from the navigation layer into low-level actuator signals for the motor and steering servo. |
+| Repeatable parking motion | The subsystem shall provide repeatable straight and curved motion for parking maneuvers in narrow areas. |
+
+Power Subsystem Requirements
+
+| Subsystem Requirement | Description |
+| --- | --- |
+| Centralized energy source | The subsystem shall power the vehicle using a single onboard battery pack. |
+| Regulated power distribution | The subsystem shall provide suitable regulated voltage levels for computation, sensing, steering, and propulsion units. |
+| Battery protection | The subsystem shall include protection against overcharge, over-discharge, and overcurrent. |
+| Safe power isolation | The subsystem shall include an inline fuse and a manual ON/OFF switch for safe shutdown during testing and debugging. |
+| Continuous runtime | The subsystem shall support at least **15 minutes** of continuous operation under normal test conditions. |
+| Stable supply under load | The subsystem shall maintain stable voltage and current for the onboard computer, sensors, and actuators during operation. |
+| Power budgeting | The subsystem shall be sized according to the expected load of Raspberry Pi, LiDAR, steering servo, and drive motor. |
+
+Mobile App and Wireless Control Subsystem Requirements
+
+| Subsystem Requirement | Description |
+| --- | --- |
+| Wireless command interface | The subsystem shall allow the user to send high-level commands such as park and summon wirelessly. |
+| Real-time monitoring | The subsystem shall display live system information to the user during operation. |
+| Minimum communication range | The subsystem shall support reliable wireless operation at a minimum range of **3 m**. |
+| Low-latency communication | The subsystem shall transmit commands and telemetry with low enough delay for safe and practical use. |
+| Telemetry display | The subsystem shall display critical values such as battery level, speed, and heading. |
+| Visualization support | The subsystem shall provide visual monitoring of map or path information for easier testing and supervision. |
+| Remote calibration support | The subsystem shall allow remote entry of calibration-related values when needed. |
+| User-friendly operation | The subsystem shall present system data in a clear and usable way for the operator. |
+
+
+
+
+

@@ -28,9 +28,12 @@ void motor_control_set_velocity(float vx, float wz)
     float steer, v_l, v_r;
     ackermann_inverse(vx, wz, &steer, &v_l, &v_r);
 
-    /* Convert m/s to driver board speed units */
-    int8_t sl = (int8_t)(v_l * VEL_TO_SPEED_SCALE);
-    int8_t sr = (int8_t)(v_r * VEL_TO_SPEED_SCALE);
+    /* Convert m/s to driver board speed units (closed-loop pulses/10ms).
+     * Round to the nearest integer rather than truncating, so that small
+     * velocities (e.g. final parking approach at 0.03 m/s ~ 1.9 units)
+     * actually produce a non-zero command instead of collapsing to 0. */
+    int8_t sl = (int8_t)roundf(v_l * VEL_TO_SPEED_SCALE);
+    int8_t sr = (int8_t)roundf(v_r * VEL_TO_SPEED_SCALE);
 
     if (sl >  MOTOR_SPEED_MAX) sl =  MOTOR_SPEED_MAX;
     if (sl <  MOTOR_SPEED_MIN) sl =  MOTOR_SPEED_MIN;
