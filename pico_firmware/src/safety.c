@@ -37,7 +37,10 @@ void safety_update(void)
             if (!timed_out) {
                 /* Transition: running → timed out */
                 hiwonder_stop_all();
-                servo_center();
+                /* Keep current steering command latched.
+                 * Timeout is intended to stop drive motion; forcing center here
+                 * can override manual servo test commands on every cycle.
+                 */
                 timed_out = true;
             }
         } else {
