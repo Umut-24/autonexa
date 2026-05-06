@@ -110,7 +110,7 @@ endif()
 # Print build info
 message(STATUS "Autonexa Pico firmware v3.0 (Hiwonder Chassis)")
 message(STATUS "  Motor driver: I2C (Hiwonder 4-ch board)")
-message(STATUS "  Servo: LD-1501MG on GPIO 12")
+message(STATUS "  Servo: LD-1501MG on configured GPIO")
 message(STATUS "  Control frequency: 50 Hz")
 message(STATUS "  Targets: autonexa_pico (ASCII serial — bench testing)")
 if(USE_MICRO_ROS)

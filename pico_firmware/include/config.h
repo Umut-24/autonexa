@@ -28,9 +28,11 @@
 #define I2C_FREQ_HZ          100000  /* 100 kHz standard mode              */
 #define MOTOR_DRIVER_ADDR    0x34    /* Hiwonder 4-ch driver I2C address   */
 
-/* Motor channel mapping on driver board */
-#define MOTOR_CHANNEL_LEFT   2       /* M2 = left rear                     */
-#define MOTOR_CHANNEL_RIGHT  4       /* M4 = right rear                    */
+/* Motor channel mapping on driver board.
+ * Right motor was rewired M1 -> M3 on 2026-05-01 because the M1 channel
+ * was unreliable on this Hiwonder board. Left motor stayed on M2. */
+#define MOTOR_CHANNEL_LEFT   2       /* M2 = left/rear-left motor          */
+#define MOTOR_CHANNEL_RIGHT  3       /* M3 = right/rear-right motor        */
 
 /* Motor type for driver board init (register 0x14) */
 #define MOTOR_TYPE_JGB37     3       /* JGB37-520 series with Hall encoder */
@@ -41,7 +43,7 @@
 #define MOTOR_SPEED_MIN     -30      /* max reverse speed value            */
 
 /* ---------- Servo (Steering) — LD-1501MG ---------- */
-#define SERVO_PIN            12      /* GPIO 12 (Hiwonder standard)        */
+#define SERVO_PIN            15      /* GPIO 15 (servo debug wiring)       */
 
 #define SERVO_PWM_CENTER_US  1500    /* straight ahead                     */
 #define SERVO_PWM_MIN_US     500     /* full one direction (0°)            */

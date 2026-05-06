@@ -15,9 +15,10 @@
  *   - Read accumulated encoder counts (register 0x3C, 4×int32 LE)
  *   - Stop all motors
  *
- * Motor channel mapping:
- *   M2 = left rear wheel
- *   M4 = right rear wheel
+ * Motor channel mapping (configured via MOTOR_CHANNEL_LEFT/RIGHT in config.h):
+ *   M2 = left/rear-left wheel
+ *   M3 = right/rear-right wheel
+ *   (M1 unused after 2026-05-01 rewire; M4 unused.)
  *
  * Speed units: encoder pulses per 10ms (closed-loop PID on the board).
  * Clamped to MOTOR_SPEED_MIN..MOTOR_SPEED_MAX (see config.h).

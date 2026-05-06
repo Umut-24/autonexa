@@ -182,8 +182,7 @@ bool hiwonder_read_encoders(int32_t *left_count, int32_t *right_count)
     }
 
     /* 16 bytes = 4x 32-bit little-endian sequences */
-    /* Index for M2: (2-1)*4 = 4 */
-    /* Index for M4: (4-1)*4 = 12 */
+    /* Encoder slots follow M1..M4, four bytes per channel. */
     
     int l_idx = (MOTOR_CHANNEL_LEFT - 1) * 4;
     int r_idx = (MOTOR_CHANNEL_RIGHT - 1) * 4;

@@ -5,7 +5,7 @@
  *
  * Phase 1: Bench test via serial CLI
  *   - I2C communication with Hiwonder motor driver board
- *   - LD-1501MG servo steering on GPIO 12
+ *   - LD-1501MG servo steering on configured PWM GPIO
  *   - Encoder reading from driver board
  *   - Safety watchdog with command timeout and E-STOP
  *
@@ -30,6 +30,7 @@
 
 #ifdef USE_MICRO_ROS
 #include "uros_transport.h"
+#include <rmw_microros/rmw_microros.h>
 #endif
 
 /* ── State ───────────────────────────────────────────────────── */
@@ -72,6 +73,46 @@ static void process_serial_command(const char *cmd)
     else if (strcmp(cmd, "SERVO_CENTER") == 0) {
         servo_center();
         printf("OK SERVO_CENTER\n");
+    }
+    else if (strcmp(cmd, "SERVO_SWEEP") == 0) {
+        const uint16_t pulses[] = {1000, 1500, 2000, 1500};
+        printf("OK SERVO_SWEEP pin=GP%d pulses=1000,1500,2000,1500\n", SERVO_PIN);
+        for (int repeat = 0; repeat < 3; repeat++) {
+            for (int i = 0; i < 4; i++) {
+                servo_set_pwm_us(pulses[i]);
+                printf("SERVO pulse_us=%u\n", pulses[i]);
+                sleep_ms(700);
+            }
+        }
+        printf("OK SERVO_SWEEP done\n");
+    }
+    else if (strcmp(cmd, "SERVO_PIN_TEST") == 0) {
+        printf("OK SERVO_PIN_TEST GP%d toggling 0V/3V3\n", SERVO_PIN);
+        gpio_init(SERVO_PIN);
+        gpio_set_dir(SERVO_PIN, GPIO_OUT);
+        for (int i = 0; i < 10; i++) {
+            gpio_put(SERVO_PIN, 1);
+            printf("SERVO_PIN_TEST high\n");
+            sleep_ms(500);
+            gpio_put(SERVO_PIN, 0);
+            printf("SERVO_PIN_TEST low\n");
+            sleep_ms(500);
+        }
+        servo_init();
+        printf("OK SERVO_PIN_TEST done pwm_restored\n");
+    }
+    else if (strcmp(cmd, "SERVO_PIN_HOLD") == 0) {
+        printf("OK SERVO_PIN_HOLD GP%d high 10s then low 10s\n", SERVO_PIN);
+        gpio_init(SERVO_PIN);
+        gpio_set_dir(SERVO_PIN, GPIO_OUT);
+        gpio_put(SERVO_PIN, 1);
+        printf("SERVO_PIN_HOLD high_now measure GP%d to GND\n", SERVO_PIN);
+        sleep_ms(10000);
+        gpio_put(SERVO_PIN, 0);
+        printf("SERVO_PIN_HOLD low_now measure GP%d to GND\n", SERVO_PIN);
+        sleep_ms(10000);
+        servo_init();
+        printf("OK SERVO_PIN_HOLD done pwm_restored\n");
     }
 
     /* === MOTOR (I2C via Hiwonder driver board) === */
@@ -242,6 +283,9 @@ static void process_serial_command(const char *cmd)
         printf("  SERVO_PWM <us>       - Raw servo PWM (500-2500)\n");
         printf("  SERVO_ANGLE <rad>    - Servo angle (±0.52 rad = ±30 deg)\n");
         printf("  SERVO_CENTER         - Center steering\n");
+        printf("  SERVO_SWEEP          - Sweep GP%d through 1000/1500/2000 us\n", SERVO_PIN);
+        printf("  SERVO_PIN_TEST       - Toggle GP%d high/low for electrical debug\n", SERVO_PIN);
+        printf("  SERVO_PIN_HOLD       - Hold GP%d high 10s, then low 10s\n", SERVO_PIN);
         printf("  SPEED <-30..30>      - Both motors (closed-loop, pulses/10ms)\n");
         printf("  SPEED_L <-30..30>    - Left motor speed\n");
         printf("  SPEED_R <-30..30>    - Right motor speed\n");
@@ -308,9 +352,12 @@ static void print_telemetry(void)
 
 int main(void)
 {
-#ifndef USE_MICRO_ROS
     /* ── Init Pico stdlib (USB serial) ───────────────────────── */
+    /* Must be called early in both modes: serial CLI needs it for printf,
+     * micro-ROS needs USB CDC enumerated before the XRCE-DDS ping loop. */
     stdio_init_all();
+#ifdef USE_MICRO_ROS
+    sleep_ms(2000);  /* allow USB CDC to fully enumerate before first ping */
 #endif
 
     /* Pre-init Heartbeat LED to verify power and boot */
@@ -324,7 +371,7 @@ int main(void)
     }
 
 #ifndef USE_MICRO_ROS
-    sleep_ms(2000);  /* wait for USB serial */
+    sleep_ms(2000);  /* wait for USB serial (serial CLI only) */
 
     printf("\n");
     printf("╔═══════════════════════════════════════════╗\n");
@@ -343,13 +390,21 @@ int main(void)
     ackermann_odom_reset(&odom);
 
 #ifdef USE_MICRO_ROS
-    /* micro-ROS transport init — blocks until agent is found */
-    while (!uros_init()) {
-        /* Blink LED fast while waiting for agent */
+    /* Set up the custom serial transport exactly once. */
+    uros_transport_setup();
+
+    /* Wait for micro-ROS agent: ping with 1s timeout, retry indefinitely.
+     * The Pico LED blinks fast while waiting so you can tell it's alive. */
+    while (rmw_uros_ping_agent(1000, 1) != RMW_RET_OK) {
         gpio_put(HEARTBEAT_LED_PIN, 1);
         sleep_ms(50);
         gpio_put(HEARTBEAT_LED_PIN, 0);
         sleep_ms(50);
+    }
+
+    /* Agent found — initialize node, subscribers, publishers, executor. */
+    while (!uros_init()) {
+        sleep_ms(100);
     }
 #endif
 
