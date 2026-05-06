@@ -60,14 +60,15 @@
 #define MOTOR_SPEED_MIN     -30      /* SPEED -30 -> 100% reverse duty     */
 
 /* Static-friction kick-start: motors on this chassis don't actually rotate
- * below ~70% duty cycle. Any non-zero SPEED command is snapped up to this
- * floor so the GUI's W/S keys (and Nav2 vx commands) produce real motion
- * even at low values. SPEED 0 still produces 0% duty (full stop).
+ * below ~50% duty cycle (verified on the bench via RAW_PWM mag sweep).
+ * Any non-zero SPEED command is snapped up to this floor so the GUI's
+ * W/S keys (and Nav2 vx commands) produce real motion even at low values.
+ * SPEED 0 still produces 0% duty (full stop).
  *
  * RAW_PWM bypasses this — it's a diagnostic verb where the literal duty
  * matters (e.g. for hunting the deadband threshold). Set to 0 to disable
  * the kick-start entirely. */
-#define MOTOR_DEADBAND_PCT   70
+#define MOTOR_DEADBAND_PCT   50
 
 /* ---------- Servo (Steering) — LD-1501MG ---------- */
 #define SERVO_PIN            15      /* GPIO 15 (servo debug wiring)       */
