@@ -71,6 +71,14 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('max_ax_mps2', 0.8)
         self.declare_parameter('max_aw_radps2', 1.2)
 
+        # Deadband gate: the L298N firmware snaps any non-zero SPEED to a
+        # ~60% PWM kick (see MOTOR_DEADBAND_PCT in pico_firmware/include/config.h).
+        # That makes Nav2's slow-creep approach lurch instead of trim. If the
+        # smoothed |vx| is below this threshold, send SPEED 0 and let the
+        # chassis coast — combined with a looser goal_xy_tolerance this gives
+        # clean stops without overshoot.
+        self.declare_parameter('min_vx_creep', 0.05)
+
         self.declare_parameter('wheelbase_m', 0.25)
         # 100 = vx 0.30 m/s -> SPEED 30 -> 100% PWM duty on the L298N path.
         # Was 63.7 for the old Hiwonder closed-loop "pulses/10ms" semantic.
@@ -97,6 +105,7 @@ class Nav2PicoBridge(Node):
         self.max_wz = float(self.get_parameter('max_wz_radps').value)
         self.max_ax = float(self.get_parameter('max_ax_mps2').value)
         self.max_aw = float(self.get_parameter('max_aw_radps2').value)
+        self.min_vx_creep = float(self.get_parameter('min_vx_creep').value)
 
         self.wheelbase = float(self.get_parameter('wheelbase_m').value)
         self.vel_scale = float(self.get_parameter('vel_to_speed_scale').value)
@@ -146,6 +155,7 @@ class Nav2PicoBridge(Node):
             f"Bridge up [{mode}]: {self.cmd_vel_topic} -> "
             f"{self.serial_port}@{self.serial_baud}, rate={self.publish_rate_hz:.1f}Hz, "
             f"max_vx={self.max_vx:.2f}m/s max_wz={self.max_wz:.2f}rad/s, "
+            f"min_vx_creep={self.min_vx_creep:.3f}m/s, "
             f"servo center={self.servo_center}us in [{self.servo_us_min},{self.servo_us_max}], "
             f"polarity={self.servo_polarity:+d}")
 
@@ -260,7 +270,12 @@ class Nav2PicoBridge(Node):
         self.output.vx = self._apply_rate_limit(self.output.vx, desired.vx, self.max_ax * dt)
         self.output.wz = self._apply_rate_limit(self.output.wz, desired.wz, self.max_aw * dt)
 
-        speed = self._vx_to_speed_pulses(self.output.vx)
+        # Gate sub-deadband output to 0 — see min_vx_creep param doc.
+        # Steering still tracks the commanded wz so the wheels keep pointing
+        # toward the goal direction even while the chassis is coasting.
+        gated_vx = 0.0 if abs(self.output.vx) < self.min_vx_creep else self.output.vx
+
+        speed = self._vx_to_speed_pulses(gated_vx)
         steer = self._vx_wz_to_steer(self.output.vx, self.output.wz)
         servo_us = self._steer_to_servo_us(steer)
 

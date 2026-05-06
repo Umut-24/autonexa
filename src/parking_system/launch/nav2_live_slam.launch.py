@@ -62,12 +62,30 @@ def generate_launch_description():
     use_micropython_bridge_arg = DeclareLaunchArgument(
         'use_micropython_bridge',
         default_value='false',
-        description='Use the new MicroPython serial bridge instead of micro_ros_agent + cmd_vel_to_pico_bridge'
+        description='Use the (now-removed) MicroPython serial bridge. Dead code; kept only for backward arg compatibility.'
     )
     micropython_lock_file_arg = DeclareLaunchArgument(
         'micropython_lock_file',
         default_value='/tmp/pico_serial_bridge.lock',
     )
+    use_serial_bridge_arg = DeclareLaunchArgument(
+        'use_serial_bridge',
+        default_value='true',
+        description='Use the new ASCII Nav2 bridge (nav2_pico_bridge.py) over USB serial to the L298N CLI firmware. Default true; set false to fall back to the legacy micro-ROS path.'
+    )
+    serial_bridge_lock_file_arg = DeclareLaunchArgument(
+        'serial_bridge_lock_file',
+        default_value='/tmp/nav2_pico_bridge.lock',
+    )
+    min_vx_creep_arg = DeclareLaunchArgument(
+        'min_vx_creep',
+        default_value='0.05',
+        description='|vx| below this -> SPEED 0 in the ASCII bridge (firmware deadband workaround).'
+    )
+    servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
+    servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1100')
+    servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='1900')
+    servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='1')
 
     # In live SLAM mode there is no road-mask topic by default.
     configured_nav2_params = RewrittenYaml(
@@ -230,13 +248,27 @@ def generate_launch_description():
         }]
     )
 
+    # Three-way mutually exclusive backend selection. Priority: serial > mp > legacy.
+    # If use_serial_bridge:=true (default), the ASCII Nav2 bridge runs and the
+    # micro-ROS legacy path is suppressed. The MicroPython script is dead so
+    # use_micropython_bridge:=true currently fails to find an executable.
+    use_serial_bridge_active = AndSubstitution(
+        LaunchConfiguration('use_pico_bridge'),
+        LaunchConfiguration('use_serial_bridge'),
+    )
     use_legacy_bridge = AndSubstitution(
         LaunchConfiguration('use_pico_bridge'),
-        NotSubstitution(LaunchConfiguration('use_micropython_bridge')),
+        AndSubstitution(
+            NotSubstitution(LaunchConfiguration('use_serial_bridge')),
+            NotSubstitution(LaunchConfiguration('use_micropython_bridge')),
+        ),
     )
     use_mp_bridge = AndSubstitution(
         LaunchConfiguration('use_pico_bridge'),
-        LaunchConfiguration('use_micropython_bridge'),
+        AndSubstitution(
+            LaunchConfiguration('use_micropython_bridge'),
+            NotSubstitution(LaunchConfiguration('use_serial_bridge')),
+        ),
     )
 
     # Legacy: micro-ROS agent + cmd_vel_to_pico_bridge (used with C firmware)
@@ -272,7 +304,41 @@ def generate_launch_description():
         }],
     )
 
-    # New: MicroPython serial bridge (replaces micro_ros_agent + cmd_vel_to_pico_bridge).
+    # New (default): ASCII Nav2 bridge — /cmd_vel_safe -> SPEED + SERVO_PWM
+    # over USB serial to the L298N CLI firmware (autonexa_pico.uf2). Mutually
+    # exclusive with the legacy micro-ROS path via use_serial_bridge_active.
+    nav2_pico_bridge = Node(
+        package='parking_system',
+        executable='nav2_pico_bridge.py',
+        name='nav2_pico_bridge',
+        output='screen',
+        emulate_tty=True,
+        condition=IfCondition(use_serial_bridge_active),
+        parameters=[{
+            'cmd_vel_topic':     LaunchConfiguration('bridge_cmd_vel_topic'),
+            'serial_port':       LaunchConfiguration('pico_serial_port'),
+            'serial_baud':       115200,
+            'publish_rate_hz':   30.0,
+            'command_timeout_s': 0.20,
+            'max_vx_mps':        0.30,
+            'max_wz_radps':      0.8,
+            'max_ax_mps2':       0.8,
+            'max_aw_radps2':     1.2,
+            'min_vx_creep':      LaunchConfiguration('min_vx_creep'),
+            'wheelbase_m':       0.25,
+            'servo_center_us':   LaunchConfiguration('servo_center_us'),
+            'servo_us_min':      LaunchConfiguration('servo_us_min'),
+            'servo_us_max':      LaunchConfiguration('servo_us_max'),
+            'servo_polarity':    LaunchConfiguration('servo_polarity'),
+            'auto_enable':       True,
+            'bridge_lock_file':  LaunchConfiguration('serial_bridge_lock_file'),
+            'dry_run':           False,
+        }],
+    )
+
+    # Legacy MicroPython serial bridge — script removed in earlier cleanup; this
+    # node will fail to launch if use_micropython_bridge:=true. Kept only so
+    # existing launch arg compatibility doesn't break.
     pico_serial_bridge = Node(
         package='parking_system',
         executable='pico_serial_bridge.py',
@@ -331,6 +397,13 @@ def generate_launch_description():
         bridge_cmd_vel_topic_arg,
         use_micropython_bridge_arg,
         micropython_lock_file_arg,
+        use_serial_bridge_arg,
+        serial_bridge_lock_file_arg,
+        min_vx_creep_arg,
+        servo_center_us_arg,
+        servo_us_min_arg,
+        servo_us_max_arg,
+        servo_polarity_arg,
         use_mobile_bridge_arg,
         static_tf_base_to_laser,
         lidar,
@@ -348,6 +421,7 @@ def generate_launch_description():
         lifecycle_manager_navigation,
         micro_ros_agent,
         cmd_vel_to_pico_bridge,
+        nav2_pico_bridge,
         pico_serial_bridge,
         mobile_bridge,
         rviz,

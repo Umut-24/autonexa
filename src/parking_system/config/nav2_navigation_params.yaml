@@ -95,19 +95,26 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.05  # 5cm tolerance for parking spots
+      # 15 cm tolerance: tightened from 5 cm because the L298N chassis has a
+      # ~60% PWM static-friction deadband — it can't trim the last few cm at
+      # creep speed without lurching. Loosen tolerance so the controller
+      # commits to one final approach and stops cleanly.
+      xy_goal_tolerance: 0.15
       yaw_goal_tolerance: 0.1  # ~6 degrees
     
     # DWB Local Planner - optimized for small spaces
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: false
-      min_vel_x: 0.0
+      # min_vel_x set to 0.05 so DWB doesn't propose sub-deadband creep that
+      # the L298N chassis can't actually produce. Bridge gates anything below
+      # min_vx_creep (default 0.05) to SPEED 0 anyway.
+      min_vel_x: 0.05
       min_vel_y: 0.0
       max_vel_x: 0.3  # Slow for precise parking
       max_vel_y: 0.0
       max_vel_theta: 0.5
-      min_speed_xy: 0.0
+      min_speed_xy: 0.05
       max_speed_xy: 0.3
       min_speed_theta: 0.0
       acc_lim_x: 1.5
@@ -123,7 +130,7 @@ controller_server:
       linear_granularity: 0.02
       angular_granularity: 0.02
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.05
+      xy_goal_tolerance: 0.15  # match general_goal_checker; deadband-aware
       trans_stopped_velocity: 0.1
       short_circuit_trajectory_evaluation: true
       stateful: true
@@ -302,7 +309,9 @@ velocity_smoother:
     max_decel: [-1.5, 0.0, -2.0]
     odom_topic: "odom"
     odom_duration: 0.1
-    deadband_velocity: [0.0, 0.0, 0.0]
+    # vx deadband matches the bridge's min_vx_creep (0.05 m/s). Keeps the
+    # smoother from emitting fractional values the chassis can't realize.
+    deadband_velocity: [0.05, 0.0, 0.0]
     velocity_timeout: 1.0
 
 collision_monitor:
