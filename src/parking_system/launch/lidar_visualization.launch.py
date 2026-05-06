@@ -90,11 +90,13 @@ def generate_launch_description():
     # Note: LIDAR is configured to publish with 'laser_link' frame directly
     # No transform from 'laser' to 'laser_link' is needed
     
-    # LIDAR launch (sllidar_ros2) - use the original launch file with overrides
+    # LIDAR launch (sllidar_ros2) — resolve via FindPackageShare so the launch
+    # works regardless of which workspace built the driver.
+    sllidar_share = FindPackageShare('sllidar_ros2')
     lidar_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            '/home/autonexa/ws_lidar/install/sllidar_ros2/share/sllidar_ros2/launch/sllidar_c1_launch.py'
-        ]),
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([sllidar_share, 'launch', 'sllidar_c1_launch.py'])
+        ),
         launch_arguments={
             'frame_id': 'laser_link',  # Override to use laser_link to match robot URDF
             'serial_port': LaunchConfiguration('serial_port'),

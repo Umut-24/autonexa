@@ -106,9 +106,13 @@ def generate_launch_description():
         output='screen'
     )
 
+    # sllidar_ros2 lives in this workspace under src/sllidar_ros2; resolve via
+    # FindPackageShare so the launch is portable and not tied to a separate
+    # ws_lidar workspace.
+    sllidar_share = FindPackageShare('sllidar_ros2')
     lidar = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            '/home/autonexa/ws_lidar/install/sllidar_ros2/share/sllidar_ros2/launch/sllidar_c1_launch.py'
+            PathJoinSubstitution([sllidar_share, 'launch', 'sllidar_c1_launch.py'])
         ),
         launch_arguments={
             'frame_id': 'laser_link',
