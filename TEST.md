@@ -17,77 +17,64 @@ source ~/intelligent_parking_ws/install/setup.bash
 
 ---
 
-## Stage 0 — Flash the correct Pico firmware
-
-Run on your **dev machine** (Windows or Linux with Pico SDK):
+## Stage 0 — Build and flash Pico firmware
 
 ```bash
-cd pico_firmware
-mkdir -p build && cd build
-cmake ..
-make
+cd pico_firmware && mkdir -p build && cd build && cmake .. && make
 ```
 
-Two UF2 targets are produced:
+The build produces two UF2s:
 
-| File | Purpose |
-|------|---------|
-| `autonexa_pico.uf2` | ASCII serial only — **do NOT flash for normal use** |
-| `autonexa_pico_uros.uf2` | micro-ROS + Hiwonder driver — **flash this** |
+| UF2 | Use |
+|-----|-----|
+| `autonexa_pico_uros.uf2` | **Production / Nav2 integration.** micro-ROS client over USB CDC. Required for stages 2 onward. |
+| `autonexa_pico.uf2` | **Bench-test CLI.** ASCII line protocol; drive from `python3 test/pico_gui.py`. Independent of the rest of the stages. |
+
+Flash by holding **BOOTSEL**, plugging USB to mount the `RPI-RP2` drive, then:
 
 ```bash
-# Put Pico in BOOTSEL mode (hold BOOTSEL button, plug USB cable, release button)
-# Drive mounts as RPI-RP2
-
-# Linux:
 cp build/autonexa_pico_uros.uf2 /media/$USER/RPI-RP2/
-
-# Windows (PowerShell):
-Copy-Item build\autonexa_pico_uros.uf2 E:\   # replace E: with your drive letter
 ```
 
-**Expected result:** Pico reboots, onboard LED blinks at ~1 Hz (heartbeat).
+The Pico re-enumerates after ~1 s as `/dev/ttyACM0`.
+
+**Pass:** Pico LED blinks at ~1 Hz steady. (5 Hz blink means a latched E-STOP — clear it via Stage 5 once the bridge is up.)
 
 ---
 
 ## Stage 1 — Pico visible on USB serial
 
 ```bash
-# Verify the serial port exists
 ls /dev/ttyACM*
 # Expected: /dev/ttyACM0
 ```
 
 ```bash
-# Raw serial sanity check — micro-ROS sends XRCE framing bytes continuously
 python3 -c "
 import serial, time
-s = serial.Serial('/dev/ttyACM0', 115200, timeout=2)
-time.sleep(0.5)
-data = s.read(64)
-print('bytes received:', len(data))
-print('hex:', data.hex())
-s.close()
-"
+s = serial.Serial('/dev/ttyACM0', 115200, timeout=2); time.sleep(0.5)
+data = s.read(64); print('bytes received:', len(data), 'hex:', data.hex()); s.close()"
 ```
 
-**Pass:** `bytes received: 64` and non-zero hex output.
+**Pass:** `bytes received: 64` of non-zero XRCE-DDS framing.
 
 **Fail / fix:**
-- 0 bytes → wrong UF2 flashed (ASCII-serial version). Re-flash `autonexa_pico_uros.uf2`.
-- Port not found → check USB cable, try `dmesg | tail -20` to see if device enumerates.
+- 0 bytes → wrong UF2 flashed (likely the CLI build) or firmware crashed. Re-flash `autonexa_pico_uros.uf2`.
+- Port not found → check USB cable; `dmesg | tail -20`.
+- Permission denied → `sudo usermod -aG dialout $USER && newgrp dialout`.
 
 ---
 
-## Stage 2 — micro-ROS agent connects, Pico topics appear
+## Stage 2 — Bridge comes up, `/pico/*` topics appear
 
 ```bash
-# Terminal 1 — start the micro-ROS agent
-ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0 -b 115200
+ros2 launch parking_system rpi5_pico_bridge.launch.py
 ```
 
+This launches `micro_ros_agent` on `/dev/ttyACM0` plus `cmd_vel_to_pico_bridge.py`.
+
 ```bash
-# Terminal 2 — wait for agent handshake, then list topics
+# In a new terminal — wait for startup, then list topics
 sleep 4 && ros2 topic list | grep pico
 ```
 
@@ -96,19 +83,23 @@ sleep 4 && ros2 topic list | grep pico
 /pico/control_cmd
 /pico/enable
 /pico/heartbeat
+/pico/odom
+/pico/joint_feedback
 ```
 
 ```bash
-# Confirm heartbeat is publishing
-ros2 topic echo /pico/heartbeat --once
-# Expected: data: true  (or false — either means Pico is alive)
+# Confirm telemetry is flowing
+ros2 topic echo /pico/heartbeat --once   # data: true when Pico serial is up
+ros2 topic echo /pico/odom --once        # position / twist fields present
+ros2 topic hz   /pico/heartbeat          # ~5 Hz
+ros2 topic hz   /pico/odom               # ~20 Hz
 ```
 
-**Pass:** All three `/pico/*` topics are present and heartbeat echoes.
+**Pass:** All five `/pico/*` topics are present and `/pico/heartbeat` echoes `data: true`.
 
 **Fail / fix:**
-- Topics missing after 10 s → agent can't parse the serial stream. Confirm baud is `115200` on both sides (`config.h` → `UROS_SERIAL_BAUDRATE`).
-- `ERROR: Failed to create participant` → another micro-ROS agent or process is holding the port. `sudo fuser -k /dev/ttyACM0`
+- Topics missing → bridge crashed. Check launch log for `Another cmd_vel_to_pico_bridge instance already running` (lock file) or `open /dev/ttyACM0 failed` (port busy). `sudo fuser -k /dev/ttyACM0` to clear a stale holder.
+- `ERROR: Failed to create participant` → another `micro_ros_agent` is holding the port.
 
 ---
 
@@ -116,40 +107,29 @@ ros2 topic echo /pico/heartbeat --once
 
 > **Safety:** Put the robot on a stand with wheels off the ground for this stage.
 
+Start the bridge from Stage 2 and drive commands through `/cmd_vel`. The bridge handles enable + accel limits + serial translation.
+
 ```bash
-# Terminal 1 — micro-ROS agent
-ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0 -b 115200
+# Terminal 1 — bridge
+ros2 launch parking_system rpi5_pico_bridge.launch.py
 ```
 
 ```bash
-# Terminal 2 — enable motors
-ros2 topic pub --once /pico/enable std_msgs/msg/Bool "{data: true}"
-```
-
-```bash
-# Terminal 3 — slow forward command directly to Pico (bypasses Nav2 entirely)
-ros2 topic pub /pico/control_cmd geometry_msgs/msg/TwistStamped \
-  "{header: {stamp: {sec: 0, nanosec: 0}, frame_id: 'base_link'}, \
-    twist: {linear: {x: 0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}" \
+# Terminal 2 — slow forward command
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}" \
   --rate 10
 ```
 
 **Expected:** Both rear wheels spin forward slowly (~10 cm/s).
 
-```bash
-# Stop motors
-ros2 topic pub --once /pico/control_cmd geometry_msgs/msg/TwistStamped \
-  "{header: {stamp: {sec: 0, nanosec: 0}, frame_id: 'base_link'}, \
-    twist: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}"
-```
+> **Bench-only alternative (no bridge, no Nav2):** flash `autonexa_pico.uf2` instead and use `python3 test/pico_gui.py` for hold-to-drive WASD + live telemetry. Independent of Stages 2–10.
 
 ### 3a — Test reverse
 
 ```bash
-ros2 topic pub /pico/control_cmd geometry_msgs/msg/TwistStamped \
-  "{header: {stamp: {sec: 0, nanosec: 0}, frame_id: 'base_link'}, \
-    twist: {linear: {x: -0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}" \
-  --rate 10
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: -0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}" --rate 10
 ```
 
 **Expected:** Both wheels spin in reverse.
@@ -157,24 +137,18 @@ ros2 topic pub /pico/control_cmd geometry_msgs/msg/TwistStamped \
 ### 3b — Test steering
 
 ```bash
-# Steer left (positive angular.z = left turn in ROS convention)
-ros2 topic pub /pico/control_cmd geometry_msgs/msg/TwistStamped \
-  "{header: {stamp: {sec: 0, nanosec: 0}, frame_id: 'base_link'}, \
-    twist: {linear: {x: 0.05, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}}" \
-  --rate 10
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.05, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}" --rate 10
 ```
 
-**Expected:** Front wheels angle left, rear wheels spin slowly forward.
+**Expected:** Steering servo angles left, rear wheels spin slowly forward.
 
 ```bash
-# Steer right
-ros2 topic pub /pico/control_cmd geometry_msgs/msg/TwistStamped \
-  "{header: {stamp: {sec: 0, nanosec: 0}, frame_id: 'base_link'}, \
-    twist: {linear: {x: 0.05, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: -0.5}}}" \
-  --rate 10
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.05, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: -0.5}}" --rate 10
 ```
 
-**Expected:** Front wheels angle right.
+**Expected:** Steering angles right.
 
 **Pass:** Forward, reverse, left turn, right turn all produce correct physical motion.
 
@@ -182,44 +156,53 @@ ros2 topic pub /pico/control_cmd geometry_msgs/msg/TwistStamped \
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| No motor movement, topics present | `/pico/enable` not latched | Re-publish enable: `ros2 topic pub --once /pico/enable std_msgs/msg/Bool "{data: true}"` |
-| One motor silent | Hiwonder channel wiring | Check I2C wiring; swap `MOTOR_LEFT_CHANNEL` / `MOTOR_RIGHT_CHANNEL` in `config.h` |
-| Both motors spin but backwards | Motor polarity flipped | Negate `v_l` and `v_r` in `pico_firmware/src/ackermann.c` |
-| One motor runs backwards | Single channel polarity | Negate that channel's speed before calling `hiwonder_set_motor_speed()` |
-| Steering goes wrong direction | Servo polarity | Flip sign of `steering_angle` in `servo.c` |
-| Motors stop after ~200 ms | Watchdog timeout | Publish at `--rate 10` (≥ 5 Hz keeps the 200 ms watchdog alive) |
+| No motor movement, topics present | Bridge timed out; publisher below 5 Hz | Publish at `--rate 10` (≥ 5 Hz keeps the 200 ms watchdog alive) |
+| One motor silent | Hiwonder channel wiring | Check I2C wiring; verify M1/M2 leads |
+| Both motors spin but backwards | Motor polarity flipped | Swap motor leads or negate `v_l`/`v_r` in `pico_firmware/src/ackermann.c` |
+| Steering goes wrong direction | Servo polarity | Flip sign in `pico_firmware/src/servo.c` |
 
 ---
 
 ## Stage 4 — cmd_vel safety chain flows end-to-end
 
 ```bash
-# Terminal 1 — micro-ROS agent
-ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyACM0 -b 115200
-
-# Terminal 2 — bridge stack only (no LiDAR, no SLAM, no Nav2)
+# Terminal 1 — bridge stack (no LiDAR, no SLAM, no Nav2)
 ros2 launch parking_system rpi5_pico_bridge.launch.py
-```
 
-```bash
-# Terminal 3 — publish to /cmd_vel (same topic Nav2 uses)
+# Terminal 2 — publish to /cmd_vel (same topic Nav2 uses)
 ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
   "{linear: {x: 0.1, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}" \
   --rate 10
 ```
 
 ```bash
-# Terminal 4 — verify the full chain is flowing
+# Terminal 3 — verify the full chain is flowing
 ros2 topic hz /cmd_vel           # ~10 Hz  (your publisher)
 ros2 topic hz /cmd_vel_safe      # ~10 Hz  (after velocity_smoother + collision_monitor)
-ros2 topic hz /pico/control_cmd  # ~30 Hz  (bridge output rate)
+ros2 topic hz /pico/control_cmd  # ~30 Hz  (bridge output)
+ros2 topic hz /pico/odom         # ~20 Hz  (telemetry back from Pico)
+
+# Or run the packaged diagnostic (covers all of the above + single-publisher guard):
+ros2 run parking_system diagnose_control_chain.py --ros-args \
+  -p expect_pico_bridge:=true \
+  -p require_single_pico_publisher:=true \
+  -p require_flow:=true -p window_s:=12.0
 ```
 
-**Pass:** All three topics show expected Hz and wheels spin.
+**Pass:** `diagnose_control_chain.py` exits 0 and wheels spin.
 
 **Fail / fix:**
-- `/cmd_vel_safe` silent → collision_monitor is blocking. LiDAR not running in this stage, so check `nav2_navigation_params.yaml` — collision_monitor may need `/scan`. Run Stage 6 first if this is the case.
-- `/pico/control_cmd` silent but `/cmd_vel_safe` active → cmd_vel_to_pico_bridge crashed. Check `ros2 node list | grep pico_bridge`.
+- `/cmd_vel_safe` silent → collision_monitor / velocity_smoother not running in bridge-only launch. Bypass by publishing to `/cmd_vel_safe` directly, or launch `nav2_live_slam.launch.py`.
+- `/pico/control_cmd` silent but `/cmd_vel_safe` active → bridge crashed. Check `ros2 node list | grep bridge` and the launch log.
+
+### Stage 4b — Single-publisher guard
+
+```bash
+# Leave the bridge running. In another terminal:
+ros2 run parking_system cmd_vel_to_pico_bridge.py
+```
+
+**Expected:** second process exits immediately with `Another cmd_vel_to_pico_bridge instance is already running (lock: /tmp/cmd_vel_to_pico_bridge.lock)`.
 
 ---
 
@@ -424,10 +407,10 @@ ros2 run parking_system record_control_chain_bag.py
 ## Recommended first-run order (summary)
 
 ```
-Stage 0  →  Flash autonexa_pico_uros.uf2
+Stage 0  →  Build + flash autonexa_pico_uros.uf2
 Stage 1  →  Confirm USB serial bytes from Pico
 Stage 2  →  Confirm micro-ROS topics appear
-Stage 3  →  Motors spin with direct TwistStamped commands
+Stage 3  →  Motors spin with direct cmd_vel commands
 Stage 4  →  /cmd_vel → /cmd_vel_safe → /pico/control_cmd chain flows
 Stage 5  →  E-STOP latches and clears
 Stage 6  →  LiDAR scan OK, SLAM map builds
