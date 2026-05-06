@@ -40,6 +40,15 @@
 
 #define L298N_PWM_FREQ_HZ    10000   /* 10 kHz PWM (above audible)         */
 
+/* Per-channel direction polarity. 1 = swap "forward" / "reverse" so that
+ * positive PWM commands produce physical forward rotation. Verified
+ * empirically 2026-05-06: with the natural mapping (=0), the GUI's
+ * `M1 +fwd` and `M2 +fwd` both spun the wheels backward, so both
+ * channels live with this flipped. Re-zero a flag if the motor wires get
+ * physically swapped on that channel. */
+#define L298N_LEFT_REVERSED   1
+#define L298N_RIGHT_REVERSED  1
+
 /* Logical channel numbering — matches CLI verbs SPEED_L/SPEED_R + the
  * GUI's bench panel "M1/M2" buttons. M1 = left, M2 = right. */
 #define MOTOR_CHANNEL_LEFT   1

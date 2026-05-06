@@ -13,6 +13,7 @@ typedef struct {
     uint pin_en;
     uint pwm_slice;
     uint pwm_chan;
+    bool reversed;   /* if true, flip the sign of duty before applying */
 } l298n_chan_t;
 
 /* Index 0 = channel 1 (LEFT motor on OUT3-OUT4),
@@ -41,6 +42,11 @@ static int clamp_int(int v, int lo, int hi)
 static void apply_duty(int idx, int duty_pct)
 {
     duty_pct = clamp_int(duty_pct, -100, 100);
+
+    /* Apply per-channel polarity (set in init from config.h). Lets the
+     * caller's "positive = forward" stay consistent when a motor's two
+     * output leads happen to be wired the opposite way at the L298N. */
+    if (channels[idx].reversed) duty_pct = -duty_pct;
 
     if (duty_pct > 0) {
         gpio_put(channels[idx].pin_in_a, 1);
@@ -71,11 +77,13 @@ bool l298n_driver_init(void)
     channels[0].pin_in_a = L298N_LEFT_IN3_PIN;
     channels[0].pin_in_b = L298N_LEFT_IN4_PIN;
     channels[0].pin_en   = L298N_LEFT_EN_PIN;
+    channels[0].reversed = (L298N_LEFT_REVERSED != 0);
 
     /* Channel 2 = RIGHT (OUT1-OUT2) */
     channels[1].pin_in_a = L298N_RIGHT_IN1_PIN;
     channels[1].pin_in_b = L298N_RIGHT_IN2_PIN;
     channels[1].pin_en   = L298N_RIGHT_EN_PIN;
+    channels[1].reversed = (L298N_RIGHT_REVERSED != 0);
 
     /* PWM: 1 MHz tick → wrap=99 → 100 ticks/period → 10 kHz. */
     pwm_wrap = 99;
