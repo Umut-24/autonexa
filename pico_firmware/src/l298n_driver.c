@@ -122,6 +122,14 @@ bool l298n_set_speed(uint8_t channel, int8_t speed)
     int8_t s = clamp_speed(speed);
     /* Map [-MOTOR_SPEED_MAX, +MOTOR_SPEED_MAX] → [-100, +100] %. */
     int duty = ((int)s * 100) / MOTOR_SPEED_MAX;
+    /* Static-friction kick-start: snap any non-zero duty up to the
+     * deadband floor so motors actually rotate. Does not affect duty=0
+     * (motors coast / stop normally). RAW_PWM path bypasses this. */
+    if (duty > 0 && duty < MOTOR_DEADBAND_PCT) {
+        duty = MOTOR_DEADBAND_PCT;
+    } else if (duty < 0 && duty > -MOTOR_DEADBAND_PCT) {
+        duty = -MOTOR_DEADBAND_PCT;
+    }
     apply_duty(idx, duty);
     return true;
 }
