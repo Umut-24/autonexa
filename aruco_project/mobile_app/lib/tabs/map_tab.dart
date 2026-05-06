@@ -28,8 +28,10 @@ class _MapTabState extends State<MapTab> {
   @override
   void initState() {
     super.initState();
-    // Poll scan points at 1s for overlay
-    _scanTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    // Poll scan points at 5 Hz so the LiDAR overlay feels live (was 1 Hz).
+    // SLAMTEC C1 publishes /scan at ~10 Hz, so 5 Hz on the app side stays
+    // well under wire bandwidth while looking continuous to the eye.
+    _scanTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
       final conn = context.read<ConnectionService>();
       if (conn.isConnected) conn.fetchScan();
     });
