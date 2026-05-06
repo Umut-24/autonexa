@@ -85,7 +85,7 @@ def generate_launch_description():
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
     servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1100')
     servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='1900')
-    servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='1')
+    servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='-1')
 
     # In live SLAM mode there is no road-mask topic by default.
     configured_nav2_params = RewrittenYaml(

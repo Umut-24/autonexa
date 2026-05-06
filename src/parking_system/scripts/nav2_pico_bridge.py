@@ -89,7 +89,11 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('servo_us_min', 1100)
         self.declare_parameter('servo_us_max', 1900)
         self.declare_parameter('servo_max_steer_rad', 0.5236)
-        self.declare_parameter('servo_polarity', 1)
+        # Default -1 on this chassis: empirically the linkage geometry inverts
+        # the firmware's intended sign so that ROS-positive wz (left turn)
+        # needs us > center, not us < center. Override to +1 if the hardware
+        # is rewired the other way.
+        self.declare_parameter('servo_polarity', -1)
 
         self.declare_parameter('auto_enable', True)
         self.declare_parameter('bridge_lock_file', '/tmp/nav2_pico_bridge.lock')
