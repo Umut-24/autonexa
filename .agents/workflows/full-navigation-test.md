@@ -46,10 +46,13 @@ source install/setup.bash
 ros2 launch parking_system rpi5_pico_bridge.launch.py
 ```
 
-Watch the logs. You should see:
+Watch the logs. You should see (legacy path):
 - `cmd_vel_to_pico_bridge: Bridge started`
-- `pico_serial_transceiver: Connected to Pico on /dev/ttyACM0`
-- `pico_joint_feedback_to_odom: Odom node started`
+- `micro_ros_agent ... session established`
+
+Or, on the MicroPython path (`use_micropython_bridge:=true`):
+- `pico_serial_bridge: opened /dev/ttyACM0 @ 115200`
+- `pico_serial_bridge: Bridge started: /cmd_vel -> /dev/ttyACM0@115200, rate=30.0Hz ...`
 
 ---
 

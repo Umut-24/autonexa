@@ -14,7 +14,7 @@ TF Tree: map -> odom -> base_link -> laser_link
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import AndSubstitution, LaunchConfiguration, NotSubstitution, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -57,7 +57,16 @@ def generate_launch_description():
     bridge_cmd_vel_topic_arg = DeclareLaunchArgument(
         'bridge_cmd_vel_topic',
         default_value='/cmd_vel_safe',
-        description='Final velocity topic consumed by cmd_vel_to_pico_bridge'
+        description='Final velocity topic consumed by the Pico bridge'
+    )
+    use_micropython_bridge_arg = DeclareLaunchArgument(
+        'use_micropython_bridge',
+        default_value='false',
+        description='Use the new MicroPython serial bridge instead of micro_ros_agent + cmd_vel_to_pico_bridge'
+    )
+    micropython_lock_file_arg = DeclareLaunchArgument(
+        'micropython_lock_file',
+        default_value='/tmp/pico_serial_bridge.lock',
     )
 
     # In live SLAM mode there is no road-mask topic by default.
@@ -221,7 +230,16 @@ def generate_launch_description():
         }]
     )
 
-    # micro-ROS agent — bridges XRCE-DDS serial to ROS 2 DDS graph
+    use_legacy_bridge = AndSubstitution(
+        LaunchConfiguration('use_pico_bridge'),
+        NotSubstitution(LaunchConfiguration('use_micropython_bridge')),
+    )
+    use_mp_bridge = AndSubstitution(
+        LaunchConfiguration('use_pico_bridge'),
+        LaunchConfiguration('use_micropython_bridge'),
+    )
+
+    # Legacy: micro-ROS agent + cmd_vel_to_pico_bridge (used with C firmware)
     micro_ros_agent = ExecuteProcess(
         cmd=[
             'ros2', 'run', 'micro_ros_agent', 'micro_ros_agent',
@@ -229,16 +247,15 @@ def generate_launch_description():
             '-b', '115200',
         ],
         output='screen',
-        condition=IfCondition(LaunchConfiguration('use_pico_bridge')),
+        condition=IfCondition(use_legacy_bridge),
     )
 
-    # Command bridge: consumes safe/smoothed velocity and publishes Pico control topics
     cmd_vel_to_pico_bridge = Node(
         package='parking_system',
         executable='cmd_vel_to_pico_bridge.py',
         name='cmd_vel_to_pico_bridge',
         output='screen',
-        condition=IfCondition(LaunchConfiguration('use_pico_bridge')),
+        condition=IfCondition(use_legacy_bridge),
         parameters=[{
             'cmd_vel_topic': LaunchConfiguration('bridge_cmd_vel_topic'),
             'control_cmd_topic': '/pico/control_cmd',
@@ -252,6 +269,34 @@ def generate_launch_description():
             'max_aw_radps2': 1.2,
             'enforce_single_publisher': LaunchConfiguration('enforce_single_publisher'),
             'bridge_lock_file': LaunchConfiguration('bridge_lock_file'),
+        }],
+    )
+
+    # New: MicroPython serial bridge (replaces micro_ros_agent + cmd_vel_to_pico_bridge).
+    pico_serial_bridge = Node(
+        package='parking_system',
+        executable='pico_serial_bridge.py',
+        name='pico_serial_bridge',
+        output='screen',
+        condition=IfCondition(use_mp_bridge),
+        parameters=[{
+            'cmd_vel_topic': LaunchConfiguration('bridge_cmd_vel_topic'),
+            'control_cmd_topic': '/pico/control_cmd',
+            'enable_topic': '/pico/enable',
+            'heartbeat_topic': '/pico/heartbeat',
+            'odom_topic': '/pico/odom',
+            'joint_topic': '/pico/joint_feedback',
+            'estop_service': '/pico/estop',
+            'serial_port': LaunchConfiguration('pico_serial_port'),
+            'serial_baud': 115200,
+            'publish_rate_hz': 30.0,
+            'command_timeout_s': 0.20,
+            'max_vx_mps': 0.35,
+            'max_wz_radps': 0.8,
+            'max_ax_mps2': 0.8,
+            'max_aw_radps2': 1.2,
+            'enforce_single_publisher': LaunchConfiguration('enforce_single_publisher'),
+            'bridge_lock_file': LaunchConfiguration('micropython_lock_file'),
         }],
     )
 
@@ -284,6 +329,8 @@ def generate_launch_description():
         enforce_single_pub_arg,
         bridge_lock_file_arg,
         bridge_cmd_vel_topic_arg,
+        use_micropython_bridge_arg,
+        micropython_lock_file_arg,
         use_mobile_bridge_arg,
         static_tf_base_to_laser,
         lidar,
@@ -301,6 +348,7 @@ def generate_launch_description():
         lifecycle_manager_navigation,
         micro_ros_agent,
         cmd_vel_to_pico_bridge,
+        pico_serial_bridge,
         mobile_bridge,
         rviz,
     ])
