@@ -39,6 +39,7 @@ install(PROGRAMS
   scripts/print_robot_position.py
   scripts/nav2_activator.py
   scripts/cmd_vel_to_pico_bridge.py
+  scripts/nav2_pico_bridge.py
   scripts/ros2_mobile_bridge.py
   DESTINATION lib/${PROJECT_NAME}
 )
