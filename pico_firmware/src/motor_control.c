@@ -51,6 +51,29 @@ void motor_control_set_velocity(float vx, float wz)
     servo_set_angle(steer);
 }
 
+static int8_t clamp_speed(int8_t s)
+{
+    if (s > MOTOR_SPEED_MAX) return MOTOR_SPEED_MAX;
+    if (s < MOTOR_SPEED_MIN) return MOTOR_SPEED_MIN;
+    return s;
+}
+
+void motor_control_set_speeds(int8_t left, int8_t right)
+{
+    speed_left  = clamp_speed(left);
+    speed_right = clamp_speed(right);
+}
+
+void motor_control_set_speed_left(int8_t left)
+{
+    speed_left = clamp_speed(left);
+}
+
+void motor_control_set_speed_right(int8_t right)
+{
+    speed_right = clamp_speed(right);
+}
+
 void motor_control_enable(bool enable)
 {
     motors_enabled = enable;

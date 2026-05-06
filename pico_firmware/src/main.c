@@ -118,20 +118,21 @@ static void process_serial_command(const char *cmd)
         printf("OK SERVO_PIN_HOLD done pwm_restored\n");
     }
 
-    /* === MOTOR (L298N H-bridge) === */
+    /* === MOTOR (L298N H-bridge) ===
+     * Important: persist via motor_control_set_speeds() so the next
+     * motor_control_apply() tick picks them up. Writing only once via
+     * l298n_set_speed() here would be overridden 20 ms later when the
+     * control loop calls motor_control_apply() with its own (stale,
+     * zero) state. */
     else if (strncmp(cmd, "SPEED_L ", 8) == 0) {
         speed_left = (int8_t)atoi(cmd + 8);
-        if (motor_control_is_enabled() && safety_is_ok()) {
-            l298n_set_speed(MOTOR_CHANNEL_LEFT, speed_left);
-        }
+        motor_control_set_speed_left(speed_left);
         safety_feed_watchdog();
         printf("OK SPEED_L %d\n", speed_left);
     }
     else if (strncmp(cmd, "SPEED_R ", 8) == 0) {
         speed_right = (int8_t)atoi(cmd + 8);
-        if (motor_control_is_enabled() && safety_is_ok()) {
-            l298n_set_speed(MOTOR_CHANNEL_RIGHT, speed_right);
-        }
+        motor_control_set_speed_right(speed_right);
         safety_feed_watchdog();
         printf("OK SPEED_R %d\n", speed_right);
     }
@@ -139,9 +140,7 @@ static void process_serial_command(const char *cmd)
         int8_t spd = (int8_t)atoi(cmd + 6);
         speed_left  = spd;
         speed_right = spd;
-        if (motor_control_is_enabled() && safety_is_ok()) {
-            l298n_set_speeds(speed_left, speed_right);
-        }
+        motor_control_set_speeds(spd, spd);
         safety_feed_watchdog();
         printf("OK SPEED %d\n", spd);
     }

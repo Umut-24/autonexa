@@ -21,6 +21,22 @@
 void motor_control_set_velocity(float vx, float wz);
 
 /**
+ * Directly set the persistent motor speed targets that
+ * motor_control_apply() writes to hardware every control loop. Used by
+ * the CLI SPEED / SPEED_L / SPEED_R verbs which command motors but do
+ * not change steering. Bypasses Ackermann IK.
+ *
+ * Both arguments are clamped to [MOTOR_SPEED_MIN, MOTOR_SPEED_MAX].
+ */
+void motor_control_set_speeds(int8_t left, int8_t right);
+
+/** Set only the left motor's persistent speed target. */
+void motor_control_set_speed_left(int8_t left);
+
+/** Set only the right motor's persistent speed target. */
+void motor_control_set_speed_right(int8_t right);
+
+/**
  * Enable or disable motor output.
  * When disabled, motors are stopped and speeds zeroed.
  * @param enable  true to enable, false to disable
