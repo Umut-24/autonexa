@@ -72,7 +72,9 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('max_aw_radps2', 1.2)
 
         self.declare_parameter('wheelbase_m', 0.25)
-        self.declare_parameter('vel_to_speed_scale', 63.7)
+        # 100 = vx 0.30 m/s -> SPEED 30 -> 100% PWM duty on the L298N path.
+        # Was 63.7 for the old Hiwonder closed-loop "pulses/10ms" semantic.
+        self.declare_parameter('vel_to_speed_scale', 100.0)
         self.declare_parameter('max_speed_pulses', 30)
 
         self.declare_parameter('servo_center_us', 1650)

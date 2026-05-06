@@ -26,7 +26,7 @@ option(USE_MICRO_ROS "Build with micro-ROS support" ${USE_MICRO_ROS_DEFAULT})
 set(COMMON_SOURCES
     src/main.c
     src/servo.c
-    src/hiwonder_driver.c
+    src/l298n_driver.c
     src/safety.c
     src/ackermann.c
     src/motor_control.c
@@ -36,7 +36,6 @@ set(COMMON_LIBS
     pico_stdlib
     hardware_pwm
     hardware_gpio
-    hardware_i2c
     hardware_timer
 )
 
@@ -108,9 +107,9 @@ if(USE_MICRO_ROS)
 endif()
 
 # Print build info
-message(STATUS "Autonexa Pico firmware v3.0 (Hiwonder Chassis)")
-message(STATUS "  Motor driver: I2C (Hiwonder 4-ch board)")
-message(STATUS "  Servo: LD-1501MG on configured GPIO")
+message(STATUS "Autonexa Pico firmware v3.0 (L298N Chassis)")
+message(STATUS "  Motor driver: L298N H-bridge (open-loop PWM, no encoders)")
+message(STATUS "  Servo: hobby servo on configured GPIO")
 message(STATUS "  Control frequency: 50 Hz")
 message(STATUS "  Targets: autonexa_pico (ASCII serial — bench testing)")
 if(USE_MICRO_ROS)

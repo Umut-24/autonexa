@@ -31,13 +31,17 @@ Workspace root: `/home/autonexa/autonexa` (older docs may reference `~/intellige
 
 | GPIO | Function | Target |
 |------|----------|--------|
-| 0 | I2C0 SDA | Hiwonder motor driver (addr `0x34`) |
-| 1 | I2C0 SCL | Hiwonder motor driver |
-| 12 | PWM @ 50 Hz | LD-1501MG steering servo (500–2500 µs, ±30°) |
+| 2 | GPIO out | L298N IN1 (right motor direction A) |
+| 3 | GPIO out | L298N IN2 (right motor direction B) |
+| 4 | PWM @ 10 kHz | L298N ENA (right motor enable / duty) |
+| 6 | GPIO out | L298N IN3 (left motor direction A) |
+| 7 | GPIO out | L298N IN4 (left motor direction B) |
+| 8 | PWM @ 10 kHz | L298N ENB (left motor enable / duty) |
+| 15 | PWM @ 50 Hz | Steering servo (500–2500 µs, ±30°) |
 | 25 | LED | Heartbeat: 1 Hz normal, **5 Hz = E-STOP latched** |
 | USB | CDC serial | RPi5 @ 115200 baud |
 
-Motors: JGB37-520R30 12 V DC, 1:30 gearbox, 1320 encoder edges/rev, on driver channels **M2 (left rear)** and **M3 (right rear)**. M1/M4 unused (right motor rewired off M1 on 2026-05-01 — M1 channel was unreliable).
+L298N output mapping: **OUT1-OUT2 → right motor**, **OUT3-OUT4 → left motor**. Motors are JGB37-520R30 12 V DC, 1:30 gearbox; encoders not currently wired (open-loop only, no on-board feedback). Switched from the Hiwonder I2C smart driver on 2026-05-06 after its MCU burned. Logical channel numbering for the CLI verbs: **M1 = left, M2 = right** (matches GUI bench panel).
 
 ### Vehicle parameters (mirrored in `pico_firmware/include/config.h`)
 Wheelbase 0.25 m · Track 0.20 m · Wheel radius 0.033 m · Max steering ±30° (0.5236 rad) · Control loop 50 Hz · **Command timeout 200 ms** (firmware watchdog).

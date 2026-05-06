@@ -1,6 +1,6 @@
 #include "safety.h"
 #include "config.h"
-#include "hiwonder_driver.h"
+#include "l298n_driver.h"
 #include "servo.h"
 
 #include "pico/stdlib.h"
@@ -36,7 +36,7 @@ void safety_update(void)
         if ((now_ms - last_cmd_ms) > CMD_TIMEOUT_MS) {
             if (!timed_out) {
                 /* Transition: running → timed out */
-                hiwonder_stop_all();
+                l298n_stop_all();
                 /* Keep current steering command latched.
                  * Timeout is intended to stop drive motion; forcing center here
                  * can override manual servo test commands on every cycle.
@@ -50,7 +50,7 @@ void safety_update(void)
 
     /* ── E-STOP enforcement ─────────────────────────────────── */
     if (estop_active) {
-        hiwonder_stop_all();
+        l298n_stop_all();
         servo_center();
     }
 
@@ -72,7 +72,7 @@ void safety_feed_watchdog(void)
 void safety_estop_activate(void)
 {
     estop_active = true;
-    hiwonder_stop_all();
+    l298n_stop_all();
     servo_center();
 }
 
