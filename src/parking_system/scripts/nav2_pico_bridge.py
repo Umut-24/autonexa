@@ -38,12 +38,40 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
+from rcl_interfaces.msg import SetParametersResult
 from geometry_msgs.msg import Twist
 
 try:
     import serial
 except ImportError:
     raise SystemExit("pyserial required: sudo apt install python3-serial")
+
+try:
+    import yaml
+except ImportError:
+    yaml = None  # YAML overrides become a no-op if PyYAML is missing.
+
+# Persistent overrides written by the mobile bridge's /api/calibrate_direction
+# and /api/params endpoints. Loaded on startup *after* launch params so the
+# user's last-known-good calibration survives a relaunch.
+RUNTIME_OVERRIDES_PATH = os.path.expanduser('~/.autonexa/runtime_overrides.yaml')
+
+# Parameters the bridge will accept overrides for. Anything outside this list
+# is ignored when reading the YAML — keeps a stale or hand-edited file from
+# poking at parameters that aren't safe to change at runtime (e.g. serial port).
+RUNTIME_OVERRIDABLE = (
+    'vx_polarity',
+    'servo_polarity',
+    'max_vx_mps',
+    'max_wz_radps',
+    'max_ax_mps2',
+    'max_aw_radps2',
+    'max_steer_rate_radps',
+    'min_vx_creep',
+    'servo_center_us',
+    'servo_us_min',
+    'servo_us_max',
+)
 
 
 @dataclass
@@ -63,6 +91,12 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('serial_port', '/dev/ttyACM0')
         self.declare_parameter('serial_baud', 115200)
         self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+        # Optional second cmd_vel topic for the mobile app's safety-bypass
+        # path (`/cmd_vel_manual`). Empty string disables the subscription.
+        # Both topics drive the same Twist target — freshest msg wins via the
+        # existing 200 ms watchdog. Routing decision is made by the publisher
+        # (mobile bridge), not here.
+        self.declare_parameter('manual_cmd_vel_topic', '/cmd_vel_manual')
         self.declare_parameter('publish_rate_hz', 30.0)
         self.declare_parameter('command_timeout_s', 0.20)
 
@@ -94,6 +128,15 @@ class Nav2PicoBridge(Node):
         # needs us > center, not us < center. Override to +1 if the hardware
         # is rewired the other way.
         self.declare_parameter('servo_polarity', -1)
+        # +1 = ROS-positive vx drives the chassis forward (standard).
+        # -1 = forward/back swapped (use when motor wiring is reversed or the
+        # LiDAR-defined map frame is yaw-flipped). Calibration wizard in the
+        # mobile app toggles this live; persists via runtime_overrides.yaml.
+        self.declare_parameter('vx_polarity', 1)
+        # Servo slew-rate cap (rad/s). LD-1501MG datasheet ~3.0 rad/s @ no
+        # load; lower values smooth aggressive Nav2 wz step changes that
+        # otherwise make the steering "thunk".
+        self.declare_parameter('max_steer_rate_radps', 3.0)
 
         self.declare_parameter('auto_enable', True)
         self.declare_parameter('bridge_lock_file', '/tmp/nav2_pico_bridge.lock')
@@ -120,6 +163,8 @@ class Nav2PicoBridge(Node):
         self.servo_us_max = int(self.get_parameter('servo_us_max').value)
         self.servo_max_steer = float(self.get_parameter('servo_max_steer_rad').value)
         self.servo_polarity = int(self.get_parameter('servo_polarity').value)
+        self.vx_polarity = int(self.get_parameter('vx_polarity').value)
+        self.max_steer_rate = float(self.get_parameter('max_steer_rate_radps').value)
 
         self.auto_enable = bool(self.get_parameter('auto_enable').value)
         self.lock_path = str(self.get_parameter('bridge_lock_file').value)
@@ -131,18 +176,27 @@ class Nav2PicoBridge(Node):
                 f"[{self.servo_us_min}, {self.servo_us_max}]")
         if self.servo_polarity not in (-1, 1):
             raise RuntimeError(f"servo_polarity must be +1 or -1, got {self.servo_polarity}")
+        if self.vx_polarity not in (-1, 1):
+            raise RuntimeError(f"vx_polarity must be +1 or -1, got {self.vx_polarity}")
 
         self.target = MotionState()
         self.output = MotionState()
         self.last_cmd_time = self.get_clock().now()
         self._last_us_sent = None
         self._last_speed_sent = None
+        self._last_steer_sent_rad = 0.0
+        self._last_steer_t = self.get_clock().now()
         self._lock_fh = None
         self._serial = None
         self._write_lock = threading.Lock()
         self._shutting_down = False
 
         self._acquire_lock()
+        # Register the validation callback first so any overrides we replay
+        # below are routed through it (and so cached attrs stay in sync with
+        # the parameter store).
+        self.add_on_set_parameters_callback(self._on_param_set)
+        self._apply_runtime_overrides()
 
         if not self.dry_run:
             self._open_serial()
@@ -151,6 +205,10 @@ class Nav2PicoBridge(Node):
 
         self.cmd_sub = self.create_subscription(
             Twist, self.cmd_vel_topic, self.on_cmd_vel, 20)
+        manual_topic = str(self.get_parameter('manual_cmd_vel_topic').value)
+        if manual_topic and manual_topic != self.cmd_vel_topic:
+            self.manual_sub = self.create_subscription(
+                Twist, manual_topic, self.on_cmd_vel, 20)
         dt = 1.0 / max(1.0, self.publish_rate_hz)
         self.timer = self.create_timer(dt, self.on_timer)
 
@@ -161,7 +219,8 @@ class Nav2PicoBridge(Node):
             f"max_vx={self.max_vx:.2f}m/s max_wz={self.max_wz:.2f}rad/s, "
             f"min_vx_creep={self.min_vx_creep:.3f}m/s, "
             f"servo center={self.servo_center}us in [{self.servo_us_min},{self.servo_us_max}], "
-            f"polarity={self.servo_polarity:+d}")
+            f"vx_polarity={self.vx_polarity:+d} servo_polarity={self.servo_polarity:+d}, "
+            f"max_steer_rate={self.max_steer_rate:.2f}rad/s")
 
     # ── Lock + serial ─────────────────────────────────────────────
     def _acquire_lock(self) -> None:
@@ -214,9 +273,103 @@ class Nav2PicoBridge(Node):
             self.get_logger().error(f"serial write failed ({line!r}): {exc}")
             return False
 
+    # ── Runtime override + parameter callback ────────────────────
+    def _apply_runtime_overrides(self) -> None:
+        """Replay persisted overrides (~/.autonexa/runtime_overrides.yaml)
+        through the normal SetParameters path so the change-callback runs
+        and validates them. Silent no-op if the file is missing."""
+        if yaml is None or not os.path.exists(RUNTIME_OVERRIDES_PATH):
+            return
+        try:
+            with open(RUNTIME_OVERRIDES_PATH, 'r', encoding='utf-8') as fh:
+                doc = yaml.safe_load(fh) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            self.get_logger().warning(
+                f'failed reading {RUNTIME_OVERRIDES_PATH}: {exc}')
+            return
+        section = doc.get('nav2_pico_bridge') or {}
+        if not isinstance(section, dict):
+            return
+        kv = []
+        for key, value in section.items():
+            if key not in RUNTIME_OVERRIDABLE:
+                continue
+            try:
+                param = self.get_parameter(key)
+            except Exception:
+                continue
+            try:
+                kv.append(rclpy.parameter.Parameter(key, param.type_, value))
+            except Exception as exc:
+                self.get_logger().warning(
+                    f'override {key}={value!r} rejected: {exc}')
+        if kv:
+            results = self.set_parameters(kv)
+            applied = [k.name for k, r in zip(kv, results) if r.successful]
+            self.get_logger().info(
+                f'runtime overrides applied: {applied}')
+
+    def _on_param_set(self, params):
+        """Validate + apply parameter changes pushed from the mobile bridge
+        (or `ros2 param set`). Refuses out-of-range values; mirrors the
+        accepted ones into the cached attributes used by the hot path."""
+        for p in params:
+            if p.name == 'vx_polarity':
+                if p.value not in (-1, 1):
+                    return SetParametersResult(
+                        successful=False, reason='vx_polarity must be +1 or -1')
+                self.vx_polarity = int(p.value)
+            elif p.name == 'servo_polarity':
+                if p.value not in (-1, 1):
+                    return SetParametersResult(
+                        successful=False, reason='servo_polarity must be +1 or -1')
+                self.servo_polarity = int(p.value)
+            elif p.name == 'max_vx_mps':
+                if not 0.0 < float(p.value) <= 1.0:
+                    return SetParametersResult(
+                        successful=False, reason='max_vx_mps out of range (0, 1.0]')
+                self.max_vx = float(p.value)
+            elif p.name == 'max_wz_radps':
+                if not 0.0 < float(p.value) <= 4.0:
+                    return SetParametersResult(
+                        successful=False, reason='max_wz_radps out of range (0, 4.0]')
+                self.max_wz = float(p.value)
+            elif p.name == 'max_ax_mps2':
+                if not 0.0 < float(p.value) <= 5.0:
+                    return SetParametersResult(successful=False, reason='max_ax_mps2 out of range')
+                self.max_ax = float(p.value)
+            elif p.name == 'max_aw_radps2':
+                if not 0.0 < float(p.value) <= 8.0:
+                    return SetParametersResult(successful=False, reason='max_aw_radps2 out of range')
+                self.max_aw = float(p.value)
+            elif p.name == 'max_steer_rate_radps':
+                if not 0.05 <= float(p.value) <= 20.0:
+                    return SetParametersResult(
+                        successful=False, reason='max_steer_rate_radps out of range [0.05, 20]')
+                self.max_steer_rate = float(p.value)
+            elif p.name == 'min_vx_creep':
+                if not 0.0 <= float(p.value) <= 0.5:
+                    return SetParametersResult(successful=False, reason='min_vx_creep out of range')
+                self.min_vx_creep = float(p.value)
+            elif p.name == 'servo_center_us':
+                if not 800 <= int(p.value) <= 2200:
+                    return SetParametersResult(successful=False, reason='servo_center_us out of range')
+                self.servo_center = int(p.value)
+            elif p.name == 'servo_us_min':
+                if not 500 <= int(p.value) <= self.servo_center:
+                    return SetParametersResult(
+                        successful=False, reason='servo_us_min must be <= servo_center_us')
+                self.servo_us_min = int(p.value)
+            elif p.name == 'servo_us_max':
+                if not self.servo_center <= int(p.value) <= 2500:
+                    return SetParametersResult(
+                        successful=False, reason='servo_us_max must be >= servo_center_us')
+                self.servo_us_max = int(p.value)
+        return SetParametersResult(successful=True)
+
     # ── Mapping math ──────────────────────────────────────────────
     def _vx_to_speed_pulses(self, vx: float) -> int:
-        s = int(round(vx * self.vel_scale))
+        s = int(round(self.vx_polarity * vx * self.vel_scale))
         return clamp(s, -self.max_speed, +self.max_speed)
 
     def _vx_wz_to_steer(self, vx: float, wz: float) -> float:
@@ -281,6 +434,16 @@ class Nav2PicoBridge(Node):
 
         speed = self._vx_to_speed_pulses(gated_vx)
         steer = self._vx_wz_to_steer(self.output.vx, self.output.wz)
+        # Servo slew-rate limiter — runs in steering-angle space (rad) so it
+        # respects the actual mechanical limit of the servo, not the µs scale.
+        # Applied here, after Ackermann math, so it bounds the output the
+        # firmware sees regardless of how fast the upstream wz changes.
+        steer_dt = (now - self._last_steer_t).nanoseconds * 1e-9
+        if steer_dt > 0.0 and self.max_steer_rate > 0.0:
+            max_delta = self.max_steer_rate * min(steer_dt, dt * 4.0)
+            steer = self._apply_rate_limit(self._last_steer_sent_rad, steer, max_delta)
+        self._last_steer_sent_rad = steer
+        self._last_steer_t = now
         servo_us = self._steer_to_servo_us(steer)
 
         # SPEED every tick — feeds the firmware's 200 ms watchdog

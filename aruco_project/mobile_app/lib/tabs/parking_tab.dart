@@ -28,10 +28,16 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
   int _currentWaypointIndex = 0;
   Timer? _missionTimer;
 
+  // Manual waypoints loaded from the bridge.
+  List<NamedWaypoint> _manualWaypoints = [];
+  bool _manualLoading = false;
+  String _lastFingerprint = '';
+
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshManualWaypoints());
   }
 
   @override
@@ -39,6 +45,19 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
     _tabController.dispose();
     _missionTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _refreshManualWaypoints() async {
+    final conn = context.read<ConnectionService>();
+    if (!conn.isConnected) return;
+    setState(() => _manualLoading = true);
+    final wps = await conn.listNamedWaypoints();
+    if (!mounted) return;
+    setState(() {
+      _manualWaypoints = wps;
+      _manualLoading = false;
+      _lastFingerprint = conn.mapFingerprint;
+    });
   }
 
   @override
@@ -79,6 +98,7 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
               labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
               tabs: const [
                 Tab(text: 'Parking Spots'),
+                Tab(text: 'Manual Spots'),
                 Tab(text: 'Missions'),
               ],
             ),
@@ -90,6 +110,7 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
               controller: _tabController,
               children: [
                 _buildParkingSpotsView(colors),
+                _buildManualSpotsView(colors),
                 _buildMissionsView(colors),
               ],
             ),
@@ -220,6 +241,182 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
           ),
         ],
       ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  MANUAL SPOTS TAB — user-defined waypoints with no ArUco needed.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  Widget _buildManualSpotsView(ResolvedColors colors) {
+    final conn = context.watch<ConnectionService>();
+    if (!conn.isConnected) {
+      return _emptyState(Icons.link_off_rounded, 'Not Connected',
+          'Connect to manage manual waypoints.', colors);
+    }
+    // If the bridge fingerprint changed since we loaded, refresh on next frame
+    // so stale flags update without manual pull-to-refresh.
+    if (_lastFingerprint.isNotEmpty &&
+        conn.mapFingerprint.isNotEmpty &&
+        _lastFingerprint != conn.mapFingerprint) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _refreshManualWaypoints());
+    }
+    return RefreshIndicator(
+      onRefresh: _refreshManualWaypoints,
+      child: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        children: [
+          GlassCard(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('SAVE CURRENT POSE',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                      letterSpacing: 1.2, color: colors.textTertiary)),
+              const SizedBox(height: 8),
+              Text(
+                'Drive the robot to the spot, then tap a kind to save its current map pose '
+                '(${conn.robotStatus.pose.x.toStringAsFixed(2)}, '
+                '${conn.robotStatus.pose.y.toStringAsFixed(2)}, '
+                'yaw ${(conn.robotStatus.pose.yaw * 57.2958).toStringAsFixed(0)}°).',
+                style: TextStyle(fontSize: 12, color: colors.textSecondary),
+              ),
+              const SizedBox(height: 10),
+              Row(children: [
+                Expanded(child: _saveKindBtn('park', Icons.local_parking_rounded, AppColors.brand, conn)),
+                const SizedBox(width: 6),
+                Expanded(child: _saveKindBtn('summon', Icons.hail_rounded, AppColors.info, conn)),
+                const SizedBox(width: 6),
+                Expanded(child: _saveKindBtn('home', Icons.home_rounded, AppColors.success, conn)),
+              ]),
+            ]),
+          ),
+          if (_manualLoading)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Center(child: CircularProgressIndicator()),
+            )
+          else if (_manualWaypoints.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 32),
+              child: Center(
+                child: Text('No manual spots yet. Save one above.',
+                    style: TextStyle(fontSize: 13, color: colors.textTertiary)),
+              ),
+            )
+          else
+            ..._manualWaypoints.map((wp) => _manualWpCard(wp, conn, colors)),
+        ],
+      ),
+    );
+  }
+
+  Widget _saveKindBtn(String kind, IconData icon, Color color, ConnectionService conn) {
+    return ElevatedButton.icon(
+      icon: Icon(icon, size: 16),
+      label: Text(kind, style: const TextStyle(fontSize: 12)),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: color.withValues(alpha: 0.85),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+      ),
+      onPressed: () => _promptAndSave(kind, conn),
+    );
+  }
+
+  Future<void> _promptAndSave(String kind, ConnectionService conn) async {
+    final ctrl = TextEditingController(
+        text: '${kind}_${DateTime.now().millisecondsSinceEpoch % 10000}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Name this $kind spot'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final pose = conn.robotStatus.pose;
+    final wp = await conn.saveNamedWaypoint(
+        name: ctrl.text.trim(), kind: kind, x: pose.x, y: pose.y, yaw: pose.yaw);
+    if (wp != null) await _refreshManualWaypoints();
+  }
+
+  Widget _manualWpCard(NamedWaypoint wp, ConnectionService conn, ResolvedColors colors) {
+    Color kindColor;
+    switch (wp.kind) {
+      case 'park': kindColor = AppColors.brand; break;
+      case 'summon': kindColor = AppColors.info; break;
+      case 'home': kindColor = AppColors.success; break;
+      default: kindColor = colors.textTertiary;
+    }
+    return GlassCard(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Row(children: [
+        Container(
+          width: 44, height: 44,
+          decoration: BoxDecoration(
+            color: kindColor.withValues(alpha: 0.18),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(
+            wp.kind == 'park' ? Icons.local_parking_rounded
+                : wp.kind == 'summon' ? Icons.hail_rounded
+                : wp.kind == 'home' ? Icons.home_rounded
+                : Icons.location_on_rounded,
+            color: kindColor,
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Text(wp.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              const SizedBox(width: 8),
+              if (wp.stale)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: AppColors.warning.withValues(alpha: 0.18),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text('stale',
+                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700,
+                          color: AppColors.warning, letterSpacing: 0.6)),
+                ),
+            ]),
+            const SizedBox(height: 2),
+            Text(
+              '(${wp.x.toStringAsFixed(2)}, ${wp.y.toStringAsFixed(2)})  '
+              'yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°',
+              style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: colors.textSecondary),
+            ),
+          ]),
+        ),
+        IconButton(
+          tooltip: 'Navigate',
+          onPressed: wp.stale ? null : () async {
+            final ok = await conn.navigateToNamedWaypoint(wp.name);
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(ok ? 'Going to "${wp.name}"' : 'Navigate failed')));
+          },
+          icon: Icon(Icons.navigation_rounded,
+              color: wp.stale ? colors.textTertiary : AppColors.info),
+        ),
+        IconButton(
+          tooltip: 'Delete',
+          onPressed: () async {
+            await conn.deleteNamedWaypoint(wp.name);
+            await _refreshManualWaypoints();
+          },
+          icon: const Icon(Icons.delete_outline_rounded, color: AppColors.danger),
+        ),
+      ]),
     );
   }
 

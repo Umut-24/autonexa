@@ -86,6 +86,13 @@ def generate_launch_description():
     servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1100')
     servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='1900')
     servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='-1')
+    # +1 = ROS-positive vx -> chassis forward (standard). The mobile app's
+    # Calibrate Direction wizard flips this at runtime via SetParameters and
+    # persists the chosen value to ~/.autonexa/runtime_overrides.yaml.
+    vx_polarity_arg = DeclareLaunchArgument('vx_polarity', default_value='1')
+    max_steer_rate_arg = DeclareLaunchArgument(
+        'max_steer_rate_radps', default_value='3.0',
+        description='Servo slew-rate cap (rad/s). Smooths Nav2 wz step changes.')
 
     # In live SLAM mode there is no road-mask topic by default.
     configured_nav2_params = RewrittenYaml(
@@ -320,6 +327,7 @@ def generate_launch_description():
         condition=IfCondition(use_serial_bridge_active),
         parameters=[{
             'cmd_vel_topic':     LaunchConfiguration('bridge_cmd_vel_topic'),
+            'manual_cmd_vel_topic': '/cmd_vel_manual',
             'serial_port':       LaunchConfiguration('pico_serial_port'),
             'serial_baud':       115200,
             'publish_rate_hz':   30.0,
@@ -334,6 +342,8 @@ def generate_launch_description():
             'servo_us_min':      LaunchConfiguration('servo_us_min'),
             'servo_us_max':      LaunchConfiguration('servo_us_max'),
             'servo_polarity':    LaunchConfiguration('servo_polarity'),
+            'vx_polarity':       LaunchConfiguration('vx_polarity'),
+            'max_steer_rate_radps': LaunchConfiguration('max_steer_rate_radps'),
             'auto_enable':       True,
             'bridge_lock_file':  LaunchConfiguration('serial_bridge_lock_file'),
             'dry_run':           False,
@@ -408,6 +418,8 @@ def generate_launch_description():
         servo_us_min_arg,
         servo_us_max_arg,
         servo_polarity_arg,
+        vx_polarity_arg,
+        max_steer_rate_arg,
         use_mobile_bridge_arg,
         static_tf_base_to_laser,
         lidar,

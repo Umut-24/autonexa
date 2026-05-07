@@ -78,26 +78,120 @@ class _MapTabState extends State<MapTab> {
     });
   }
 
-  void _onTapMap(BuildContext context, TapUpDetails details, ConnectionService conn) {
-    final mapInfo = conn.robotStatus.mapInfo;
-    if (mapInfo == null || conn.mapImage == null) return;
-
-    // Get the tap position in the InteractiveViewer's coordinate space
+  /// Convert a screen-local tap into map-frame meters. Returns null if the
+  /// map metadata isn't loaded yet. Uses a `[x, y]` 2-list to stay compatible
+  /// with the project's pre-Dart-3 SDK constraint.
+  List<double>? _tapToMapCoords(Offset localPos, MapInfo? mapInfo) {
+    if (mapInfo == null) return null;
     final matrix = _transformController.value;
     final inverseMatrix = Matrix4.inverted(matrix);
-    final localPoint = MatrixUtils.transformPoint(inverseMatrix, details.localPosition);
+    final localPoint = MatrixUtils.transformPoint(inverseMatrix, localPos);
+    final mapX = mapInfo.originX + localPoint.dx * mapInfo.resolution;
+    final mapY = mapInfo.originY + (mapInfo.height - localPoint.dy) * mapInfo.resolution;
+    return [mapX, mapY];
+  }
 
-    // Convert pixel coords to map coords (image origin top-left, ROS origin bottom-left)
-    final pixelX = localPoint.dx;
-    final pixelY = localPoint.dy;
-    final mapX = mapInfo.originX + pixelX * mapInfo.resolution;
-    final mapY = mapInfo.originY + (mapInfo.height - pixelY) * mapInfo.resolution;
-
+  void _onTapMap(BuildContext context, TapUpDetails details, ConnectionService conn) {
+    final coords = _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
+    if (coords == null || conn.mapImage == null) return;
     NavGoalDialog.show(
       context,
       conn,
-      initialX: double.parse(mapX.toStringAsFixed(2)),
-      initialY: double.parse(mapY.toStringAsFixed(2)),
+      initialX: double.parse(coords[0].toStringAsFixed(2)),
+      initialY: double.parse(coords[1].toStringAsFixed(2)),
+    );
+  }
+
+  /// Long-press = pose reset. The user is asserting "this is where the robot
+  /// actually is right now"; we publish PoseWithCovarianceStamped on
+  /// /initialpose. AMCL or SLAM Toolbox snaps to the new pose.
+  Future<void> _onLongPressMap(
+      BuildContext context, LongPressStartDetails details, ConnectionService conn) async {
+    final coords = _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
+    if (coords == null || conn.mapImage == null) return;
+    final yawCtrl = TextEditingController(
+        text: conn.robotStatus.pose.yaw.toStringAsFixed(2));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset robot pose here?'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text('x: ${coords[0].toStringAsFixed(2)}  y: ${coords[1].toStringAsFixed(2)}',
+              style: const TextStyle(fontFamily: 'monospace')),
+          const SizedBox(height: 8),
+          TextField(
+            controller: yawCtrl,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            decoration: const InputDecoration(labelText: 'Yaw (rad)'),
+          ),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.warning),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Set pose'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      final yaw = double.tryParse(yawCtrl.text) ?? 0.0;
+      await conn.relocalize(coords[0], coords[1], yaw);
+    }
+  }
+
+  Future<void> _showResetMenu(BuildContext context, ConnectionService conn) async {
+    final colors = context.read<ThemeProvider>().colors;
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: colors.surface,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.refresh_rounded, color: AppColors.info),
+            title: const Text('Clear obstacles'),
+            subtitle: const Text('Wipe global + local costmaps. Keeps the SLAM map.'),
+            onTap: () async {
+              Navigator.pop(ctx);
+              final ok = await conn.clearCostmaps();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(ok ? 'Costmaps cleared' : 'Costmap clear failed')));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.restart_alt_rounded, color: AppColors.warning),
+            title: const Text('Restart mapping'),
+            subtitle: const Text('Drops the current SLAM map. Robot pose resets to origin.'),
+            onTap: () async {
+              Navigator.pop(ctx);
+              final confirm = await showDialog<bool>(
+                context: context,
+                builder: (c2) => AlertDialog(
+                  title: const Text('Restart mapping?'),
+                  content: const Text(
+                      'The current map will be discarded. Use this when relocating the robot to a new area.'),
+                  actions: [
+                    TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('Cancel')),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: AppColors.warning),
+                      onPressed: () => Navigator.pop(c2, true),
+                      child: const Text('Restart SLAM'),
+                    ),
+                  ],
+                ),
+              );
+              if (confirm == true) {
+                final ok = await conn.restartMapping();
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text(ok ? 'SLAM restarted' : 'SLAM restart failed')));
+              }
+            },
+          ),
+        ]),
+      ),
     );
   }
 
@@ -132,6 +226,15 @@ class _MapTabState extends State<MapTab> {
                 _toggleChip('Trail', _showTrail, () => setState(() => _showTrail = !_showTrail), colors),
                 const SizedBox(width: 6),
                 _toggleChip('Markers', _showMarkers, () => setState(() => _showMarkers = !_showMarkers), colors),
+                const SizedBox(width: 6),
+                IconButton(
+                  iconSize: 20,
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Reset map / costmaps',
+                  icon: Icon(Icons.more_vert_rounded, color: colors.textSecondary),
+                  onPressed: conn.isConnected ? () => _showResetMenu(context, conn) : null,
+                ),
               ],
             ),
           ),
@@ -151,6 +254,7 @@ class _MapTabState extends State<MapTab> {
                     ? _placeholder(colors)
                     : GestureDetector(
                         onTapUp: (d) => _onTapMap(context, d, conn),
+                        onLongPressStart: (d) => _onLongPressMap(context, d, conn),
                         child: InteractiveViewer(
                           transformationController: _transformController,
                           minScale: 0.5,
@@ -201,7 +305,7 @@ class _MapTabState extends State<MapTab> {
                 Text(
                   goal.active
                       ? 'Goal: (${goal.x.toStringAsFixed(2)}, ${goal.y.toStringAsFixed(2)})'
-                      : 'Tap on the map to set a navigation goal',
+                      : 'Tap to set a goal · long-press to reset robot pose',
                   style: TextStyle(fontSize: 11, color: colors.textTertiary),
                 ),
                 const Spacer(),

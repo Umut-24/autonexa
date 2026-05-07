@@ -7,6 +7,7 @@ import '../services/preferences_service.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/connection_indicator.dart';
 import '../widgets/autonexa_logo.dart';
+import '../widgets/calibration_dialog.dart';
 
 /// Settings page with server connection, theme toggle, control prefs, and about info.
 class SettingsTab extends StatefulWidget {
@@ -19,6 +20,10 @@ class SettingsTab extends StatefulWidget {
 class _SettingsTabState extends State<SettingsTab> {
   final TextEditingController _serverController = TextEditingController();
   bool _showServerHistory = false;
+  // Local cache for the Nav2 speed slider — fetched lazily so we don't add
+  // another connection round-trip on tab open if the user never touches it.
+  double? _nav2MaxSpeed;
+  bool _nav2SpeedFetching = false;
 
   @override
   void initState() {
@@ -50,6 +55,19 @@ class _SettingsTabState extends State<SettingsTab> {
 
   Future<void> _disconnect() async {
     await context.read<ConnectionService>().disconnect();
+  }
+
+  Future<void> _ensureNav2Speed() async {
+    if (_nav2MaxSpeed != null || _nav2SpeedFetching) return;
+    final conn = context.read<ConnectionService>();
+    if (!conn.isConnected) return;
+    _nav2SpeedFetching = true;
+    final v = await conn.getNav2MaxSpeed();
+    if (!mounted) return;
+    setState(() {
+      _nav2MaxSpeed = v ?? 0.30;
+      _nav2SpeedFetching = false;
+    });
   }
 
   @override
@@ -381,6 +399,101 @@ class _SettingsTabState extends State<SettingsTab> {
                       ),
                     ],
                   ),
+                ],
+              ),
+            ),
+
+            // ── Calibration ──
+            GlassCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('CALIBRATION', style: TextStyle(fontSize: 11,
+                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  const SizedBox(height: 14),
+                  Text(
+                    'If a Nav2 goal makes the robot drive the wrong way, '
+                    'use this to flip vx_polarity (forward/back) or '
+                    'servo_polarity (left/right). Values persist on disk.',
+                    style: TextStyle(fontSize: 12, color: colors.textSecondary),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: conn.isConnected
+                          ? () => CalibrationDialog.show(context)
+                          : null,
+                      icon: const Icon(Icons.compare_arrows_rounded, size: 18),
+                      label: const Text('Calibrate Direction'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.brand,
+                        disabledBackgroundColor: colors.surfaceLight,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // ── Nav2 Speed ──
+            GlassCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('NAV2 MAX SPEED', style: TextStyle(fontSize: 11,
+                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  const SizedBox(height: 14),
+                  Builder(builder: (_) {
+                    if (!conn.isConnected) {
+                      return Text('Connect to adjust Nav2 speed.',
+                          style: TextStyle(fontSize: 12, color: colors.textTertiary));
+                    }
+                    _ensureNav2Speed();
+                    final value = _nav2MaxSpeed ?? 0.30;
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(children: [
+                          Text('target speed',
+                              style: TextStyle(fontSize: 13, color: colors.textSecondary)),
+                          const Spacer(),
+                          Text('${value.toStringAsFixed(2)} m/s',
+                              style: const TextStyle(fontSize: 13,
+                                  fontWeight: FontWeight.w700, color: AppColors.brand)),
+                        ]),
+                        SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            activeTrackColor: AppColors.brand,
+                            inactiveTrackColor: colors.surfaceLight,
+                            thumbColor: AppColors.brand,
+                            trackHeight: 4,
+                          ),
+                          child: Slider(
+                            value: value.clamp(0.05, 0.50),
+                            min: 0.05,
+                            max: 0.50,
+                            divisions: 45,
+                            onChanged: (v) => setState(() => _nav2MaxSpeed = v),
+                            onChangeEnd: (v) async {
+                              final messenger = ScaffoldMessenger.of(context);
+                              final ok = await conn.setNav2MaxSpeed(v);
+                              if (!ok && mounted) {
+                                messenger.showSnackBar(
+                                  const SnackBar(content: Text('Failed to update Nav2 speed')),
+                                );
+                              }
+                            },
+                          ),
+                        ),
+                        Text(
+                          'Applies to RPP FollowPath.desired_linear_vel and velocity_smoother in lockstep. '
+                          'Persists across relaunches.',
+                          style: TextStyle(fontSize: 11, color: colors.textTertiary),
+                        ),
+                      ],
+                    );
+                  }),
                 ],
               ),
             ),

@@ -14,6 +14,11 @@ enum ConnectionStatus { disconnected, connecting, connected, error }
 /// Top-level control mode mirrored from the bridge state machine.
 enum ControlMode { auto, manual, estop }
 
+/// Safety chain mode for MANUAL drive.
+/// soft = goes through velocity_smoother + collision_monitor (default).
+/// off  = bypasses safety chain — joystick reaches the wheels directly.
+enum SafetyMode { soft, off }
+
 ControlMode _modeFromString(String? s) {
   switch ((s ?? '').toUpperCase()) {
     case 'AUTO':
@@ -35,6 +40,75 @@ String _modeToString(ControlMode m) {
     case ControlMode.manual:
       return 'MANUAL';
   }
+}
+
+SafetyMode _safetyFromString(String? s) {
+  return (s ?? '').toLowerCase() == 'off' ? SafetyMode.off : SafetyMode.soft;
+}
+
+String _safetyToString(SafetyMode m) =>
+    m == SafetyMode.off ? 'off' : 'soft';
+
+/// A user-defined point on the SLAM map (parking spot, summon point, etc.).
+/// `mapFingerprint` lets the app warn the user if the underlying map has
+/// been replaced by a SLAM restart since the waypoint was saved.
+class NamedWaypoint {
+  final String name;
+  final String kind; // park | summon | home | custom
+  final double x;
+  final double y;
+  final double yaw;
+  final String mapFingerprint;
+  final bool stale;
+
+  const NamedWaypoint({
+    required this.name,
+    required this.kind,
+    required this.x,
+    required this.y,
+    required this.yaw,
+    this.mapFingerprint = '',
+    this.stale = false,
+  });
+
+  factory NamedWaypoint.fromJson(Map<String, dynamic> j) {
+    final pose = (j['pose'] as Map?) ?? {};
+    return NamedWaypoint(
+      name: (j['name'] ?? '').toString(),
+      kind: (j['kind'] ?? 'custom').toString(),
+      x: (pose['x'] ?? 0).toDouble(),
+      y: (pose['y'] ?? 0).toDouble(),
+      yaw: (pose['yaw'] ?? 0).toDouble(),
+      mapFingerprint: (j['map_fingerprint'] ?? '').toString(),
+      stale: j['stale'] == true,
+    );
+  }
+}
+
+/// One row of the topic-health panel.
+class HealthRow {
+  final String topic;
+  final String label;
+  final double expectedHz;
+  final double rateHz;
+  final double? lastAgeS;
+  final bool ok;
+  const HealthRow({
+    required this.topic,
+    required this.label,
+    required this.expectedHz,
+    required this.rateHz,
+    required this.lastAgeS,
+    required this.ok,
+  });
+  factory HealthRow.fromJson(Map<String, dynamic> j) => HealthRow(
+        topic: (j['topic'] ?? '').toString(),
+        label: (j['label'] ?? '').toString(),
+        expectedHz: (j['expected_hz'] ?? 0).toDouble(),
+        rateHz: (j['rate_hz'] ?? 0).toDouble(),
+        lastAgeS: j['last_age_s'] == null ? null : (j['last_age_s'] as num).toDouble(),
+        ok: j['ok'] == true,
+      );
 }
 
 /// Manages HTTP connection to the RPi5 ROS2 Flask bridge.
@@ -74,8 +148,10 @@ class ConnectionService extends ChangeNotifier {
 
   // Control mode + Nav2 action status (mirrored from the bridge)
   ControlMode _mode = ControlMode.manual;
+  SafetyMode _safetyMode = SafetyMode.soft;
   String _navStatus = 'IDLE';
   double _navStatusStamp = 0;
+  String _mapFingerprint = '';
 
   // Path trail (history of robot positions for map overlay)
   final List<List<double>> _pathTrail = [];
@@ -104,8 +180,10 @@ class ConnectionService extends ChangeNotifier {
   List<List<double>> get plannedPath => _plannedPath;
   NavGoal get currentGoal => _currentGoal;
   ControlMode get mode => _mode;
+  SafetyMode get safetyMode => _safetyMode;
   String get navStatus => _navStatus;
   double get navStatusStamp => _navStatusStamp;
+  String get mapFingerprint => _mapFingerprint;
   bool get emergencyStopped => _emergencyStopped;
   double get speedLimit => _speedLimit;
   int get latencyMs => _latencyMs;
@@ -351,9 +429,15 @@ class ConnectionService extends ChangeNotifier {
       if (json['mode'] is String) {
         _mode = _modeFromString(json['mode'] as String);
       }
+      if (json['safety_mode'] is String) {
+        _safetyMode = _safetyFromString(json['safety_mode'] as String);
+      }
       if (json['nav_status'] is String) {
         _navStatus = json['nav_status'] as String;
         _navStatusStamp = (json['nav_status_stamp'] ?? 0).toDouble();
+      }
+      if (json['map_fingerprint'] is String) {
+        _mapFingerprint = json['map_fingerprint'] as String;
       }
       if (json['goal'] is Map<String, dynamic>) {
         _currentGoal = NavGoal.fromJson(json['goal']);
@@ -640,6 +724,334 @@ class ConnectionService extends ChangeNotifier {
         notifyListeners();
       }
     } catch (_) {}
+  }
+
+  // --- Safety mode (Part A) ---
+
+  Future<bool> setSafetyMode(SafetyMode mode) async {
+    if (_baseUrl == null) return false;
+    _safetyMode = mode;
+    notifyListeners();
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/safety_mode'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'safety_mode': _safetyToString(mode)}),
+      ).timeout(const Duration(seconds: 2));
+      final ok = resp.statusCode == 200;
+      if (ok) {
+        logger.warn('Safety -> ${_safetyToString(mode)}', LogCategory.control);
+      }
+      return ok;
+    } catch (e) {
+      logger.error('safety_mode failed: $e', LogCategory.control);
+      return false;
+    }
+  }
+
+  // --- Direction calibration (Part B) ---
+
+  /// Apply polarity flip(s) to nav2_pico_bridge live + persist to disk.
+  /// Returns map of {param: ok}.
+  Future<Map<String, bool>> calibrateDirection(
+      {int? vxPolarity, int? servoPolarity}) async {
+    if (_baseUrl == null) return {};
+    final body = <String, dynamic>{};
+    if (vxPolarity != null) body['vx_polarity'] = vxPolarity;
+    if (servoPolarity != null) body['servo_polarity'] = servoPolarity;
+    if (body.isEmpty) return {};
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/calibrate_direction'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 3));
+      if (resp.statusCode != 200) {
+        logger.error('calibrate_direction HTTP ${resp.statusCode}', LogCategory.control);
+        return {};
+      }
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      final results = (json['results'] as Map?) ?? {};
+      final out = <String, bool>{};
+      results.forEach((k, v) {
+        out[k.toString()] = (v as Map?)?['ok'] == true;
+      });
+      logger.success('Calibration applied: $out', LogCategory.control);
+      return out;
+    } catch (e) {
+      logger.error('calibrate_direction: $e', LogCategory.control);
+      return {};
+    }
+  }
+
+  /// Read current vx/servo polarities from the bridge.
+  Future<Map<String, int>> getCalibration() async {
+    if (_baseUrl == null) return {};
+    try {
+      final resp = await http.get(Uri.parse('$_baseUrl/api/calibrate_direction'))
+          .timeout(const Duration(seconds: 2));
+      if (resp.statusCode != 200) return {};
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      final out = <String, int>{};
+      json.forEach((k, v) {
+        if (v is num) out[k] = v.toInt();
+      });
+      return out;
+    } catch (_) { return {}; }
+  }
+
+  /// Brief "drive forward" pulse used by the calibration wizard.
+  /// Forces MANUAL mode + safety=soft, sends a tiny vx for `durationMs`,
+  /// then E-stops. Returns false if not connected.
+  Future<bool> calibrationPulse({
+    required double vx,
+    required double wz,
+    int durationMs = 800,
+  }) async {
+    if (_baseUrl == null) return false;
+    if (_mode != ControlMode.manual) {
+      await setMode(ControlMode.manual);
+    }
+    if (_safetyMode != SafetyMode.soft) {
+      await setSafetyMode(SafetyMode.soft);
+    }
+    final stop = DateTime.now().add(Duration(milliseconds: durationMs));
+    while (DateTime.now().isBefore(stop)) {
+      try {
+        await http.post(
+          Uri.parse('$_baseUrl/api/control'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            // Joystick 'y' maps to vx (linear), 'x' to wz (angular). Normalize
+            // to [-1,1] against bridge clamps (max_vx=0.35, max_wz=0.8).
+            'y': (vx / 0.35).clamp(-1.0, 1.0),
+            'x': (wz / 0.8).clamp(-1.0, 1.0),
+            'e': 0,
+            'speed_limit': 1.0,
+          }),
+        ).timeout(const Duration(milliseconds: 200));
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 100));
+    }
+    // Hard stop.
+    try {
+      await http.post(
+        Uri.parse('$_baseUrl/api/control'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'x': 0, 'y': 0, 'e': 1, 'speed_limit': 0}),
+      ).timeout(const Duration(milliseconds: 300));
+    } catch (_) {}
+    return true;
+  }
+
+  // --- Map / Nav2 reset (Part C) ---
+
+  Future<bool> clearCostmaps() async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(Uri.parse('$_baseUrl/api/clear_costmaps'))
+          .timeout(const Duration(seconds: 3));
+      final ok = resp.statusCode == 200;
+      if (ok) logger.info('Costmaps cleared', LogCategory.navigation);
+      return ok;
+    } catch (e) {
+      logger.error('clear_costmaps: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
+  Future<bool> restartMapping() async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(Uri.parse('$_baseUrl/api/restart_mapping'))
+          .timeout(const Duration(seconds: 8));
+      final ok = resp.statusCode == 200;
+      if (ok) {
+        // Map is gone — drop our local copy so the next /api/map_version probe
+        // forces a fresh fetch.
+        _mapImage = null;
+        _mapVersion = -1;
+        _pathTrail.clear();
+        notifyListeners();
+        logger.warn('SLAM restarted — map cleared', LogCategory.navigation);
+      }
+      return ok;
+    } catch (e) {
+      logger.error('restart_mapping: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
+  // --- Nav2 max linear speed (Part E) ---
+
+  Future<bool> setNav2MaxSpeed(double mps) async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/nav2_speed'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'max_vel_x': mps}),
+      ).timeout(const Duration(seconds: 3));
+      final ok = resp.statusCode == 200;
+      if (ok) logger.info('Nav2 desired_linear_vel -> ${mps.toStringAsFixed(2)} m/s', LogCategory.navigation);
+      return ok;
+    } catch (e) {
+      logger.error('nav2_speed: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
+  Future<double?> getNav2MaxSpeed() async {
+    if (_baseUrl == null) return null;
+    try {
+      final resp = await http.get(Uri.parse('$_baseUrl/api/nav2_speed'))
+          .timeout(const Duration(seconds: 2));
+      if (resp.statusCode != 200) return null;
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      final v = json['controller_desired_linear_vel'] ?? json['controller_max_vel_x'];
+      return v is num ? v.toDouble() : null;
+    } catch (_) { return null; }
+  }
+
+  // --- NamedWaypoints (Part D) ---
+
+  Future<List<NamedWaypoint>> listNamedWaypoints() async {
+    if (_baseUrl == null) return [];
+    try {
+      final resp = await http.get(Uri.parse('$_baseUrl/api/waypoints'))
+          .timeout(const Duration(seconds: 2));
+      if (resp.statusCode != 200) return [];
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      final list = (json['waypoints'] as List?) ?? [];
+      return list.map<NamedWaypoint>((e) => NamedWaypoint.fromJson(e as Map<String, dynamic>)).toList();
+    } catch (_) { return []; }
+  }
+
+  Future<NamedWaypoint?> saveNamedWaypoint({
+    required String name,
+    required String kind,
+    required double x,
+    required double y,
+    required double yaw,
+  }) async {
+    if (_baseUrl == null) return null;
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/waypoints'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'name': name, 'kind': kind,
+          'pose': {'x': x, 'y': y, 'yaw': yaw},
+        }),
+      ).timeout(const Duration(seconds: 3));
+      if (resp.statusCode != 200) {
+        logger.error('save waypoint: HTTP ${resp.statusCode}', LogCategory.navigation);
+        return null;
+      }
+      final wp = NamedWaypoint.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
+      logger.success('NamedWaypoint saved: $name', LogCategory.navigation);
+      return wp;
+    } catch (e) {
+      logger.error('save waypoint: $e', LogCategory.navigation);
+      return null;
+    }
+  }
+
+  Future<bool> deleteNamedWaypoint(String name) async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.delete(
+              Uri.parse('$_baseUrl/api/waypoints/${Uri.encodeComponent(name)}'))
+          .timeout(const Duration(seconds: 2));
+      return resp.statusCode == 200;
+    } catch (_) { return false; }
+  }
+
+  Future<bool> navigateToNamedWaypoint(String name) async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(
+              Uri.parse('$_baseUrl/api/waypoints/${Uri.encodeComponent(name)}/navigate'))
+          .timeout(const Duration(seconds: 3));
+      final ok = resp.statusCode == 200;
+      if (ok) logger.success('Navigating to "$name"', LogCategory.navigation);
+      return ok;
+    } catch (e) {
+      logger.error('navigate to waypoint: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
+  // --- Pose reset (Part G1) ---
+
+  Future<bool> relocalize(double x, double y, double yaw) async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/relocalize'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'x': x, 'y': y, 'yaw': yaw}),
+      ).timeout(const Duration(seconds: 2));
+      final ok = resp.statusCode == 200;
+      if (ok) {
+        // Optimistically clear trail — old positions are now misleading
+        // relative to the corrected pose.
+        _pathTrail.clear();
+        notifyListeners();
+        logger.warn('Pose reset to (${x.toStringAsFixed(2)}, ${y.toStringAsFixed(2)})', LogCategory.navigation);
+      }
+      return ok;
+    } catch (e) {
+      logger.error('relocalize: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
+  // --- Param tuner (Part G2) ---
+
+  Future<Map<String, dynamic>> listParams(String node) async {
+    if (_baseUrl == null) return {};
+    try {
+      final resp = await http.get(
+              Uri.parse('$_baseUrl/api/params?node=${Uri.encodeQueryComponent(node)}'))
+          .timeout(const Duration(seconds: 3));
+      if (resp.statusCode != 200) return {};
+      return jsonDecode(resp.body) as Map<String, dynamic>;
+    } catch (_) { return {}; }
+  }
+
+  Future<Map<String, bool>> setParams(
+      String node, Map<String, dynamic> items) async {
+    if (_baseUrl == null) return {};
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/params'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'node': node, 'params': items}),
+      ).timeout(const Duration(seconds: 3));
+      if (resp.statusCode != 200) return {};
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      final results = (json['results'] as Map?) ?? {};
+      final out = <String, bool>{};
+      results.forEach((k, v) {
+        out[k.toString()] = (v as Map?)?['ok'] == true;
+      });
+      return out;
+    } catch (_) { return {}; }
+  }
+
+  // --- Health (Part G3) ---
+
+  Future<List<HealthRow>> getHealth() async {
+    if (_baseUrl == null) return [];
+    try {
+      final resp = await http.get(Uri.parse('$_baseUrl/api/health'))
+          .timeout(const Duration(seconds: 2));
+      if (resp.statusCode != 200) return [];
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      final list = (json['topics'] as List?) ?? [];
+      return list.map<HealthRow>((e) => HealthRow.fromJson(e as Map<String, dynamic>)).toList();
+    } catch (_) { return []; }
   }
 
   @override

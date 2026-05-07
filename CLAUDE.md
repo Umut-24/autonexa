@@ -6,6 +6,24 @@ Pico firmware is C (Pico SDK + micro-ROS) under `pico_firmware/`. It builds two 
 
 Workspace root: `/home/autonexa/autonexa` (older docs may reference `~/intelligent_parking_ws` — same workspace).
 
+## Recent additions (2026-05-07) — App-driven operator console
+
+The Flutter app is now a full operator console (the user typically has no monitor / RViz access). Headline additions:
+
+- **Manual safety bypass** — Control tab has a SOFT/OFF chip. OFF publishes joystick to `/cmd_vel_manual` (separate from the Nav2-safety-chain `/cmd_vel_safe`); `nav2_pico_bridge` subscribes to both and the freshest message in the last 200 ms wins. Bridge clamps + watchdog still apply.
+- **Direction calibration wizard** — Settings → Calibrate Direction. Two pulses (forward + left) flip `vx_polarity` / `servo_polarity` if the robot moved the wrong way. Values persist in `~/.autonexa/runtime_overrides.yaml` and are re-applied on bridge startup.
+- **Servo slew-rate limiter** — `nav2_pico_bridge` now rate-limits steering in radian-space (default `max_steer_rate_radps: 3.0`) so Nav2 wz step changes don't make the servo "thunk".
+- **Map / Nav2 reset from app** — Map tab ⋮ menu: "Clear obstacles" (calls `clear_entirely_global_costmap` + `clear_entirely_local_costmap`) and "Restart mapping" (slam_toolbox lifecycle deactivate→cleanup→configure→activate; bumps map version so the app refetches blank PNG).
+- **Pose reset / relocalize** — long-press on the Map tab publishes a `PoseWithCovarianceStamped` on `/initialpose` so AMCL or SLAM Toolbox snaps to the user's claimed pose.
+- **Manual waypoints** — Parking tab now has a "Manual Spots" sub-tab. Save current pose as `park` / `summon` / `home`. Stored in `~/.autonexa/waypoints.json` with a per-map fingerprint (`width,height,resolution,origin,crc32`). After a SLAM restart the fingerprint changes and stale waypoints are flagged.
+- **Live Nav2 max-speed slider** — Settings → Nav2 Max Speed. POSTs to `/api/nav2_speed`, which calls `SetParameters` against `/controller_server` (`FollowPath.max_vel_x`) and `/velocity_smoother` (`max_velocity[0]`) in lockstep + persists.
+- **Topic health panel** — Diagnostics tab shows expected-Hz vs observed EWMA rate per topic (`/scan`, `/map`, `/odom`, `/cmd_vel_safe`, `/pico/joint_feedback`, `/plan`) with green/yellow/red dots.
+- **Generic param tuner** — Diagnostics tab → "Open param tuner". Whitelisted nodes only (`/nav2_pico_bridge`, `/controller_server`, `/planner_server`, `/velocity_smoother`, `/global_costmap/global_costmap`, `/local_costmap/local_costmap`). Numeric edits persist to `runtime_overrides.yaml` under the node's section.
+
+Persistent operator data lives in `~/.autonexa/` outside the ROS workspace:
+- `runtime_overrides.yaml` — per-node parameter overrides replayed on bridge startup (loaded via `add_on_set_parameters_callback` so the validation path runs).
+- `waypoints.json` — manual park/summon/home spots with map fingerprint binding.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -246,19 +264,65 @@ DWB still uses a differential-drive motion model (known limitation). Ackermann-a
 
 **Single-publisher guard** runs at two levels: (1) `fcntl` lock (`/tmp/cmd_vel_to_pico_bridge.lock`) blocks a 2nd process on the same host; (2) every 1 s (after 3 s startup) the bridge counts publishers on `/pico/control_cmd` and if > 1, publishes zero-vel safe stop and shuts down.
 
+## Nav2 ASCII Bridge (cmd_vel → serial CLI)
+
+`nav2_pico_bridge.py` is the **active actuation path** for the L298N CLI Pico build (`autonexa_pico.uf2`). Subscribes to `/cmd_vel_safe` *and* `/cmd_vel_manual` (freshest message in the last 200 ms wins), applies vx/wz clamps + accel cap + steer slew-rate limit, computes Ackermann inverse kinematics, and writes `SPEED <n>` + `SERVO_PWM <us>` lines over USB CDC at 30 Hz. Mutually exclusive with the legacy micro-ROS path via `use_serial_bridge:=true`.
+
+| Parameter | Default | Description |
+|-----------|--------:|-------------|
+| `cmd_vel_topic` | `/cmd_vel_safe` | Nav2 / safety-chain input |
+| `manual_cmd_vel_topic` | `/cmd_vel_manual` | App safety-bypass input (set empty to disable) |
+| `publish_rate_hz` | 30.0 | Tick rate; SPEED feeds firmware watchdog |
+| `command_timeout_s` | 0.20 | Stale-input cutoff |
+| `max_vx_mps` | 0.30 | Linear cap |
+| `max_wz_radps` | 0.8 | Yaw cap |
+| `max_ax_mps2` / `max_aw_radps2` | 0.8 / 1.2 | Per-cycle accel caps |
+| `max_steer_rate_radps` | 3.0 | Servo slew limit (rad/s in steering-angle space) |
+| `min_vx_creep` | 0.05 | Sub-deadband vx → SPEED 0 (L298N can't trim slow) |
+| `vx_polarity` | +1 | Forward/back inversion (calibration wizard flips this) |
+| `servo_polarity` | -1 | Steering inversion (chassis-specific) |
+| `servo_center_us` / `servo_us_min` / `servo_us_max` | 1650 / 1100 / 1900 | Calibrated servo bounds |
+
+Runtime overrides are loaded from `~/.autonexa/runtime_overrides.yaml` (under key `nav2_pico_bridge`) at startup and re-applied via `set_parameters` so the validation callback runs. The mobile bridge writes that file when the user toggles polarity / changes a tunable from the app.
+
 ## Safety Layer Stack (outermost → innermost)
 
-| # | Layer | Action on trigger |
-|---|-------|-------------------|
-| 1 | Velocity smoother | Accel-limit ramp |
-| 2 | Collision monitor | Reduce/zero velocity on predicted collision (1.2 s forward sim) |
-| 3 | Bridge clamping | Hard clip vx/wz to bridge max |
-| 4 | Bridge accel cap | Smooth any remaining step changes |
-| 5A | Bridge command watchdog (RPi5) | 200 ms → ramp to zero + `enable:=false` |
-| 5B | Pico command watchdog (`safety.c`) | 200 ms → motors off |
-| 6 | Pico E-STOP (latching) | Explicit clear only; 5 Hz LED |
+The user-facing **safety mode** ('soft' default | 'off') chooses *which* of two parallel chains a manual joystick takes; AUTO mode always uses the soft chain. Layers 3+ apply on both.
 
-Layers 5A and 5B share the 200 ms threshold but are independent — if USB CDC drops, 5A is blind but 5B still fires.
+| # | Layer | Soft (default) | Off (manual bypass) |
+|---|-------|---------------|---------------------|
+| 1 | Velocity smoother | Accel-limit ramp | bypassed |
+| 2 | Collision monitor | Slow / zero on predicted collision (1.2 s) | bypassed |
+| 3 | Bridge clamping | Hard clip vx/wz | Hard clip vx/wz |
+| 4 | Bridge accel cap | Per-cycle accel limit | Per-cycle accel limit |
+| 4.5 | Servo slew limit | rad/s cap on steering | rad/s cap on steering |
+| 5A | Bridge command watchdog (RPi5) | 200 ms → zero | 200 ms → zero |
+| 5B | Pico command watchdog (`safety.c`) | 200 ms → motors off | 200 ms → motors off |
+| 6 | Pico E-STOP (latching) | Explicit clear only; 5 Hz LED | Explicit clear only; 5 Hz LED |
+
+Layers 5A and 5B share the 200 ms threshold but are independent — if USB CDC drops, 5A is blind but 5B still fires. "Off" exists for the case where collision_monitor refuses to let the user nudge a stuck robot off a wall — bridge clamps + watchdogs + E-STOP still bound the danger.
+
+## Mobile Bridge (`ros2_mobile_bridge.py`) HTTP / WebSocket Surface
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/api/status`, `/api/scan`, `/api/map`, `/api/map_info`, `/api/map_version`, `/api/plan`, `/api/goal`, `/api/pose`, `/api/markers`, `/api/telemetry`, `/api/nav_status` | GET | State |
+| `/api/control`, `/api/nav_goal`, `/api/cancel_nav`, `/api/estop`, `/api/estop_clear` | POST | Drive / nav |
+| `/api/mode` | GET/POST | AUTO / MANUAL / ESTOP |
+| `/api/safety_mode` | GET/POST | soft (default) / off — picks `/cmd_vel` vs `/cmd_vel_manual` for joystick output |
+| `/api/calibrate_direction` | GET/POST | `vx_polarity` / `servo_polarity` ±1 → SetParameters + persist |
+| `/api/clear_costmaps` | POST | `nav2_msgs/ClearEntireCostmap` on global + local |
+| `/api/restart_mapping` | POST | slam_toolbox lifecycle deactivate→cleanup→configure→activate |
+| `/api/relocalize` | POST | Publish `PoseWithCovarianceStamped` on `/initialpose` |
+| `/api/waypoints` | GET/POST | List / upsert manual park/summon/home spots (with map fingerprint) |
+| `/api/waypoints/<name>` | DELETE | Remove |
+| `/api/waypoints/<name>/navigate` | POST | Republish stored pose on `/goal_pose` |
+| `/api/nav2_speed` | GET/POST | `controller_server.FollowPath.max_vel_x` + `velocity_smoother.max_velocity[0]` in lockstep |
+| `/api/params` | GET/POST | Generic SetParameters / ListParameters / GetParameters; whitelist enforced |
+| `/api/health` | GET | Per-topic EWMA rate + age + ok flag |
+| `/ws/control` | WS | 50 Hz joystick frames |
+| `/ws/telemetry` | WS | 10 Hz snapshot push (pose + telemetry + mode + safety_mode + nav_status + goal + map_fingerprint) |
+| `/video_feed` | GET | Camera MJPEG |
 
 ## Integration Test Ordering
 
@@ -279,7 +343,7 @@ If Stage 3 fails, Stage 7 cannot work. Stage 3 commands must be published at `--
 
 - **Pico odom not fused into TF** — published at 20 Hz but only scan matcher owns `odom→base_link`. Fusion waits on IMU.
 - **No IMU connected** — EKF skeleton staged with `publish_tf: false`.
-- **Control-source arbitration unfinished** — Nav2 vs. mobile joystick currently relies on the single-publisher guard; formal AUTO/MANUAL/ESTOP state machine is planned.
+- **Control-source arbitration** — AUTO/MANUAL/ESTOP state machine plus a SOFT/OFF safety mode now live in `ros2_mobile_bridge.py`. Joystick is mode-gated (only published in MANUAL); safety_mode picks `/cmd_vel` (full chain) vs `/cmd_vel_manual` (bypass). Single-publisher guard remains as a backstop.
 - **LiDAR stale-process lock** — killing `sllidar_node` uncleanly can hold `/dev/ttyUSB0`; next launch hits `SL_RESULT_OPERATION_TIMEOUT`. Fix: `sudo fuser -k /dev/ttyUSB0`. Prefer `/dev/serial/by-id/` paths.
 - **`pico_firmware/micro_ros_sdk`** — submodule has local changes outside main commit chain.
 - **Dead `use_micropython_bridge` launch arg** — `nav2_live_slam.launch.py` and `rpi5_pico_bridge.launch.py` still declare it; the `:=true` branch points at a removed script and will fail. Default `false` is fine.

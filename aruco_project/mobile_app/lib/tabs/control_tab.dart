@@ -205,6 +205,9 @@ class _ControlTabState extends State<ControlTab> {
                   const SizedBox(height: 6),
                   // Joystick area
                   Expanded(flex: 5, child: _buildJoystickArea(conn, colors)),
+                  const SizedBox(height: 8),
+                  // Safety mode toggle (collision_monitor on/off)
+                  _buildSafetyToggle(conn, colors),
                   const SizedBox(height: 10),
                   // Speed limiter
                   _buildSpeedLimiter(conn, colors),
@@ -348,6 +351,91 @@ class _ControlTabState extends State<ControlTab> {
         ],
       ),
     );
+  }
+
+  Widget _buildSafetyToggle(ConnectionService conn, ResolvedColors colors) {
+    final off = conn.safetyMode == SafetyMode.off;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: off ? AppColors.warning.withValues(alpha: 0.6) : colors.border),
+      ),
+      child: Row(children: [
+        Icon(off ? Icons.shield_outlined : Icons.shield_rounded,
+            size: 18, color: off ? AppColors.warning : AppColors.success),
+        const SizedBox(width: 8),
+        Text('SAFETY',
+            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
+                letterSpacing: 1.2, color: colors.textSecondary)),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            off
+                ? 'OFF — bypasses collision_monitor. You can drive into walls.'
+                : 'SOFT — collision_monitor + smoother active.',
+            style: TextStyle(fontSize: 11, color: colors.textSecondary),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        _safetySegment(off, colors, conn),
+      ]),
+    );
+  }
+
+  Widget _safetySegment(bool off, ResolvedColors colors, ConnectionService conn) {
+    Widget chip(String label, bool active, VoidCallback onTap, Color activeColor) {
+      return GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: active ? activeColor.withValues(alpha: 0.18) : Colors.transparent,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(label,
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                  color: active ? activeColor : colors.textTertiary, letterSpacing: 0.8)),
+        ),
+      );
+    }
+    return Container(
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: colors.surfaceLight,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colors.border),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        chip('SOFT', !off, () => conn.setSafetyMode(SafetyMode.soft), AppColors.success),
+        chip('OFF', off, () => _confirmSafetyOff(conn), AppColors.warning),
+      ]),
+    );
+  }
+
+  Future<void> _confirmSafetyOff(ConnectionService conn) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Disable safety chain?'),
+        content: const Text(
+            'Joystick will bypass collision_monitor + velocity_smoother. '
+            'You can drive into obstacles. Bridge clamps + watchdog still apply. '
+            'Proceed?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.warning),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Disable safety'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      conn.setSafetyMode(SafetyMode.off);
+    }
   }
 
   Widget _buildSpeedLimiter(ConnectionService conn, ResolvedColors colors) {

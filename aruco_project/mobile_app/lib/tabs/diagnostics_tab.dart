@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -7,6 +8,7 @@ import '../theme/theme_provider.dart';
 import '../services/connection_service.dart';
 import '../services/event_logger.dart';
 import '../widgets/glass_card.dart';
+import '../widgets/param_tuner_dialog.dart';
 
 /// Event log, network stats, and system diagnostics.
 /// Accessed via the "More" bottom sheet.
@@ -19,6 +21,29 @@ class DiagnosticsTab extends StatefulWidget {
 
 class _DiagnosticsTabState extends State<DiagnosticsTab> {
   LogCategory? _filterCategory;
+  Timer? _healthTimer;
+  List<HealthRow> _health = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _healthTimer = Timer.periodic(const Duration(seconds: 2), (_) => _refreshHealth());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshHealth());
+  }
+
+  @override
+  void dispose() {
+    _healthTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _refreshHealth() async {
+    final conn = context.read<ConnectionService>();
+    if (!conn.isConnected) return;
+    final h = await conn.getHealth();
+    if (!mounted) return;
+    setState(() => _health = h);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -86,6 +111,57 @@ class _DiagnosticsTabState extends State<DiagnosticsTab> {
                   ],
                 ],
               ),
+            ),
+
+            // Topic health
+            GlassCard(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Text('TOPIC HEALTH', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                      letterSpacing: 1.2, color: colors.textTertiary)),
+                  const Spacer(),
+                  IconButton(
+                    iconSize: 16, padding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    onPressed: _refreshHealth,
+                    icon: Icon(Icons.refresh_rounded, color: colors.textSecondary),
+                  ),
+                ]),
+                if (_health.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Text(
+                      conn.isConnected ? 'No data yet' : 'Connect to see topic rates',
+                      style: TextStyle(fontSize: 11, color: colors.textTertiary),
+                    ),
+                  )
+                else
+                  ..._health.map((row) => _healthRow(row, colors)),
+              ]),
+            ),
+
+            // Live param tuner
+            GlassCard(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('LIVE PARAMETERS', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                    letterSpacing: 1.2, color: colors.textTertiary)),
+                const SizedBox(height: 8),
+                Text(
+                  'Tune Nav2 / bridge parameters at runtime. Numeric edits persist on disk.',
+                  style: TextStyle(fontSize: 12, color: colors.textSecondary),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.tune_rounded, size: 18),
+                    label: const Text('Open param tuner'),
+                    onPressed: conn.isConnected
+                        ? () => ParamTunerDialog.show(context)
+                        : null,
+                  ),
+                ),
+              ]),
             ),
 
             // Filter chips
@@ -224,5 +300,42 @@ class _DiagnosticsTabState extends State<DiagnosticsTab> {
     if (d.inHours > 0) return '${d.inHours}h ${d.inMinutes % 60}m';
     if (d.inMinutes > 0) return '${d.inMinutes}m ${d.inSeconds % 60}s';
     return '${d.inSeconds}s';
+  }
+
+  Widget _healthRow(HealthRow row, ResolvedColors colors) {
+    final color = row.ok
+        ? AppColors.success
+        : (row.lastAgeS == null || row.lastAgeS! > 5.0
+            ? AppColors.danger
+            : AppColors.warning);
+    final age = row.lastAgeS == null ? '—' : '${row.lastAgeS!.toStringAsFixed(1)}s';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(children: [
+        Container(width: 8, height: 8,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
+        const SizedBox(width: 8),
+        Expanded(
+          flex: 3,
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(row.label, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            Text(row.topic, style: TextStyle(fontSize: 10, fontFamily: 'monospace', color: colors.textTertiary)),
+          ]),
+        ),
+        Expanded(
+          flex: 2,
+          child: Text('${row.rateHz.toStringAsFixed(1)} Hz',
+              textAlign: TextAlign.right,
+              style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: colors.textSecondary)),
+        ),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: 50,
+          child: Text(age,
+              textAlign: TextAlign.right,
+              style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: colors.textTertiary)),
+        ),
+      ]),
+    );
   }
 }

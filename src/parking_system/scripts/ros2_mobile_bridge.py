@@ -10,7 +10,7 @@ REST Endpoints:
   /api/map         - Real SLAM occupancy grid (PNG)
   /api/map_info    - Map metadata: resolution, origin, dimensions (JSON)
   /api/map_version - Bumps on each /map update; clients ETag the PNG
-  /api/plan        - Latest Nav2 NavfnPlanner output (JSON polyline)
+  /api/plan        - Latest Nav2 planner output (JSON polyline)
   /api/goal        - Active goal pose (JSON x/y/yaw/active/stamp)
   /api/pose        - Robot pose from AMCL/EKF/odom (JSON)
   /api/status      - Combined status (JSON)
@@ -35,15 +35,20 @@ Runtime Python deps (pip): flask, flask-sock, numpy, opencv-python.
 """
 
 import json
+import os
+import subprocess
 import threading
 import time
 import io
+import zlib
+from collections import deque
 from math import cos, sin, isinf, isnan
 
 import numpy as np
 import cv2
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
@@ -52,8 +57,53 @@ from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool
 from action_msgs.srv import CancelGoal
 from action_msgs.msg import GoalStatusArray
+from rcl_interfaces.srv import SetParameters, GetParameters, ListParameters
+from rcl_interfaces.msg import ParameterType
+from lifecycle_msgs.srv import ChangeState
+from lifecycle_msgs.msg import Transition
+
+try:
+    from nav2_msgs.srv import ClearEntireCostmap
+except ImportError:
+    ClearEntireCostmap = None
 from flask import Flask, Response, jsonify, request, send_file
 from flask_sock import Sock
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+# Persistent app data (waypoints + runtime overrides). Lives outside the ROS
+# workspace so it survives `colcon build --symlink-install` clobbering and is
+# trivial to back up / hand-edit.
+AUTONEXA_DATA_DIR = os.path.expanduser('~/.autonexa')
+RUNTIME_OVERRIDES_PATH = os.path.join(AUTONEXA_DATA_DIR, 'runtime_overrides.yaml')
+WAYPOINTS_PATH = os.path.join(AUTONEXA_DATA_DIR, 'waypoints.json')
+MAPS_DIR = os.path.join(AUTONEXA_DATA_DIR, 'maps')
+
+# Parameter-tuner whitelist — only these nodes can be reached from the app's
+# generic /api/params endpoint. Keeps the surface small and predictable.
+PARAM_TUNER_WHITELIST = (
+    '/nav2_pico_bridge',
+    '/controller_server',
+    '/planner_server',
+    '/velocity_smoother',
+    '/global_costmap/global_costmap',
+    '/local_costmap/local_costmap',
+)
+
+# Topics monitored by /api/health. Each tuple: (topic, expected_min_hz, label).
+# Rates are deliberately conservative — set the floor to "if we drop below
+# this, something is wrong", not the steady-state rate.
+HEALTH_TOPICS = (
+    ('/scan',                  5.0, 'LiDAR scan'),
+    ('/map',                   0.05, 'SLAM map'),
+    ('/odom',                  5.0, 'Wheel/scan odometry'),
+    ('/cmd_vel_safe',          0.5, 'Safety-gated cmd_vel'),
+    ('/pico/joint_feedback',   2.0, 'Pico joint feedback'),
+    ('/plan',                  0.2, 'Nav2 plan'),
+)
 
 # Optional: ArUco detection
 try:
@@ -135,6 +185,32 @@ class MobileBridgeNode(Node):
         self._telemetry_lock = threading.Lock()
         self._pico_telemetry = {}    # Latest telemetry dict
 
+        # --- Safety mode (Part A) ---
+        # 'soft' (default): joystick -> /cmd_vel -> velocity_smoother ->
+        #     collision_monitor -> /cmd_vel_safe -> Pico bridge. Walls block.
+        # 'off': joystick -> /cmd_vel_manual -> Pico bridge directly. The
+        #     user is in control. nav2_pico_bridge still applies its own
+        #     vx/wz clamps + watchdog so a runaway is still bounded.
+        # Only meaningful in MANUAL mode; AUTO always uses /cmd_vel_safe.
+        self._safety_lock = threading.Lock()
+        self._safety_mode = 'soft'
+
+        # --- Map fingerprint (Part D) ---
+        # Lets waypoints know if the SLAM map under them has been replaced
+        # since they were saved (full SLAM restart -> new fingerprint).
+        self._map_fingerprint = ''
+
+        # --- Waypoints (Part D) ---
+        self._waypoints_lock = threading.Lock()
+        self._waypoints = []   # list[dict]; persisted to WAYPOINTS_PATH
+
+        # --- Topic health stats (Part G3) ---
+        # EWMA rate per monitored topic so /api/health can report green /
+        # yellow / red without bringing in `ros2 topic hz` machinery.
+        self._health_lock = threading.Lock()
+        self._health_stats = {topic: {'last_t': 0.0, 'rate': 0.0}
+                              for topic, _, _ in HEALTH_TOPICS}
+
         # --- QoS for map (transient local, reliable) ---
         map_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -157,7 +233,13 @@ class MobileBridgeNode(Node):
         self.create_subscription(
             Odometry, '/odom', self._odom_cb, 10)
 
-        # Nav2 planner output (NavfnPlanner) — visualized as a polyline in the
+        # Health-only subscription on /cmd_vel_safe so the diagnostics panel
+        # can detect a stalled safety chain (smoother / collision_monitor) even
+        # when the robot is idle. Cheap; a Twist is ~50 B.
+        self.create_subscription(
+            Twist, '/cmd_vel_safe', self._cmd_vel_safe_cb, 10)
+
+        # Nav2 planner output — visualized as a polyline in the
         # mobile app. Depth 1; we replace fully on each new plan.
         self.create_subscription(
             Path, '/plan', self._plan_cb, 1)
@@ -189,7 +271,33 @@ class MobileBridgeNode(Node):
 
         # --- Joystick control: publish to /cmd_vel ---
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Safety-bypass channel (Part A). nav2_pico_bridge subscribes to this
+        # *and* /cmd_vel_safe; freshest message in the last 200 ms wins.
+        self._cmd_vel_manual_pub = self.create_publisher(Twist, '/cmd_vel_manual', 10)
+        # Pose reset / relocalize (Part G1). AMCL convention; SLAM Toolbox also
+        # snaps its pose graph to /initialpose when running in mapping mode.
+        self._initialpose_pub = self.create_publisher(
+            PoseWithCovarianceStamped, '/initialpose', 10)
         self._pico_estop_client = self.create_client(SetBool, '/pico/estop')
+
+        # --- Costmap clear + SLAM restart clients (Part C) ---
+        if ClearEntireCostmap is not None:
+            self._global_costmap_clear = self.create_client(
+                ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
+            self._local_costmap_clear = self.create_client(
+                ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap')
+        else:
+            self._global_costmap_clear = None
+            self._local_costmap_clear = None
+            self.get_logger().warning(
+                'nav2_msgs missing — /api/clear_costmaps will be unavailable')
+        self._slam_change_state = self.create_client(
+            ChangeState, '/slam_toolbox/change_state')
+
+        # --- Generic remote SetParameters cache (Parts B / E / G2) ---
+        # Keyed by node name so we don't recreate clients on every call.
+        self._param_clients_lock = threading.Lock()
+        self._param_clients = {}   # node_name -> {set, get, list}
 
         # --- Pico telemetry subscriptions ---
         self.create_subscription(
@@ -206,11 +314,18 @@ class MobileBridgeNode(Node):
         self._camera_running = False
         self._start_camera()
 
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+        except OSError as exc:
+            self.get_logger().warning(f'cannot create {AUTONEXA_DATA_DIR}: {exc}')
+        self._load_waypoints()
+
         self.get_logger().info('MobileBridgeNode started')
 
     # ---- Callbacks ----
 
     def _scan_cb(self, msg: LaserScan):
+        self._mark_health('/scan')
         pose = self._get_pose()
         points = self._scan_to_points(msg, pose['x_m'], pose['y_m'], pose['yaw_rad'])
         with self._scan_lock:
@@ -218,6 +333,7 @@ class MobileBridgeNode(Node):
             self._scan_stamp = time.time()
 
     def _map_cb(self, msg: OccupancyGrid):
+        self._mark_health('/map')
         png_bytes = self._occupancy_grid_to_png(msg)
         info = {
             'width': msg.info.width,
@@ -226,10 +342,25 @@ class MobileBridgeNode(Node):
             'origin_x': msg.info.origin.position.x,
             'origin_y': msg.info.origin.position.y,
         }
+        # Cheap fingerprint over header + first 4 KB of cells. SLAM-Toolbox
+        # restarts always change width/height and reset the cell pattern, so
+        # this catches "same physical area, fresh map" as well as relocations.
+        try:
+            sample = bytes(msg.data[:4096]) if msg.data else b''
+        except (TypeError, ValueError):
+            sample = b''
+        crc = zlib.crc32(sample) & 0xffffffff
+        fingerprint = (
+            f"w={info['width']},h={info['height']},"
+            f"res={info['resolution']:.4f},"
+            f"origin={info['origin_x']:.3f},{info['origin_y']:.3f},"
+            f"h={crc:08x}"
+        )
         with self._map_lock:
             self._map_png = png_bytes
             self._map_info = info
             self._map_version += 1
+            self._map_fingerprint = fingerprint
 
     def _amcl_cb(self, msg: PoseWithCovarianceStamped):
         x = msg.pose.pose.position.x
@@ -243,6 +374,7 @@ class MobileBridgeNode(Node):
             self._pose_source = 'amcl'
 
     def _odom_cb(self, msg: Odometry):
+        self._mark_health('/odom')
         # Only use odom if AMCL hasn't provided a pose recently
         with self._pose_lock:
             if self._pose_source == 'amcl' and (time.time() - self._pose['stamp']) < 2.0:
@@ -258,6 +390,7 @@ class MobileBridgeNode(Node):
             self._pose_source = 'odom'
 
     def _joint_feedback_cb(self, msg: JointState):
+        self._mark_health('/pico/joint_feedback')
         data = {}
         for i, name in enumerate(msg.name):
             if i < len(msg.velocity):
@@ -278,11 +411,16 @@ class MobileBridgeNode(Node):
             self._pico_telemetry['odom_wz'] = round(msg.twist.twist.angular.z, 4)
             self._pico_telemetry['odom_stamp'] = time.time()
 
+    def _cmd_vel_safe_cb(self, _msg: Twist):
+        """Health-only subscription so /api/health can show whether the
+        safety chain is alive even when no goal/joystick is active."""
+        self._mark_health('/cmd_vel_safe')
+
     def _plan_cb(self, msg: Path):
         """Cache the latest Nav2 plan as a downsampled list of [x, y]."""
+        self._mark_health('/plan')
         # Cap at 100 waypoints to keep /api/plan responses ~1.5 KB even for
-        # long plans. NavfnPlanner emits ~5 cm spaced poses so 100 pts ~= 5 m
-        # of path; for longer plans we stride.
+        # long plans; for longer plans we stride.
         max_pts = 100
         n = len(msg.poses)
         if n == 0:
@@ -352,10 +490,15 @@ class MobileBridgeNode(Node):
                 self._cmd_vel_pub.publish(zero)
 
     def publish_control(self, x: float, y: float, e: int, speed_limit: float):
-        """Convert joystick input to Twist and publish on /cmd_vel.
+        """Convert joystick input to Twist and publish.
 
         Mode-gated: in AUTO/ESTOP we never publish joystick velocities so we
         don't fight Nav2 or the safety latch. In MANUAL the joystick wins.
+
+        Safety-routed: in MANUAL mode, safety_mode='soft' (default) goes
+        through the full Nav2 safety chain on /cmd_vel; safety_mode='off'
+        publishes to /cmd_vel_manual which nav2_pico_bridge consumes
+        directly, bypassing collision_monitor + velocity_smoother.
         """
         max_vx = 0.35
         max_wz = 0.8
@@ -384,9 +527,397 @@ class MobileBridgeNode(Node):
             # physical wheel direction (push right -> wheels turn right).
             twist.angular.z = x * max_wz * sl
 
-        self._cmd_vel_pub.publish(twist)
+        with self._safety_lock:
+            safety = self._safety_mode
+        if safety == 'off':
+            self._cmd_vel_manual_pub.publish(twist)
+        else:
+            self._cmd_vel_pub.publish(twist)
         with self._control_lock:
             self._last_control_time = time.time()
+
+    def get_safety_mode(self) -> str:
+        with self._safety_lock:
+            return self._safety_mode
+
+    def set_safety_mode(self, mode: str) -> bool:
+        mode = (mode or '').lower()
+        if mode not in ('soft', 'off'):
+            return False
+        with self._safety_lock:
+            if self._safety_mode == mode:
+                return True
+            self._safety_mode = mode
+        # On a soft -> off (or off -> soft) flip, push a zero on whichever
+        # topic is being abandoned so the Pico bridge sees a clean stop on
+        # that channel and doesn't latch the last value via its 200 ms
+        # freshest-wins logic.
+        zero = Twist()
+        if mode == 'off':
+            self._cmd_vel_pub.publish(zero)
+        else:
+            self._cmd_vel_manual_pub.publish(zero)
+        self.get_logger().warning(f'Safety mode -> {mode}')
+        return True
+
+    # --- Health stats ---
+
+    def _mark_health(self, topic: str) -> None:
+        now = time.time()
+        with self._health_lock:
+            stat = self._health_stats.get(topic)
+            if stat is None:
+                return
+            dt = now - stat['last_t'] if stat['last_t'] > 0 else 0.0
+            if dt > 0:
+                inst = 1.0 / dt
+                # EWMA, alpha=0.2 — smooths bursts without lagging too far.
+                stat['rate'] = 0.8 * stat['rate'] + 0.2 * inst if stat['rate'] > 0 else inst
+            stat['last_t'] = now
+
+    def get_health(self) -> list:
+        now = time.time()
+        out = []
+        with self._health_lock:
+            for topic, expected_hz, label in HEALTH_TOPICS:
+                stat = self._health_stats[topic]
+                age = now - stat['last_t'] if stat['last_t'] > 0 else None
+                rate = round(stat['rate'], 2)
+                # ok if we've seen anything in the last 3x expected period
+                # and the rolling rate is at least 50% of expected.
+                stale_window = max(1.0, 3.0 / expected_hz)
+                ok = (age is not None and age < stale_window
+                      and rate >= 0.5 * expected_hz)
+                out.append({
+                    'topic': topic,
+                    'label': label,
+                    'expected_hz': expected_hz,
+                    'rate_hz': rate,
+                    'last_age_s': round(age, 2) if age is not None else None,
+                    'ok': ok,
+                })
+        return out
+
+    # --- Waypoints ---
+
+    def _load_waypoints(self) -> None:
+        if not os.path.exists(WAYPOINTS_PATH):
+            return
+        try:
+            with open(WAYPOINTS_PATH, 'r', encoding='utf-8') as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as exc:
+            self.get_logger().warning(f'waypoints load failed: {exc}')
+            return
+        wps = doc.get('waypoints')
+        if isinstance(wps, list):
+            with self._waypoints_lock:
+                self._waypoints = wps
+            self.get_logger().info(f'loaded {len(wps)} waypoint(s) from {WAYPOINTS_PATH}')
+
+    def _save_waypoints(self) -> None:
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+        except OSError:
+            pass
+        with self._waypoints_lock:
+            doc = {'schema_version': 1, 'waypoints': list(self._waypoints)}
+        try:
+            tmp = WAYPOINTS_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(doc, fh, indent=2)
+            os.replace(tmp, WAYPOINTS_PATH)
+        except OSError as exc:
+            self.get_logger().error(f'waypoints save failed: {exc}')
+
+    def _current_fingerprint(self) -> str:
+        with self._map_lock:
+            return self._map_fingerprint
+
+    def list_waypoints(self) -> list:
+        fp = self._current_fingerprint()
+        with self._waypoints_lock:
+            wps = list(self._waypoints)
+        out = []
+        for wp in wps:
+            entry = dict(wp)
+            entry['stale'] = bool(fp) and entry.get('map_fingerprint') != fp
+            out.append(entry)
+        return out
+
+    def upsert_waypoint(self, name: str, kind: str, pose: dict) -> dict:
+        name = (name or '').strip()
+        if not name:
+            raise ValueError('name required')
+        if kind not in ('park', 'summon', 'home', 'custom'):
+            kind = 'custom'
+        x = float(pose.get('x', 0.0))
+        y = float(pose.get('y', 0.0))
+        yaw = float(pose.get('yaw', 0.0))
+        entry = {
+            'name': name,
+            'kind': kind,
+            'pose': {'x': x, 'y': y, 'yaw': yaw},
+            'map_fingerprint': self._current_fingerprint(),
+            'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        }
+        with self._waypoints_lock:
+            self._waypoints = [w for w in self._waypoints if w.get('name') != name]
+            self._waypoints.append(entry)
+        self._save_waypoints()
+        return entry
+
+    def delete_waypoint(self, name: str) -> bool:
+        with self._waypoints_lock:
+            before = len(self._waypoints)
+            self._waypoints = [w for w in self._waypoints if w.get('name') != name]
+            removed = len(self._waypoints) < before
+        if removed:
+            self._save_waypoints()
+        return removed
+
+    def navigate_to_waypoint(self, name: str) -> bool:
+        with self._waypoints_lock:
+            wp = next((w for w in self._waypoints if w.get('name') == name), None)
+        if wp is None:
+            return False
+        pose = wp.get('pose') or {}
+        self.send_nav_goal(pose.get('x', 0.0), pose.get('y', 0.0), pose.get('yaw', 0.0))
+        return True
+
+    # --- Remote SetParameters / GetParameters / ListParameters ---
+
+    def _param_client(self, node: str, kind: str):
+        """Lazy-create and cache a service client for the named node.
+        kind in {'set', 'get', 'list'}."""
+        with self._param_clients_lock:
+            entry = self._param_clients.setdefault(node, {})
+            if kind in entry:
+                return entry[kind]
+            if kind == 'set':
+                cli = self.create_client(SetParameters, f'{node}/set_parameters')
+            elif kind == 'get':
+                cli = self.create_client(GetParameters, f'{node}/get_parameters')
+            elif kind == 'list':
+                cli = self.create_client(ListParameters, f'{node}/list_parameters')
+            else:
+                raise ValueError(f'unknown param client kind: {kind}')
+            entry[kind] = cli
+            return cli
+
+    @staticmethod
+    def _to_param_msg(name: str, value):
+        """Convert a Python value to an rcl_interfaces Parameter message via
+        rclpy's Parameter helper (handles type marshaling)."""
+        if isinstance(value, bool):
+            p = Parameter(name, Parameter.Type.BOOL, value)
+        elif isinstance(value, int):
+            p = Parameter(name, Parameter.Type.INTEGER, value)
+        elif isinstance(value, float):
+            p = Parameter(name, Parameter.Type.DOUBLE, value)
+        elif isinstance(value, str):
+            p = Parameter(name, Parameter.Type.STRING, value)
+        elif isinstance(value, list) and value and all(isinstance(v, float) for v in value):
+            p = Parameter(name, Parameter.Type.DOUBLE_ARRAY, [float(v) for v in value])
+        elif isinstance(value, list) and value and all(isinstance(v, int) for v in value):
+            p = Parameter(name, Parameter.Type.INTEGER_ARRAY, [int(v) for v in value])
+        else:
+            raise ValueError(f'unsupported param value type for {name}: {type(value).__name__}')
+        return p.to_parameter_msg()
+
+    def set_remote_params(self, node: str, items: dict, timeout: float = 1.5) -> dict:
+        """Synchronously call SetParameters on `node`. Returns
+        {name: {ok, reason}}; per-param results."""
+        cli = self._param_client(node, 'set')
+        if not cli.wait_for_service(timeout_sec=timeout):
+            return {k: {'ok': False, 'reason': f'{node}/set_parameters unavailable'}
+                    for k in items}
+        try:
+            params = [self._to_param_msg(k, v) for k, v in items.items()]
+        except ValueError as exc:
+            return {k: {'ok': False, 'reason': str(exc)} for k in items}
+        req = SetParameters.Request()
+        req.parameters = params
+        future = cli.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {k: {'ok': False, 'reason': 'timeout'} for k in items}
+        res = future.result()
+        out = {}
+        for name, r in zip(items.keys(), res.results):
+            out[name] = {'ok': bool(r.successful), 'reason': r.reason or ''}
+        return out
+
+    def list_remote_params(self, node: str, timeout: float = 1.5) -> list:
+        cli = self._param_client(node, 'list')
+        if not cli.wait_for_service(timeout_sec=timeout):
+            return []
+        req = ListParameters.Request()
+        future = cli.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return []
+        res = future.result()
+        return list(res.result.names)
+
+    def get_remote_params(self, node: str, names: list, timeout: float = 1.5) -> dict:
+        cli = self._param_client(node, 'get')
+        if not cli.wait_for_service(timeout_sec=timeout):
+            return {}
+        req = GetParameters.Request()
+        req.names = list(names)
+        future = cli.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {}
+        res = future.result()
+        out = {}
+        for name, pv in zip(names, res.values):
+            out[name] = self._param_value_to_python(pv)
+        return out
+
+    @staticmethod
+    def _param_value_to_python(pv):
+        t = pv.type
+        if t == ParameterType.PARAMETER_BOOL:
+            return bool(pv.bool_value)
+        if t == ParameterType.PARAMETER_INTEGER:
+            return int(pv.integer_value)
+        if t == ParameterType.PARAMETER_DOUBLE:
+            return float(pv.double_value)
+        if t == ParameterType.PARAMETER_STRING:
+            return str(pv.string_value)
+        if t == ParameterType.PARAMETER_INTEGER_ARRAY:
+            return list(pv.integer_array_value)
+        if t == ParameterType.PARAMETER_DOUBLE_ARRAY:
+            return list(pv.double_array_value)
+        if t == ParameterType.PARAMETER_BOOL_ARRAY:
+            return list(pv.bool_array_value)
+        if t == ParameterType.PARAMETER_STRING_ARRAY:
+            return list(pv.string_array_value)
+        return None
+
+    # --- Runtime overrides YAML (Parts B / E / G2) ---
+
+    def persist_runtime_overrides(self, node: str, items: dict) -> None:
+        """Merge `items` under `node` in runtime_overrides.yaml. Surviving
+        on-disk entries for that node are preserved if not overwritten."""
+        if yaml is None:
+            self.get_logger().warning(
+                'PyYAML missing — runtime overrides not persisted to disk')
+            return
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+        except OSError as exc:
+            self.get_logger().warning(f'cannot create {AUTONEXA_DATA_DIR}: {exc}')
+            return
+        doc = {}
+        if os.path.exists(RUNTIME_OVERRIDES_PATH):
+            try:
+                with open(RUNTIME_OVERRIDES_PATH, 'r', encoding='utf-8') as fh:
+                    doc = yaml.safe_load(fh) or {}
+            except (OSError, yaml.YAMLError) as exc:
+                self.get_logger().warning(
+                    f'overrides read failed (will overwrite): {exc}')
+                doc = {}
+        node_key = node.lstrip('/')
+        section = doc.get(node_key) or {}
+        section.update(items)
+        doc[node_key] = section
+        try:
+            tmp = RUNTIME_OVERRIDES_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                yaml.safe_dump(doc, fh, default_flow_style=False)
+            os.replace(tmp, RUNTIME_OVERRIDES_PATH)
+        except OSError as exc:
+            self.get_logger().error(f'overrides write failed: {exc}')
+
+    # --- Costmap clear + SLAM restart (Part C) ---
+
+    def _call_clear_costmap(self, client, timeout: float = 1.0) -> dict:
+        if client is None:
+            return {'ok': False, 'reason': 'nav2_msgs not installed'}
+        if not client.wait_for_service(timeout_sec=timeout):
+            return {'ok': False, 'reason': f'{client.srv_name} unavailable'}
+        req = ClearEntireCostmap.Request()
+        future = client.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {'ok': False, 'reason': 'timeout'}
+        return {'ok': True}
+
+    def clear_costmaps(self) -> dict:
+        global_res = self._call_clear_costmap(self._global_costmap_clear)
+        local_res = self._call_clear_costmap(self._local_costmap_clear)
+        return {'global': global_res, 'local': local_res}
+
+    def _slam_change(self, transition_id: int, timeout: float = 2.0) -> dict:
+        if not self._slam_change_state.wait_for_service(timeout_sec=timeout):
+            return {'ok': False, 'reason': '/slam_toolbox/change_state unavailable'}
+        req = ChangeState.Request()
+        req.transition.id = transition_id
+        future = self._slam_change_state.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {'ok': False, 'reason': 'timeout'}
+        res = future.result()
+        return {'ok': bool(res.success)}
+
+    def restart_mapping(self) -> dict:
+        """Cycle SLAM Toolbox through deactivate -> cleanup -> configure ->
+        activate. Drops the current map and starts fresh. Costmaps cleared
+        as well so the planner doesn't carry stale obstacles into the new
+        map frame."""
+        steps = []
+        for tid, label in (
+            (Transition.TRANSITION_DEACTIVATE, 'deactivate'),
+            (Transition.TRANSITION_CLEANUP, 'cleanup'),
+            (Transition.TRANSITION_CONFIGURE, 'configure'),
+            (Transition.TRANSITION_ACTIVATE, 'activate'),
+        ):
+            r = self._slam_change(tid)
+            steps.append({'step': label, **r})
+            if not r.get('ok'):
+                break
+        # Drop costmap obstacles; their map frame is about to change anyway.
+        cm = self.clear_costmaps()
+        # Bump map_version so the app refetches a blank PNG immediately.
+        with self._map_lock:
+            self._map_version += 1
+            self._map_png = None
+        return {'steps': steps, 'costmaps': cm}
+
+    # --- Pose reset / relocalize (Part G1) ---
+
+    def publish_initial_pose(self, x: float, y: float, yaw: float) -> None:
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        from math import cos as mcos, sin as msin
+        msg.pose.pose.orientation.z = msin(float(yaw) / 2.0)
+        msg.pose.pose.orientation.w = mcos(float(yaw) / 2.0)
+        # Loose covariance — don't fight whatever localizer is listening.
+        # x, y: 0.25 m^2; yaw: ~0.07 rad^2 (~15 deg). Order is row-major 6x6.
+        cov = [0.0] * 36
+        cov[0] = 0.25
+        cov[7] = 0.25
+        cov[35] = 0.0685
+        msg.pose.covariance = cov
+        self._initialpose_pub.publish(msg)
+        self.get_logger().info(
+            f'initialpose published: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
 
     # ---- Helpers ----
 
@@ -582,10 +1113,12 @@ class MobileBridgeNode(Node):
             'pose': {**pose, 'source': source},
             'telemetry': self.get_telemetry(),
             'mode': self.get_mode(),
+            'safety_mode': self.get_safety_mode(),
             'nav_status': nav_status,
             'nav_status_stamp': nav_stamp,
             'goal': self.get_goal(),
             'estop_latched': self._estop_latched,
+            'map_fingerprint': self._current_fingerprint(),
             'stamp': time.time(),
         }
 
@@ -780,6 +1313,8 @@ def api_map_info():
     info = bridge_node.get_map_info()
     if info is None:
         return jsonify({'error': 'No map available yet'}), 503
+    info = dict(info)
+    info['fingerprint'] = bridge_node._current_fingerprint()
     return jsonify(info)
 
 
@@ -898,6 +1433,338 @@ def api_mode():
 def api_nav_status():
     label, stamp = bridge_node.get_nav_status()
     return jsonify({'status': label, 'stamp': stamp})
+
+
+# ---------------------------------------------------------------------------
+#  Part A — Manual safety bypass
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/safety_mode', methods=['GET', 'POST'])
+def api_safety_mode():
+    if request.method == 'GET':
+        return jsonify({'safety_mode': bridge_node.get_safety_mode()})
+    data = request.get_json(silent=True) or {}
+    requested = data.get('safety_mode', '')
+    if not bridge_node.set_safety_mode(requested):
+        return jsonify({'error': f'invalid safety_mode: {requested!r}'}), 400
+    return jsonify({'safety_mode': bridge_node.get_safety_mode()})
+
+
+# ---------------------------------------------------------------------------
+#  Part B — Direction calibration (vx_polarity / servo_polarity)
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/calibrate_direction', methods=['GET', 'POST'])
+def api_calibrate_direction():
+    """GET: report current bridge polarity values.
+    POST: {vx_polarity?: ±1, servo_polarity?: ±1} — apply via SetParameters
+    on /nav2_pico_bridge AND persist to runtime_overrides.yaml so the values
+    survive a relaunch."""
+    if request.method == 'GET':
+        vals = bridge_node.get_remote_params(
+            '/nav2_pico_bridge', ['vx_polarity', 'servo_polarity'])
+        return jsonify(vals)
+    data = request.get_json(silent=True) or {}
+    items = {}
+    for key in ('vx_polarity', 'servo_polarity'):
+        if key in data:
+            try:
+                v = int(data[key])
+            except (TypeError, ValueError):
+                return jsonify({'error': f'{key} must be ±1'}), 400
+            if v not in (-1, 1):
+                return jsonify({'error': f'{key} must be ±1'}), 400
+            items[key] = v
+    if not items:
+        return jsonify({'error': 'provide vx_polarity and/or servo_polarity'}), 400
+    results = bridge_node.set_remote_params('/nav2_pico_bridge', items)
+    persisted = {k: v for k, v in items.items() if results.get(k, {}).get('ok')}
+    if persisted:
+        bridge_node.persist_runtime_overrides('nav2_pico_bridge', persisted)
+    return jsonify({'results': results, 'persisted': list(persisted.keys())})
+
+
+# ---------------------------------------------------------------------------
+#  Part C — Map / Nav2 reset
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/clear_costmaps', methods=['POST'])
+def api_clear_costmaps():
+    return jsonify(bridge_node.clear_costmaps())
+
+
+@flask_app.route('/api/restart_mapping', methods=['POST'])
+def api_restart_mapping():
+    return jsonify(bridge_node.restart_mapping())
+
+
+# ---------------------------------------------------------------------------
+#  Part D — Manual waypoints
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/waypoints', methods=['GET', 'POST'])
+def api_waypoints():
+    if request.method == 'GET':
+        return jsonify({'waypoints': bridge_node.list_waypoints(),
+                        'fingerprint': bridge_node._current_fingerprint()})
+    data = request.get_json(silent=True) or {}
+    name = data.get('name', '')
+    kind = data.get('kind', 'custom')
+    pose = data.get('pose') or {}
+    try:
+        entry = bridge_node.upsert_waypoint(name, kind, pose)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(entry)
+
+
+@flask_app.route('/api/waypoints/<name>', methods=['DELETE'])
+def api_waypoint_delete(name):
+    if not bridge_node.delete_waypoint(name):
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'status': 'deleted', 'name': name})
+
+
+@flask_app.route('/api/waypoints/<name>/navigate', methods=['POST'])
+def api_waypoint_navigate(name):
+    if not bridge_node.navigate_to_waypoint(name):
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'status': 'ok', 'name': name})
+
+
+# ---------------------------------------------------------------------------
+#  Phase 2 — Parking-plan API aliases over the map-frame waypoint DB
+# ---------------------------------------------------------------------------
+
+def _spot_from_waypoint(wp: dict) -> dict:
+    pose = dict(wp.get('pose') or {})
+    name = str(wp.get('name') or '')
+    return {
+        'id': name,
+        'name': name,
+        'kind': 'map_static',
+        'stale': bool(wp.get('stale')),
+        'map_fingerprint': wp.get('map_fingerprint', ''),
+        # Phase 2 intentionally navigates to this staging pose only. Later
+        # phases add final_pose / ArUco docking precision.
+        'staging_pose': pose,
+        'final_pose': pose,
+        'created_at': wp.get('created_at', ''),
+    }
+
+
+@flask_app.route('/api/spots', methods=['GET', 'POST'])
+def api_spots():
+    """List or create map-frame parking spots.
+
+    This is the parking_plan.md API surface, backed by the existing persistent
+    waypoint store so the current app and the new SpotsTab can share data.
+    """
+    if request.method == 'GET':
+        spots = [
+            _spot_from_waypoint(wp)
+            for wp in bridge_node.list_waypoints()
+            if wp.get('kind') == 'park'
+        ]
+        return jsonify({
+            'spots': spots,
+            'fingerprint': bridge_node._current_fingerprint(),
+        })
+
+    data = request.get_json(silent=True) or {}
+    spot_id = (data.get('id') or data.get('name') or '').strip()
+    pose = data.get('staging_pose') or data.get('final_pose') or data.get('pose') or {}
+    try:
+        entry = bridge_node.upsert_waypoint(spot_id, 'park', pose)
+    except (TypeError, ValueError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(_spot_from_waypoint(entry))
+
+
+@flask_app.route('/api/spots/<spot_id>', methods=['DELETE'])
+def api_spot_delete(spot_id):
+    if not bridge_node.delete_waypoint(spot_id):
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'status': 'deleted', 'id': spot_id})
+
+
+@flask_app.route('/api/save_spot', methods=['POST'])
+def api_save_spot():
+    """Capture the current map pose as a static parking spot."""
+    data = request.get_json(silent=True) or {}
+    spot_id = (data.get('id') or data.get('name') or '').strip()
+    if not spot_id:
+        return jsonify({'error': 'id required'}), 400
+    pose, source = bridge_node.get_pose()
+    if source == 'none' or pose.get('stamp', 0.0) <= 0:
+        return jsonify({'error': 'no robot pose available'}), 503
+    entry = bridge_node.upsert_waypoint(
+        spot_id,
+        'park',
+        {'x': pose['x_m'], 'y': pose['y_m'], 'yaw': pose['yaw_rad']},
+    )
+    return jsonify(_spot_from_waypoint(entry))
+
+
+@flask_app.route('/api/park_at', methods=['POST'])
+def api_park_at():
+    """Phase 2 park behavior: NavigateToPose to the spot staging pose."""
+    data = request.get_json(silent=True) or {}
+    spot_id = (data.get('id') or data.get('name') or '').strip()
+    if not spot_id:
+        return jsonify({'error': 'id required'}), 400
+    if not bridge_node.navigate_to_waypoint(spot_id):
+        return jsonify({'error': 'not found'}), 404
+    return jsonify({'status': 'ok', 'id': spot_id, 'mode': 'staging_only'})
+
+
+@flask_app.route('/api/summon', methods=['POST'])
+def api_summon():
+    """Phase 2 summon behavior: NavigateToPose to a supplied pickup pose."""
+    data = request.get_json(silent=True) or {}
+    if 'id' in data or 'name' in data:
+        spot_id = (data.get('id') or data.get('name') or '').strip()
+        if not bridge_node.navigate_to_waypoint(spot_id):
+            return jsonify({'error': 'not found'}), 404
+        return jsonify({'status': 'ok', 'id': spot_id})
+    if 'x' not in data or 'y' not in data:
+        return jsonify({'error': 'x and y required'}), 400
+    bridge_node.send_nav_goal(data['x'], data['y'], data.get('yaw', 0.0))
+    return jsonify({'status': 'ok'})
+
+
+@flask_app.route('/api/lock_map', methods=['POST'])
+def api_lock_map():
+    """Persist the current SLAM map with nav2_map_server's map_saver_cli."""
+    os.makedirs(MAPS_DIR, exist_ok=True)
+    prefix = os.path.join(MAPS_DIR, f"garage_{time.strftime('%Y%m%d_%H%M%S')}")
+    cmd = ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', prefix]
+    try:
+        proc = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify({'error': str(exc), 'command': cmd}), 500
+    if proc.returncode != 0:
+        return jsonify({
+            'error': 'map_saver_cli failed',
+            'returncode': proc.returncode,
+            'stdout': proc.stdout[-2000:],
+            'stderr': proc.stderr[-2000:],
+            'command': cmd,
+        }), 500
+    return jsonify({
+        'status': 'ok',
+        'map_prefix': prefix,
+        'yaml': prefix + '.yaml',
+        'pgm': prefix + '.pgm',
+        'stdout': proc.stdout[-2000:],
+    })
+
+
+# ---------------------------------------------------------------------------
+#  Part E — Nav2 max linear speed
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/nav2_speed', methods=['GET', 'POST'])
+def api_nav2_speed():
+    """Live-tune Nav2's linear speed cap. Sets RPP
+    FollowPath.desired_linear_vel and velocity_smoother max_velocity[0] in
+    lockstep so the smoother doesn't override the controller. Persists to
+    runtime_overrides.yaml under the respective node sections."""
+    if request.method == 'GET':
+        ctrl = bridge_node.get_remote_params(
+            '/controller_server', ['FollowPath.desired_linear_vel'])
+        sm = bridge_node.get_remote_params(
+            '/velocity_smoother', ['max_velocity'])
+        desired = ctrl.get('FollowPath.desired_linear_vel')
+        return jsonify({
+            'controller_desired_linear_vel': desired,
+            # Backward-compatible field name for the current Flutter client.
+            'controller_max_vel_x': desired,
+            'smoother_max_velocity': sm.get('max_velocity'),
+        })
+    data = request.get_json(silent=True) or {}
+    if 'max_vel_x' not in data:
+        return jsonify({'error': 'max_vel_x required'}), 400
+    try:
+        target = float(data['max_vel_x'])
+    except (TypeError, ValueError):
+        return jsonify({'error': 'max_vel_x must be a number'}), 400
+    if not 0.05 <= target <= 0.50:
+        return jsonify({'error': 'max_vel_x must be in [0.05, 0.50]'}), 400
+    ctrl = bridge_node.set_remote_params(
+        '/controller_server', {'FollowPath.desired_linear_vel': target})
+    # velocity_smoother expects a 3-vector [vx, vy, wz]; preserve current vy/wz.
+    cur = bridge_node.get_remote_params('/velocity_smoother', ['max_velocity'])
+    vec = list(cur.get('max_velocity') or [target, 0.0, 0.5])
+    vec[0] = target
+    sm = bridge_node.set_remote_params(
+        '/velocity_smoother', {'max_velocity': [float(v) for v in vec]})
+    bridge_node.persist_runtime_overrides(
+        'controller_server', {'FollowPath.desired_linear_vel': target})
+    bridge_node.persist_runtime_overrides(
+        'velocity_smoother', {'max_velocity': [float(v) for v in vec]})
+    return jsonify({'controller': ctrl, 'smoother': sm,
+                    'controller_desired_linear_vel': target,
+                    'controller_max_vel_x': target,
+                    'smoother_max_velocity': vec})
+
+
+# ---------------------------------------------------------------------------
+#  Part G1 — Pose reset / relocalize
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/relocalize', methods=['POST'])
+def api_relocalize():
+    data = request.get_json(silent=True) or {}
+    if 'x' not in data or 'y' not in data:
+        return jsonify({'error': 'x, y required'}), 400
+    yaw = data.get('yaw', 0.0)
+    bridge_node.publish_initial_pose(data['x'], data['y'], yaw)
+    return jsonify({'status': 'ok'})
+
+
+# ---------------------------------------------------------------------------
+#  Part G2 — Live param tuner
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/params', methods=['GET', 'POST'])
+def api_params():
+    if request.method == 'GET':
+        node = request.args.get('node', '').strip()
+        if node not in PARAM_TUNER_WHITELIST:
+            return jsonify({'error': 'node not in whitelist',
+                            'whitelist': list(PARAM_TUNER_WHITELIST)}), 400
+        names = bridge_node.list_remote_params(node)
+        if not names:
+            return jsonify({'node': node, 'params': {}, 'names': []})
+        # Cap at 200 names for the GetParameters round trip — bigger nodes
+        # still report the full list under 'names' for client-side filtering.
+        sample = names[:200]
+        values = bridge_node.get_remote_params(node, sample)
+        return jsonify({'node': node, 'names': names, 'params': values})
+    data = request.get_json(silent=True) or {}
+    node = data.get('node', '').strip()
+    if node not in PARAM_TUNER_WHITELIST:
+        return jsonify({'error': 'node not in whitelist',
+                        'whitelist': list(PARAM_TUNER_WHITELIST)}), 400
+    items = data.get('params') or {}
+    if not isinstance(items, dict) or not items:
+        return jsonify({'error': 'params object required'}), 400
+    results = bridge_node.set_remote_params(node, items)
+    bridge_node.persist_runtime_overrides(
+        node.lstrip('/'),
+        {k: v for k, v in items.items() if results.get(k, {}).get('ok')})
+    return jsonify({'node': node, 'results': results})
+
+
+# ---------------------------------------------------------------------------
+#  Part G3 — Topic / node health
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/health')
+def api_health():
+    return jsonify({'topics': bridge_node.get_health()})
 
 
 # =============================================================================
@@ -1026,7 +1893,19 @@ def index():
 <li>POST /api/nav_goal — send Nav2 goal (JSON: x, y, yaw)</li>
 <li>POST /api/cancel_nav — cancel active Nav2 goal</li>
 <li>GET/POST /api/mode — read or set AUTO/MANUAL/ESTOP</li>
+<li>GET/POST /api/safety_mode — soft (default) | off (manual bypass)</li>
 <li><a href="/api/nav_status">/api/nav_status</a> — Nav2 action status</li>
+<li>GET/POST /api/calibrate_direction — vx_polarity / servo_polarity</li>
+<li>POST /api/clear_costmaps · POST /api/restart_mapping</li>
+<li>GET/POST/DELETE /api/waypoints — manual park/summon spots</li>
+<li>POST /api/waypoints/&lt;name&gt;/navigate</li>
+<li>GET/POST /api/spots · DELETE /api/spots/&lt;id&gt; — parking-plan static spots</li>
+<li>POST /api/save_spot · POST /api/park_at · POST /api/summon</li>
+<li>POST /api/lock_map — save current SLAM map under ~/.autonexa/maps</li>
+<li>GET/POST /api/nav2_speed — live Nav2 target-speed slider</li>
+<li>POST /api/relocalize — set robot pose (x,y,yaw)</li>
+<li>GET/POST /api/params?node=&lt;name&gt; — live param tuner (whitelist only)</li>
+<li><a href="/api/health">/api/health</a> — topic rates / staleness</li>
 <li>WS /ws/control — joystick stream (input-only)</li>
 <li>WS /ws/telemetry — server-pushed telemetry snapshots @ 10 Hz</li>
 <li><a href="/video_feed">/video_feed</a> — camera MJPEG</li>
