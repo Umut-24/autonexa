@@ -37,9 +37,23 @@ class _CalibrationDialogState extends State<CalibrationDialog> {
     final conn = context.read<ConnectionService>();
     final cur = await conn.getCalibration();
     if (!mounted) return;
+    var vxPol = cur['vx_polarity'];
+    final servoPol = cur['servo_polarity'];
+    // If a previous wizard run accidentally flipped vx_polarity to -1 (the
+    // user said "didn't move" when the real problem was insufficient PWM,
+    // not wrong polarity), reset to a known-good baseline of +1. Manual
+    // joystick already works on this chassis with vx_polarity=+1, so this
+    // is the safe default. The user can still flip it during the wizard.
+    if (vxPol == -1) {
+      final result = await conn.calibrateDirection(vxPolarity: 1);
+      if (result['vx_polarity'] == true) {
+        vxPol = 1;
+      }
+    }
+    if (!mounted) return;
     setState(() {
-      _vxPolarity = cur['vx_polarity'];
-      _servoPolarity = cur['servo_polarity'];
+      _vxPolarity = vxPol;
+      _servoPolarity = servoPol;
     });
   }
 
@@ -54,7 +68,10 @@ class _CalibrationDialogState extends State<CalibrationDialog> {
       _step = _Step.forwardPulse;
       _status = 'Driving forward briefly…';
     });
-    await context.read<ConnectionService>().calibrationPulse(vx: 0.10, wz: 0.0);
+    // 0.20 m/s for 1.2 s — robust against the L298N 60 % PWM deadband on
+    // most floor surfaces. See ConnectionService.calibrationPulse comment.
+    await context.read<ConnectionService>().calibrationPulse(
+        vx: 0.20, wz: 0.0, durationMs: 1200);
     if (!mounted) return;
     setState(() {
       _step = _Step.forwardAsk;
@@ -92,7 +109,10 @@ class _CalibrationDialogState extends State<CalibrationDialog> {
     // Slight forward + wz>0 so Ackermann actually steers (pure pivot is
     // undefined for wheeled-Ackermann; the bridge handles vx≈0 by going
     // to max steer, which is what we want for a calibration check).
-    await context.read<ConnectionService>().calibrationPulse(vx: 0.08, wz: 0.4);
+    // Bumped to vx=0.18 / wz=0.6 / 1.2 s — enough motion to see a clear
+    // left-vs-right delta despite the L298N deadband floor.
+    await context.read<ConnectionService>().calibrationPulse(
+        vx: 0.18, wz: 0.6, durationMs: 1200);
     if (!mounted) return;
     setState(() {
       _step = _Step.turnAsk;
@@ -205,11 +225,18 @@ class _CalibrationDialogState extends State<CalibrationDialog> {
             ),
           ]),
           const SizedBox(height: 8),
-          TextButton.icon(
-            onPressed: _runForwardPulse,
-            icon: const Icon(Icons.replay_rounded, size: 16),
-            label: const Text('Repeat pulse'),
-          ),
+          // "Didn't move at all" is a deliberately separate path from "No,
+          // flip". If you flip vx_polarity when the real issue is insufficient
+          // PWM (e.g. carpet), you'll break manual control.
+          Row(children: [
+            Expanded(
+              child: TextButton.icon(
+                onPressed: _runForwardPulse,
+                icon: const Icon(Icons.replay_rounded, size: 16),
+                label: const Text('Didn\'t move — repeat'),
+              ),
+            ),
+          ]),
         ]);
       case _Step.turnAsk:
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -238,11 +265,17 @@ class _CalibrationDialogState extends State<CalibrationDialog> {
             ),
           ]),
           const SizedBox(height: 8),
-          TextButton.icon(
-            onPressed: _runTurnPulse,
-            icon: const Icon(Icons.replay_rounded, size: 16),
-            label: const Text('Repeat pulse'),
-          ),
+          // Same rationale as the forward step — separate "didn't move" from
+          // "moved the wrong way" to avoid accidental servo_polarity flips.
+          Row(children: [
+            Expanded(
+              child: TextButton.icon(
+                onPressed: _runTurnPulse,
+                icon: const Icon(Icons.replay_rounded, size: 16),
+                label: const Text('Didn\'t move — repeat'),
+              ),
+            ),
+          ]),
         ]);
       case _Step.done:
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

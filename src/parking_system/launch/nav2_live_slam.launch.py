@@ -104,11 +104,17 @@ def generate_launch_description():
         convert_types=True,
     )
 
+    # LiDAR is physically mounted on this chassis facing the rear (cable on
+    # the back of the car, 0° marker pointing backwards). Compensate by
+    # yaw-rotating laser_link 180° here. Without this, SLAM builds a
+    # yaw-flipped map and Nav2 goals drive the chassis the wrong way even
+    # though manual joystick + motor wiring are correct.
+    # Arg order is: x y z yaw pitch roll parent child.
     static_tf_base_to_laser = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
         name='static_tf_base_laser',
-        arguments=['0', '0', '0', '0', '0', '0', 'base_link', 'laser_link'],
+        arguments=['0', '0', '0', '3.14159', '0', '0', 'base_link', 'laser_link'],
         parameters=[{'use_sim_time': False}],
         output='screen'
     )

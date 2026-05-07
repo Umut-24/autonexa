@@ -356,14 +356,20 @@ class Nav2PicoBridge(Node):
                     return SetParametersResult(successful=False, reason='servo_center_us out of range')
                 self.servo_center = int(p.value)
             elif p.name == 'servo_us_min':
-                if not 500 <= int(p.value) <= self.servo_center:
+                # Hard floor at 1100 µs — beyond this the linkage binds and
+                # the servo stalls/draws current. Param tuner cannot widen
+                # past mechanical safe range.
+                if not 1100 <= int(p.value) <= self.servo_center:
                     return SetParametersResult(
-                        successful=False, reason='servo_us_min must be <= servo_center_us')
+                        successful=False,
+                        reason='servo_us_min must be in [1100, servo_center_us]')
                 self.servo_us_min = int(p.value)
             elif p.name == 'servo_us_max':
-                if not self.servo_center <= int(p.value) <= 2500:
+                # Hard ceiling at 1900 µs — same rationale as min above.
+                if not self.servo_center <= int(p.value) <= 1900:
                     return SetParametersResult(
-                        successful=False, reason='servo_us_max must be >= servo_center_us')
+                        successful=False,
+                        reason='servo_us_max must be in [servo_center_us, 1900]')
                 self.servo_us_max = int(p.value)
         return SetParametersResult(successful=True)
 

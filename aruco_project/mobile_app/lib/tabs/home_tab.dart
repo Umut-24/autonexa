@@ -237,12 +237,34 @@ class HomeTab extends StatelessWidget {
     );
   }
 
-  void _summonVehicle(BuildContext context, ConnectionService conn, ResolvedColors colors) {
+  Future<void> _summonVehicle(BuildContext context, ConnectionService conn, ResolvedColors colors) async {
+    // Prefer the bridge-side waypoint store (shared with Manual Spots tab,
+    // map overlay, etc.) — that way "summon" is the same point regardless of
+    // whether you defined it from this button or from Parking → Manual Spots.
+    // Fall back to the legacy phone-only prefs.summonPose so existing users
+    // don't lose their saved point.
+    final bridgeWps = await conn.listNamedWaypoints();
+    final bridgeSummon = bridgeWps.where((w) =>
+        w.name == 'summon' || w.kind == 'summon').toList();
+
+    if (bridgeSummon.isNotEmpty) {
+      final wp = bridgeSummon.first;
+      final ok = await conn.navigateToNamedWaypoint(wp.name);
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(ok
+            ? 'Summoning to "${wp.name}" (${wp.x.toStringAsFixed(2)}, ${wp.y.toStringAsFixed(2)})'
+            : 'Summon failed'),
+      ));
+      return;
+    }
+
     final prefs = context.read<PreferencesService>();
     final pose = prefs.summonPose;
 
     if (pose == null) {
       final status = conn.robotStatus;
+      if (!context.mounted) return;
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -250,7 +272,8 @@ class HomeTab extends StatelessWidget {
           content: Text(
             'Save current position (${status.pose.x.toStringAsFixed(2)}, '
             '${status.pose.y.toStringAsFixed(2)}) as the summon destination?\n\n'
-            'The vehicle will drive to this point when you summon it.',
+            'Stored on the robot so it appears on the map and can be used '
+            'from any phone.',
           ),
           actions: [
             TextButton(
@@ -258,12 +281,24 @@ class HomeTab extends StatelessWidget {
               child: Text('Cancel', style: TextStyle(color: colors.textSecondary)),
             ),
             ElevatedButton(
-              onPressed: () {
-                prefs.setSummonPose(status.pose.x, status.pose.y, status.pose.yaw);
+              onPressed: () async {
                 Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Summon point saved')),
+                // Save to the bridge so subsequent summons / the map overlay
+                // see it. Mirror to phone prefs as a redundant local backup.
+                final wp = await conn.saveNamedWaypoint(
+                  name: 'summon',
+                  kind: 'summon',
+                  x: status.pose.x,
+                  y: status.pose.y,
+                  yaw: status.pose.yaw,
                 );
+                prefs.setSummonPose(status.pose.x, status.pose.y, status.pose.yaw);
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text(wp != null
+                      ? 'Summon point saved'
+                      : 'Saved locally only (bridge offline)'),
+                ));
               },
               child: const Text('Save'),
             ),
@@ -271,6 +306,13 @@ class HomeTab extends StatelessWidget {
         ),
       );
     } else {
+      // Legacy fallback: prefs.summonPose exists but no bridge waypoint —
+      // best-effort upload it so it shows on the map next time, then navigate.
+      // ignore: unawaited_futures
+      conn.saveNamedWaypoint(
+        name: 'summon', kind: 'summon',
+        x: pose['x']!, y: pose['y']!, yaw: pose['yaw']!,
+      );
       conn.sendNavGoal(pose['x']!, pose['y']!, pose['yaw']!);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(

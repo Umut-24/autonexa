@@ -269,6 +269,7 @@ class _MapTabState extends State<MapTab> {
                               pathTrail: _showTrail ? conn.pathTrail : [],
                               plannedPath: _showPlan ? conn.plannedPath : [],
                               goal: goal.active ? goal : null,
+                              waypoints: conn.namedWaypoints,
                               mapInfo: status.mapInfo,
                               accentColor: colors.accent,
                             ),
@@ -417,6 +418,7 @@ class _MapPainter extends CustomPainter {
   final List<List<double>> pathTrail;
   final List<List<double>> plannedPath;
   final NavGoal? goal;
+  final List<NamedWaypoint> waypoints;
   final MapInfo? mapInfo;
   final Color accentColor;
 
@@ -428,6 +430,7 @@ class _MapPainter extends CustomPainter {
     required this.pathTrail,
     required this.plannedPath,
     required this.goal,
+    this.waypoints = const [],
     this.mapInfo,
     required this.accentColor,
   });
@@ -502,6 +505,60 @@ class _MapPainter extends CustomPainter {
         if (pt.length >= 2) {
           canvas.drawCircle(toPixel(pt[0], pt[1]), 1.2, scanPaint);
         }
+      }
+    }
+
+    // 4.5. Named waypoints (manual park / summon / home spots). Drawn under
+    //      the goal marker so an in-flight goal still pops; drawn over the
+    //      scan/trail so they remain visible against the LiDAR overlay.
+    if (waypoints.isNotEmpty) {
+      for (final wp in waypoints) {
+        final p = toPixel(wp.x, wp.y);
+        Color color;
+        switch (wp.kind) {
+          case 'park': color = AppColors.brand; break;
+          case 'summon': color = AppColors.info; break;
+          case 'home': color = AppColors.success; break;
+          default: color = const Color(0xFF6F87FF);
+        }
+        // Stale waypoints render half-faded so the user notices.
+        final alpha = wp.stale ? 0.45 : 0.95;
+        final fill = Paint()..color = color.withValues(alpha: alpha);
+        final outline = Paint()
+          ..color = Colors.white.withValues(alpha: 0.85)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1.0;
+        const r = 5.5;
+        final diamond = Path()
+          ..moveTo(p.dx, p.dy - r)
+          ..lineTo(p.dx + r, p.dy)
+          ..lineTo(p.dx, p.dy + r)
+          ..lineTo(p.dx - r, p.dy)
+          ..close();
+        canvas.drawPath(diamond, fill);
+        canvas.drawPath(diamond, outline);
+        // Heading tick — short stub so users can tell the saved orientation.
+        final ya = 9.0;
+        final ydx = ya * math.cos(-wp.yaw);
+        final ydy = ya * math.sin(-wp.yaw);
+        final yaPaint = Paint()
+          ..color = color.withValues(alpha: alpha)
+          ..strokeWidth = 1.6
+          ..strokeCap = StrokeCap.round;
+        canvas.drawLine(p, p + Offset(ydx, ydy), yaPaint);
+        // Name label, small and offset so it doesn't overlap the marker.
+        final tp = TextPainter(
+          text: TextSpan(
+            text: wp.name,
+            style: TextStyle(
+              fontSize: 9, fontWeight: FontWeight.w600,
+              color: Colors.white.withValues(alpha: 0.95),
+              shadows: const [Shadow(color: Color(0xCC000000), blurRadius: 2)],
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        )..layout();
+        tp.paint(canvas, Offset(p.dx + r + 3, p.dy - r - 2));
       }
     }
 

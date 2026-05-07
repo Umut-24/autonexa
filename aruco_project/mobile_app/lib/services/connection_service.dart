@@ -146,6 +146,11 @@ class ConnectionService extends ChangeNotifier {
   NavGoal _currentGoal = const NavGoal();
   Timer? _navTimer;
 
+  // Manual waypoints — kept in-memory and refreshed periodically so the map
+  // overlay and Home-tab Summon button can read them synchronously.
+  List<NamedWaypoint> _namedWaypoints = [];
+  Timer? _waypointTimer;
+
   // Control mode + Nav2 action status (mirrored from the bridge)
   ControlMode _mode = ControlMode.manual;
   SafetyMode _safetyMode = SafetyMode.soft;
@@ -181,6 +186,7 @@ class ConnectionService extends ChangeNotifier {
   NavGoal get currentGoal => _currentGoal;
   ControlMode get mode => _mode;
   SafetyMode get safetyMode => _safetyMode;
+  List<NamedWaypoint> get namedWaypoints => List.unmodifiable(_namedWaypoints);
   String get navStatus => _navStatus;
   double get navStatusStamp => _navStatusStamp;
   String get mapFingerprint => _mapFingerprint;
@@ -264,6 +270,7 @@ class ConnectionService extends ChangeNotifier {
     _mode = ControlMode.manual;
     _navStatus = 'IDLE';
     _navStatusStamp = 0;
+    _namedWaypoints = [];
     _joystickX = 0;
     _joystickY = 0;
     _emergencyStopped = false;
@@ -296,6 +303,11 @@ class ConnectionService extends ChangeNotifier {
       _fetchPlan();
       _fetchGoal();
     });
+    // Waypoint refresh: 5 s. Slow-changing data (user-initiated) so 0.2 Hz
+    // is plenty. Fetches happen on save/delete too, so this is just to pick
+    // up changes made from another phone or directly on the bridge.
+    _waypointTimer = Timer.periodic(const Duration(seconds: 5), (_) => _fetchWaypoints());
+    _fetchWaypoints();
   }
 
   void _stopPolling() {
@@ -304,11 +316,37 @@ class ConnectionService extends ChangeNotifier {
     _healthTimer?.cancel();
     _mapTimer?.cancel();
     _navTimer?.cancel();
+    _waypointTimer?.cancel();
     _statusTimer = null;
     _controlTimer = null;
     _healthTimer = null;
     _mapTimer = null;
     _navTimer = null;
+    _waypointTimer = null;
+  }
+
+  Future<void> _fetchWaypoints() async {
+    if (_baseUrl == null) return;
+    final wps = await _fetchWaypointsRaw();
+    if (wps == null) return; // transient HTTP error — keep last-known list.
+    _namedWaypoints = wps;
+    notifyListeners();
+  }
+
+  /// Same call as `listNamedWaypoints` but distinguishes empty (legitimately
+  /// no waypoints) from null (HTTP failure). Used by the poll loop.
+  Future<List<NamedWaypoint>?> _fetchWaypointsRaw() async {
+    if (_baseUrl == null) return null;
+    try {
+      final resp = await http.get(Uri.parse('$_baseUrl/api/waypoints'))
+          .timeout(const Duration(seconds: 2));
+      if (resp.statusCode != 200) return null;
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      final list = (json['waypoints'] as List?) ?? [];
+      return list.map<NamedWaypoint>((e) => NamedWaypoint.fromJson(e as Map<String, dynamic>)).toList();
+    } catch (_) {
+      return null;
+    }
   }
 
   // --- WebSockets ---
@@ -801,12 +839,17 @@ class ConnectionService extends ChangeNotifier {
   }
 
   /// Brief "drive forward" pulse used by the calibration wizard.
-  /// Forces MANUAL mode + safety=soft, sends a tiny vx for `durationMs`,
+  /// Forces MANUAL mode + safety=soft, sends a small vx for `durationMs`,
   /// then E-stops. Returns false if not connected.
+  ///
+  /// Magnitude is tuned to break the L298N chassis's static friction:
+  /// vx=0.20 m/s commands SPEED 20 to the firmware, which produces ~67%
+  /// PWM on the L298N (above the 60% deadband kick). Lower values can
+  /// stall on carpet / coarse floor — observed during round-1 use.
   Future<bool> calibrationPulse({
-    required double vx,
-    required double wz,
-    int durationMs = 800,
+    double vx = 0.20,
+    double wz = 0.0,
+    int durationMs = 1200,
   }) async {
     if (_baseUrl == null) return false;
     if (_mode != ControlMode.manual) {
@@ -831,7 +874,9 @@ class ConnectionService extends ChangeNotifier {
           }),
         ).timeout(const Duration(milliseconds: 200));
       } catch (_) {}
-      await Future.delayed(const Duration(milliseconds: 100));
+      // 80 ms send interval keeps the bridge's 200 ms watchdog comfortably
+      // fed even with HTTP jitter; round-1 used 100 ms which was on the edge.
+      await Future.delayed(const Duration(milliseconds: 80));
     }
     // Hard stop.
     try {
@@ -950,6 +995,10 @@ class ConnectionService extends ChangeNotifier {
       }
       final wp = NamedWaypoint.fromJson(jsonDecode(resp.body) as Map<String, dynamic>);
       logger.success('NamedWaypoint saved: $name', LogCategory.navigation);
+      // Refresh the cached list so the map overlay + Home tab pick it up
+      // immediately, without waiting for the next 5 s poll.
+      // ignore: unawaited_futures
+      _fetchWaypoints();
       return wp;
     } catch (e) {
       logger.error('save waypoint: $e', LogCategory.navigation);
@@ -963,7 +1012,12 @@ class ConnectionService extends ChangeNotifier {
       final resp = await http.delete(
               Uri.parse('$_baseUrl/api/waypoints/${Uri.encodeComponent(name)}'))
           .timeout(const Duration(seconds: 2));
-      return resp.statusCode == 200;
+      final ok = resp.statusCode == 200;
+      if (ok) {
+        // ignore: unawaited_futures
+        _fetchWaypoints();
+      }
+      return ok;
     } catch (_) { return false; }
   }
 
