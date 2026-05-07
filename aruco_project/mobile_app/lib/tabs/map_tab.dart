@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../theme/app_colors.dart';
@@ -9,8 +11,10 @@ import '../models/robot_state.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/nav_goal_dialog.dart';
 
-/// Native LiDAR map view with tap-to-navigate, robot pose overlay,
-/// marker overlay, and scan point visualization.
+/// RViz-style map view: SLAM occupancy grid as background, with overlays for
+/// LiDAR scan, robot pose, planner path, current goal, and ArUco markers.
+/// Tap-to-navigate sends a Nav2 goal; the prominent "Cancel Goal" pill aborts
+/// any active goal at any instant.
 class MapTab extends StatefulWidget {
   const MapTab({super.key});
 
@@ -24,6 +28,14 @@ class _MapTabState extends State<MapTab> {
   bool _showScan = true;
   bool _showMarkers = true;
   bool _showTrail = true;
+  bool _showPlan = true;
+
+  // Decoded map image — rebuilt asynchronously when the PNG bytes change so
+  // the painter can blit it directly via canvas.drawImage. Caching by length
+  // is good enough as a change-detection cheat (the bridge increments
+  // map_version on every emit, so the bytes' length nearly always changes).
+  ui.Image? _decodedMap;
+  int _decodedMapLen = -1;
 
   @override
   void initState() {
@@ -41,7 +53,29 @@ class _MapTabState extends State<MapTab> {
   void dispose() {
     _scanTimer?.cancel();
     _transformController.dispose();
+    _decodedMap?.dispose();
     super.dispose();
+  }
+
+  Future<void> _maybeDecodeMap(Uint8List? bytes) async {
+    if (bytes == null) {
+      if (_decodedMap != null) {
+        _decodedMap?.dispose();
+        _decodedMap = null;
+        _decodedMapLen = -1;
+        if (mounted) setState(() {});
+      }
+      return;
+    }
+    if (bytes.length == _decodedMapLen && _decodedMap != null) return;
+    final codec = await ui.instantiateImageCodec(bytes);
+    final frame = await codec.getNextFrame();
+    if (!mounted) return;
+    setState(() {
+      _decodedMap?.dispose();
+      _decodedMap = frame.image;
+      _decodedMapLen = bytes.length;
+    });
   }
 
   void _onTapMap(BuildContext context, TapUpDetails details, ConnectionService conn) {
@@ -53,11 +87,9 @@ class _MapTabState extends State<MapTab> {
     final inverseMatrix = Matrix4.inverted(matrix);
     final localPoint = MatrixUtils.transformPoint(inverseMatrix, details.localPosition);
 
-    // Convert pixel coords to map coords
+    // Convert pixel coords to map coords (image origin top-left, ROS origin bottom-left)
     final pixelX = localPoint.dx;
     final pixelY = localPoint.dy;
-
-    // Map image is flipped vertically (ROS origin bottom-left)
     final mapX = mapInfo.originX + pixelX * mapInfo.resolution;
     final mapY = mapInfo.originY + (mapInfo.height - pixelY) * mapInfo.resolution;
 
@@ -76,6 +108,11 @@ class _MapTabState extends State<MapTab> {
     final mapImage = conn.mapImage;
     final status = conn.robotStatus;
 
+    // Kick off async decode if the bytes changed.
+    _maybeDecodeMap(mapImage);
+
+    final goal = conn.currentGoal;
+
     return SafeArea(
       child: Column(
         children: [
@@ -88,8 +125,9 @@ class _MapTabState extends State<MapTab> {
                     style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700,
                         color: colors.textPrimary, letterSpacing: -0.5)),
                 const Spacer(),
-                // Toggle buttons
                 _toggleChip('Scan', _showScan, () => setState(() => _showScan = !_showScan), colors),
+                const SizedBox(width: 6),
+                _toggleChip('Plan', _showPlan, () => setState(() => _showPlan = !_showPlan), colors),
                 const SizedBox(width: 6),
                 _toggleChip('Trail', _showTrail, () => setState(() => _showTrail = !_showTrail), colors),
                 const SizedBox(width: 6),
@@ -109,7 +147,7 @@ class _MapTabState extends State<MapTab> {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
-                child: mapImage == null || !conn.isConnected
+                child: mapImage == null || !conn.isConnected || _decodedMap == null
                     ? _placeholder(colors)
                     : GestureDetector(
                         onTapUp: (d) => _onTapMap(context, d, conn),
@@ -117,19 +155,22 @@ class _MapTabState extends State<MapTab> {
                           transformationController: _transformController,
                           minScale: 0.5,
                           maxScale: 10,
+                          constrained: false,
                           child: CustomPaint(
                             painter: _MapPainter(
-                              mapImage: mapImage,
+                              mapImage: _decodedMap!,
                               pose: status.pose,
                               markers: _showMarkers ? status.markers : {},
                               scanPoints: _showScan ? conn.scanPoints : [],
                               pathTrail: _showTrail ? conn.pathTrail : [],
+                              plannedPath: _showPlan ? conn.plannedPath : [],
+                              goal: goal.active ? goal : null,
                               mapInfo: status.mapInfo,
                               accentColor: colors.accent,
                             ),
                             size: Size(
-                              (status.mapInfo?.width ?? 200).toDouble(),
-                              (status.mapInfo?.height ?? 200).toDouble(),
+                              _decodedMap!.width.toDouble(),
+                              _decodedMap!.height.toDouble(),
                             ),
                           ),
                         ),
@@ -147,17 +188,20 @@ class _MapTabState extends State<MapTab> {
                 _infoItem('Y', '${status.pose.y.toStringAsFixed(2)}m', colors),
                 _infoItem('Yaw', '${(status.pose.yaw * 57.2958).toStringAsFixed(0)}°', colors),
                 _infoItem('Scan', '${status.scan.count}', colors),
-                _infoItem('Source', status.pose.source, colors),
+                _infoItem('Plan', '${conn.plannedPath.length}', colors),
+                _infoItem('Nav2', conn.navStatus, colors),
               ],
             ),
           ),
 
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             child: Row(
               children: [
                 Text(
-                  'Tap on the map to set a navigation goal',
+                  goal.active
+                      ? 'Goal: (${goal.x.toStringAsFixed(2)}, ${goal.y.toStringAsFixed(2)})'
+                      : 'Tap on the map to set a navigation goal',
                   style: TextStyle(fontSize: 11, color: colors.textTertiary),
                 ),
                 const Spacer(),
@@ -165,7 +209,7 @@ class _MapTabState extends State<MapTab> {
                   GestureDetector(
                     onTap: () => conn.clearPathTrail(),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
                         color: colors.surfaceLight,
                         borderRadius: BorderRadius.circular(6),
@@ -174,6 +218,36 @@ class _MapTabState extends State<MapTab> {
                           style: TextStyle(fontSize: 10, color: colors.textSecondary)),
                     ),
                   ),
+                if (goal.active) ...[
+                  const SizedBox(width: 8),
+                  GestureDetector(
+                    onTap: () => conn.cancelNavGoal(),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE53935),
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFFE53935).withValues(alpha: 0.4),
+                            blurRadius: 6,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.cancel_rounded, size: 14, color: Colors.white),
+                          SizedBox(width: 4),
+                          Text('Cancel Goal',
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                                  color: Colors.white, letterSpacing: 0.3)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -232,11 +306,13 @@ class _MapTabState extends State<MapTab> {
 // ─── Map Painter ─────────────────────────────────────────────────────────────
 
 class _MapPainter extends CustomPainter {
-  final List<int> mapImage;
+  final ui.Image mapImage;
   final RobotPose pose;
   final Map<int, MarkerInfo> markers;
   final List<List<double>> scanPoints;
   final List<List<double>> pathTrail;
+  final List<List<double>> plannedPath;
+  final NavGoal? goal;
   final MapInfo? mapInfo;
   final Color accentColor;
 
@@ -246,14 +322,22 @@ class _MapPainter extends CustomPainter {
     required this.markers,
     required this.scanPoints,
     required this.pathTrail,
+    required this.plannedPath,
+    required this.goal,
     this.mapInfo,
     required this.accentColor,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    // The map image is rendered by the Image widget underneath via DecorationImage;
-    // here we draw overlays.
+    // 1. Draw the SLAM occupancy grid as the background. Walls black, free
+    //    white, unknown gray — exactly as the bridge encoded the PNG (with Y
+    //    already flipped to image coords). Nearest-neighbor filtering keeps
+    //    cell edges crisp at high zoom.
+    final imgPaint = Paint()
+      ..filterQuality = FilterQuality.none
+      ..isAntiAlias = false;
+    canvas.drawImage(mapImage, Offset.zero, imgPaint);
 
     if (mapInfo == null) return;
 
@@ -269,28 +353,32 @@ class _MapPainter extends CustomPainter {
       return Offset(px, py);
     }
 
-    // Draw scan points
-    if (scanPoints.isNotEmpty) {
-      final scanPaint = Paint()
-        ..color = AppColors.success.withValues(alpha: 0.6)
-        ..strokeWidth = 2
-        ..strokeCap = StrokeCap.round;
-
-      for (final pt in scanPoints) {
-        if (pt.length >= 2) {
-          canvas.drawCircle(toPixel(pt[0], pt[1]), 1.5, scanPaint);
-        }
+    // 2. Planner path (orange polyline, RViz-style) — drawn under scan + pose
+    //    so live data sits on top.
+    if (plannedPath.length >= 2) {
+      final planPaint = Paint()
+        ..color = const Color(0xFFFF9500)
+        ..strokeWidth = 2.5
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..style = PaintingStyle.stroke;
+      final planPath = Path();
+      final p0 = toPixel(plannedPath[0][0], plannedPath[0][1]);
+      planPath.moveTo(p0.dx, p0.dy);
+      for (int i = 1; i < plannedPath.length; i++) {
+        final p = toPixel(plannedPath[i][0], plannedPath[i][1]);
+        planPath.lineTo(p.dx, p.dy);
       }
+      canvas.drawPath(planPath, planPaint);
     }
 
-    // Draw path trail
+    // 3. Path trail (where the robot has been)
     if (pathTrail.length >= 2) {
       final trailPaint = Paint()
-        ..color = accentColor.withValues(alpha: 0.5)
-        ..strokeWidth = 2.0
+        ..color = accentColor.withValues(alpha: 0.45)
+        ..strokeWidth = 1.8
         ..strokeCap = StrokeCap.round
         ..style = PaintingStyle.stroke;
-
       final path = Path();
       final first = toPixel(pathTrail[0][0], pathTrail[0][1]);
       path.moveTo(first.dx, first.dy);
@@ -299,23 +387,52 @@ class _MapPainter extends CustomPainter {
         path.lineTo(pt.dx, pt.dy);
       }
       canvas.drawPath(path, trailPaint);
+    }
 
-      // Draw trail dots at intervals
-      final dotPaint = Paint()
-        ..color = accentColor.withValues(alpha: 0.35)
-        ..style = PaintingStyle.fill;
-      for (int i = 0; i < pathTrail.length; i += 10) {
-        final pt = toPixel(pathTrail[i][0], pathTrail[i][1]);
-        canvas.drawCircle(pt, 1.5, dotPaint);
+    // 4. Scan points
+    if (scanPoints.isNotEmpty) {
+      final scanPaint = Paint()
+        ..color = AppColors.success.withValues(alpha: 0.7)
+        ..strokeCap = StrokeCap.round;
+      for (final pt in scanPoints) {
+        if (pt.length >= 2) {
+          canvas.drawCircle(toPixel(pt[0], pt[1]), 1.2, scanPaint);
+        }
       }
     }
 
-    // Draw robot pose
+    // 5. Goal marker (red diamond + heading arrow). RViz draws the same.
+    if (goal != null) {
+      final g = toPixel(goal!.x, goal!.y);
+      final goalFill = Paint()..color = const Color(0xFFE53935);
+      final goalEdge = Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5;
+      const r = 7.0;
+      final diamond = Path()
+        ..moveTo(g.dx, g.dy - r)
+        ..lineTo(g.dx + r, g.dy)
+        ..lineTo(g.dx, g.dy + r)
+        ..lineTo(g.dx - r, g.dy)
+        ..close();
+      canvas.drawPath(diamond, goalFill);
+      canvas.drawPath(diamond, goalEdge);
+      // Heading arrow
+      final ga = 14.0;
+      final gdx = ga * math.cos(-goal!.yaw);
+      final gdy = ga * math.sin(-goal!.yaw);
+      final goalArrow = Paint()
+        ..color = const Color(0xFFE53935)
+        ..strokeWidth = 2.0
+        ..strokeCap = StrokeCap.round;
+      canvas.drawLine(g, g + Offset(gdx, gdy), goalArrow);
+    }
+
+    // 6. Robot pose (cyan/accent circle + heading arrow)
     final robotPos = toPixel(pose.x, pose.y);
     final robotPaint = Paint()..color = accentColor;
     canvas.drawCircle(robotPos, 6, robotPaint);
-
-    // Heading arrow
     final arrowLen = 14.0;
     final dx = arrowLen * math.cos(-pose.yaw);
     final dy = arrowLen * math.sin(-pose.yaw);
@@ -324,10 +441,8 @@ class _MapPainter extends CustomPainter {
       ..strokeWidth = 2.5
       ..strokeCap = StrokeCap.round;
     canvas.drawLine(robotPos, robotPos + Offset(dx, dy), arrowPaint);
-
-    // Robot outline
     final outlinePaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.4)
+      ..color = Colors.white.withValues(alpha: 0.5)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
     canvas.drawCircle(robotPos, 6, outlinePaint);

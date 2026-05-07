@@ -9,6 +9,7 @@ import 'services/event_logger.dart';
 import 'services/preferences_service.dart';
 import 'state/app_state.dart';
 import 'widgets/estop_fab.dart';
+import 'widgets/mode_bar.dart';
 
 import 'tabs/home_tab.dart';
 import 'tabs/control_tab.dart';
@@ -110,13 +111,20 @@ class _MainShellState extends State<MainShell> {
     final connection = context.watch<ConnectionService>();
 
     return Scaffold(
-      body: IndexedStack(
-        index: _currentTab.clamp(0, 3),
-        children: const [
-          HomeTab(),
-          ControlTab(),
-          MapTab(),
-          ParkingTab(),
+      body: Column(
+        children: [
+          const ModeBar(),
+          Expanded(
+            child: IndexedStack(
+              index: _currentTab.clamp(0, 3),
+              children: const [
+                HomeTab(),
+                ControlTab(),
+                MapTab(),
+                ParkingTab(),
+              ],
+            ),
+          ),
         ],
       ),
       bottomNavigationBar: _buildBottomBar(),

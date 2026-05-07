@@ -5,10 +5,13 @@ ROS2-Flask Bridge Node for AutoNexa Mobile App.
 Subscribes to ROS2 topics (/scan, /map, /amcl_pose, /odometry/filtered)
 and serves data via Flask HTTP endpoints for the Flutter mobile app.
 
-Endpoints:
+REST Endpoints:
   /api/scan        - Latest LIDAR scan as (x,y) points in map frame (JSON)
   /api/map         - Real SLAM occupancy grid (PNG)
   /api/map_info    - Map metadata: resolution, origin, dimensions (JSON)
+  /api/map_version - Bumps on each /map update; clients ETag the PNG
+  /api/plan        - Latest Nav2 NavfnPlanner output (JSON polyline)
+  /api/goal        - Active goal pose (JSON x/y/yaw/active/stamp)
   /api/pose        - Robot pose from AMCL/EKF/odom (JSON)
   /api/status      - Combined status (JSON)
   /api/markers     - Currently visible ArUco markers (JSON)
@@ -16,11 +19,22 @@ Endpoints:
   /api/cancel_nav  - POST to cancel current Nav2 goal (stops autonomous motion)
   /api/control     - POST joystick commands (JSON {x, y, e, speed_limit})
   /api/telemetry   - GET Pico telemetry (motors, encoders, odom)
-  /api/estop       - POST emergency stop
+  /api/estop       - POST emergency stop (cancels Nav2 + Pico latch)
   /api/estop_clear - POST to clear the Pico E-STOP latch
+  /api/mode        - GET/POST AUTO/MANUAL/ESTOP control state machine
+  /api/nav_status  - Nav2 NavigateToPose action status string
+
+WebSocket Endpoints:
+  /ws/control      - Joystick stream (client -> bridge), JSON per message
+  /ws/telemetry    - Server-pushed snapshots at 10 Hz: pose + telemetry +
+                     mode + nav_status + goal
+
   /video_feed      - Camera MJPEG stream
+
+Runtime Python deps (pip): flask, flask-sock, numpy, opencv-python.
 """
 
+import json
 import threading
 import time
 import io
@@ -32,12 +46,14 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid, Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool
 from action_msgs.srv import CancelGoal
+from action_msgs.msg import GoalStatusArray
 from flask import Flask, Response, jsonify, request, send_file
+from flask_sock import Sock
 
 # Optional: ArUco detection
 try:
@@ -63,6 +79,19 @@ class MobileBridgeNode(Node):
         self._map_lock = threading.Lock()
         self._map_png = None         # Cached PNG bytes
         self._map_info = {}          # {width, height, resolution, origin_x, origin_y}
+        self._map_version = 0        # Increments on each /map update; clients poll
+                                     # /api/map_version to skip redundant PNG fetches.
+
+        # --- Nav2 plan + current goal ---
+        self._plan_lock = threading.Lock()
+        self._plan_points = []       # Downsampled [[x, y], ...] in map frame
+        self._plan_stamp = 0.0
+
+        self._goal_lock = threading.Lock()
+        self._current_goal = {       # Last goal sent (active until cancel)
+            'x': 0.0, 'y': 0.0, 'yaw': 0.0,
+            'active': False, 'stamp': 0.0,
+        }
 
         self._pose_lock = threading.Lock()
         self._pose = {'x_m': 0.0, 'y_m': 0.0, 'yaw_rad': 0.0, 'stamp': 0.0}
@@ -76,6 +105,31 @@ class MobileBridgeNode(Node):
         self._last_control_time = 0.0
         self._control_watchdog_s = 0.5  # zero velocity if no command in 500ms
         self._estop_latched = False  # tracks whether Pico E-STOP was latched
+
+        # --- Control mode state machine: AUTO / MANUAL / ESTOP -------------
+        # AUTO   — Nav2 owns /cmd_vel; joystick input is ignored.
+        # MANUAL — joystick owns /cmd_vel; any active Nav2 goal is cancelled
+        #          on entry so the BT navigator stops publishing.
+        # ESTOP  — zero velocity + Pico hardware latch; both joystick and
+        #          Nav2 are blocked.
+        # The mode is the single source of truth — every cmd_vel publisher
+        # in this bridge consults it before publishing.
+        self._mode_lock = threading.Lock()
+        self._mode = 'MANUAL'         # safe default — no autonomous motion at boot
+        self._mode_stamp = time.time()
+
+        # --- Nav2 action goal status -----------------------------------------
+        # Latest status code from /navigate_to_pose/_action/status. Mapped to
+        # human-readable strings before serializing to clients.
+        self._nav_status_lock = threading.Lock()
+        self._nav_status = 'IDLE'      # IDLE/PLANNING/EXECUTING/SUCCEEDED/CANCELED/ABORTED
+        self._nav_status_stamp = 0.0
+
+        # --- WebSocket subscriber registry ----------------------------------
+        # Telemetry pusher fans out to every connected /ws/telemetry client.
+        # Adds/removes are handled inside the per-connection handler.
+        self._ws_lock = threading.Lock()
+        self._ws_telemetry_clients = set()
 
         # --- Telemetry from Pico ---
         self._telemetry_lock = threading.Lock()
@@ -102,6 +156,26 @@ class MobileBridgeNode(Node):
             Odometry, '/odometry/filtered', self._odom_cb, 10)
         self.create_subscription(
             Odometry, '/odom', self._odom_cb, 10)
+
+        # Nav2 planner output (NavfnPlanner) — visualized as a polyline in the
+        # mobile app. Depth 1; we replace fully on each new plan.
+        self.create_subscription(
+            Path, '/plan', self._plan_cb, 1)
+        # Track goals issued from RViz too (so the marker is correct regardless
+        # of who set the goal — app or RViz).
+        self.create_subscription(
+            PoseStamped, '/goal_pose', self._goal_pose_cb, 10)
+        # NavigateToPose action status — gives us PLANNING/EXECUTING/SUCCEEDED/
+        # ABORTED/CANCELED so the app can show what Nav2 is actually doing,
+        # not just "we sent a goal".
+        nav_status_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1,
+        )
+        self.create_subscription(
+            GoalStatusArray, '/navigate_to_pose/_action/status',
+            self._nav_status_cb, nav_status_qos)
 
         # --- Nav2 goal publisher ---
         self._goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
@@ -155,6 +229,7 @@ class MobileBridgeNode(Node):
         with self._map_lock:
             self._map_png = png_bytes
             self._map_info = info
+            self._map_version += 1
 
     def _amcl_cb(self, msg: PoseWithCovarianceStamped):
         x = msg.pose.pose.position.x
@@ -203,6 +278,71 @@ class MobileBridgeNode(Node):
             self._pico_telemetry['odom_wz'] = round(msg.twist.twist.angular.z, 4)
             self._pico_telemetry['odom_stamp'] = time.time()
 
+    def _plan_cb(self, msg: Path):
+        """Cache the latest Nav2 plan as a downsampled list of [x, y]."""
+        # Cap at 100 waypoints to keep /api/plan responses ~1.5 KB even for
+        # long plans. NavfnPlanner emits ~5 cm spaced poses so 100 pts ~= 5 m
+        # of path; for longer plans we stride.
+        max_pts = 100
+        n = len(msg.poses)
+        if n == 0:
+            pts = []
+        elif n <= max_pts:
+            pts = [[round(p.pose.position.x, 4), round(p.pose.position.y, 4)]
+                   for p in msg.poses]
+        else:
+            stride = max(1, n // max_pts)
+            pts = [[round(msg.poses[i].pose.position.x, 4),
+                    round(msg.poses[i].pose.position.y, 4)]
+                   for i in range(0, n, stride)][:max_pts]
+            # Always include the final pose so the polyline reaches the goal.
+            last = msg.poses[-1].pose.position
+            if pts and pts[-1] != [round(last.x, 4), round(last.y, 4)]:
+                pts.append([round(last.x, 4), round(last.y, 4)])
+        with self._plan_lock:
+            self._plan_points = pts
+            self._plan_stamp = time.time()
+
+    def _nav_status_cb(self, msg: GoalStatusArray):
+        """Track the latest /navigate_to_pose action status."""
+        if not msg.status_list:
+            return
+        # The action server appends new status entries; the most recent one
+        # reflects the current goal.
+        latest = msg.status_list[-1]
+        code_to_str = {
+            0: 'UNKNOWN',
+            1: 'PLANNING',     # ACCEPTED — server has the goal, planning
+            2: 'EXECUTING',
+            3: 'CANCELING',
+            4: 'SUCCEEDED',
+            5: 'CANCELED',
+            6: 'ABORTED',
+        }
+        label = code_to_str.get(latest.status, 'UNKNOWN')
+        with self._nav_status_lock:
+            self._nav_status = label
+            self._nav_status_stamp = time.time()
+        # Once a goal terminates, mark the cached goal inactive so the map
+        # overlay clears even if the user didn't explicitly cancel.
+        if label in ('SUCCEEDED', 'CANCELED', 'ABORTED'):
+            with self._goal_lock:
+                self._current_goal['active'] = False
+            with self._plan_lock:
+                self._plan_points = []
+
+    def _goal_pose_cb(self, msg: PoseStamped):
+        """Track goals published on /goal_pose (from RViz or this bridge)."""
+        yaw = self._quat_to_yaw(msg.pose.orientation)
+        with self._goal_lock:
+            self._current_goal = {
+                'x': float(msg.pose.position.x),
+                'y': float(msg.pose.position.y),
+                'yaw': float(yaw),
+                'active': True,
+                'stamp': time.time(),
+            }
+
     def _watchdog_cb(self):
         with self._control_lock:
             if self._last_control_time > 0 and \
@@ -212,21 +352,37 @@ class MobileBridgeNode(Node):
                 self._cmd_vel_pub.publish(zero)
 
     def publish_control(self, x: float, y: float, e: int, speed_limit: float):
-        """Convert joystick input to Twist and publish on /cmd_vel."""
+        """Convert joystick input to Twist and publish on /cmd_vel.
+
+        Mode-gated: in AUTO/ESTOP we never publish joystick velocities so we
+        don't fight Nav2 or the safety latch. In MANUAL the joystick wins.
+        """
         max_vx = 0.35
         max_wz = 0.8
         sl = max(0.1, min(1.0, speed_limit))
 
+        with self._mode_lock:
+            mode = self._mode
+
+        # Treat any joystick input from a non-MANUAL mode as a no-op. The
+        # 50 Hz watchdog will keep zeroing /cmd_vel on the bridge side, and
+        # Nav2 (in AUTO) continues unmolested.
+        if mode != 'MANUAL':
+            return
+
         twist = Twist()
         if e:
-            # Emergency: zero velocity (twist stays at zero)
+            # Per-message emergency flag — same effect as ESTOP mode but
+            # bounded to this single command. Twist stays at zero.
             pass
         else:
             # If Pico E-STOP was previously latched, clear it now
             if self._estop_latched:
                 self._clear_pico_estop()
             twist.linear.x = y * max_vx * sl
-            twist.angular.z = -x * max_wz * sl
+            # Servo polarity: flipped 2026-05-07 so joystick X aligns with
+            # physical wheel direction (push right -> wheels turn right).
+            twist.angular.z = x * max_wz * sl
 
         self._cmd_vel_pub.publish(twist)
         with self._control_lock:
@@ -362,6 +518,77 @@ class MobileBridgeNode(Node):
         with self._map_lock:
             return dict(self._map_info) if self._map_info else None
 
+    def get_map_version(self):
+        with self._map_lock:
+            return self._map_version
+
+    def get_plan(self):
+        with self._plan_lock:
+            return list(self._plan_points), self._plan_stamp
+
+    def get_goal(self):
+        with self._goal_lock:
+            return dict(self._current_goal)
+
+    def get_mode(self):
+        with self._mode_lock:
+            return self._mode
+
+    def set_mode(self, new_mode: str) -> bool:
+        """Transition the control mode. Returns True on a valid transition.
+
+        Side effects on entry:
+          MANUAL  — cancel any active Nav2 goal so the BT navigator stops
+                    publishing /cmd_vel; clear the Pico E-STOP latch.
+          AUTO    — clear the Pico E-STOP latch; do nothing to Nav2 (the
+                    user is expected to set a goal next).
+          ESTOP   — full estop() — cancel Nav2, zero /cmd_vel, latch Pico.
+        """
+        new_mode = (new_mode or '').upper()
+        if new_mode not in ('AUTO', 'MANUAL', 'ESTOP'):
+            return False
+        with self._mode_lock:
+            if self._mode == new_mode:
+                return True
+            self._mode = new_mode
+            self._mode_stamp = time.time()
+        self.get_logger().warning(f'Control mode -> {new_mode}')
+
+        if new_mode == 'MANUAL':
+            try:
+                self.cancel_nav_goal()
+            except Exception as exc:  # pragma: no cover
+                self.get_logger().error(f'cancel_nav on mode change: {exc}')
+            if self._estop_latched:
+                self._clear_pico_estop()
+        elif new_mode == 'AUTO':
+            if self._estop_latched:
+                self._clear_pico_estop()
+        elif new_mode == 'ESTOP':
+            self.estop()
+        return True
+
+    def get_nav_status(self):
+        with self._nav_status_lock:
+            return self._nav_status, self._nav_status_stamp
+
+    def build_telemetry_snapshot(self) -> dict:
+        """Single-shot snapshot bundling everything WS clients want at high
+        rate: pose, telemetry, mode, nav status, current goal. Map / scan /
+        plan stay on REST since they're either large (PNG) or change slowly."""
+        pose, source = self.get_pose()
+        nav_status, nav_stamp = self.get_nav_status()
+        return {
+            'pose': {**pose, 'source': source},
+            'telemetry': self.get_telemetry(),
+            'mode': self.get_mode(),
+            'nav_status': nav_status,
+            'nav_status_stamp': nav_stamp,
+            'goal': self.get_goal(),
+            'estop_latched': self._estop_latched,
+            'stamp': time.time(),
+        }
+
     def get_pose(self):
         with self._pose_lock:
             return dict(self._pose), self._pose_source
@@ -379,7 +606,21 @@ class MobileBridgeNode(Node):
             return dict(self._pico_telemetry)
 
     def estop(self):
-        """Publish zero velocity and request latched Pico E-STOP."""
+        """Publish zero velocity, cancel Nav2, and latch the Pico E-STOP.
+
+        E-STOP must abort the active Nav2 goal at every instant — otherwise
+        the BT navigator keeps re-publishing /cmd_vel after the latch clears
+        and the robot resumes its plan unexpectedly. Cancel first, then zero
+        velocity, then latch hardware.
+        """
+        # 1. Cancel any in-flight Nav2 goal (non-blocking; safe if none).
+        try:
+            self.cancel_nav_goal()
+        except Exception as exc:  # pragma: no cover — defensive
+            self.get_logger().error(f'cancel_nav_goal during estop failed: {exc}')
+
+        # 2. Zero velocity (cancel_nav_goal already does this, but repeat in
+        #    case the cancel path failed).
         zero = Twist()
         self._cmd_vel_pub.publish(zero)
         with self._control_lock:
@@ -470,6 +711,15 @@ class MobileBridgeNode(Node):
         with self._control_lock:
             self._last_control_time = 0.0
 
+        # Mark the cached goal as inactive so the app stops drawing the
+        # goal marker / planner path immediately, regardless of whether the
+        # action server's cancel ack arrives.
+        with self._goal_lock:
+            self._current_goal['active'] = False
+        with self._plan_lock:
+            self._plan_points = []
+            self._plan_stamp = time.time()
+
         # Graceful cancel via action cancel service (non-blocking).
         if not self._nav_cancel_client.wait_for_service(timeout_sec=0.1):
             self.get_logger().warning(
@@ -503,6 +753,7 @@ class MobileBridgeNode(Node):
 # =============================================================================
 
 flask_app = Flask(__name__)
+sock = Sock(flask_app)
 bridge_node: MobileBridgeNode = None  # Set after node init
 
 
@@ -530,6 +781,29 @@ def api_map_info():
     if info is None:
         return jsonify({'error': 'No map available yet'}), 503
     return jsonify(info)
+
+
+@flask_app.route('/api/map_version')
+def api_map_version():
+    """Lightweight (~30 B) version counter — clients only refetch /api/map
+    when this value changes. Lets the app poll cheaply at 0.5–1 Hz without
+    burning bandwidth on the (slow-changing) PNG."""
+    return jsonify({'v': bridge_node.get_map_version()})
+
+
+@flask_app.route('/api/plan')
+def api_plan():
+    points, stamp = bridge_node.get_plan()
+    return jsonify({
+        'points': points,
+        'stamp': stamp,
+        'count': len(points),
+    })
+
+
+@flask_app.route('/api/goal')
+def api_goal():
+    return jsonify(bridge_node.get_goal())
 
 
 @flask_app.route('/api/pose')
@@ -608,6 +882,117 @@ def api_cancel_nav():
     return jsonify({'status': 'cancelled'})
 
 
+@flask_app.route('/api/mode', methods=['GET', 'POST'])
+def api_mode():
+    """Get or set the control mode (AUTO / MANUAL / ESTOP)."""
+    if request.method == 'GET':
+        return jsonify({'mode': bridge_node.get_mode()})
+    data = request.get_json(silent=True) or {}
+    requested = data.get('mode', '')
+    if not bridge_node.set_mode(requested):
+        return jsonify({'error': f'invalid mode: {requested!r}'}), 400
+    return jsonify({'mode': bridge_node.get_mode()})
+
+
+@flask_app.route('/api/nav_status')
+def api_nav_status():
+    label, stamp = bridge_node.get_nav_status()
+    return jsonify({'status': label, 'stamp': stamp})
+
+
+# =============================================================================
+#  WebSocket endpoints — joystick (high-rate) + telemetry push
+# =============================================================================
+
+@sock.route('/ws/control')
+def ws_control(ws):
+    """Bidirectional joystick stream. Each inbound JSON message
+    {x, y, e, speed_limit} is fed straight into publish_control. We don't
+    push anything back on this socket — it's input-only — but we keep the
+    connection open as long as the client wants.
+
+    The 50 Hz Pico watchdog and bridge-side 200 ms timeout mean that if
+    the WebSocket dies mid-drive, motors zero on their own."""
+    bridge_node.get_logger().info('WS /ws/control connected')
+    try:
+        while True:
+            raw = ws.receive(timeout=5)
+            if raw is None:
+                # Idle keepalive — do nothing.
+                continue
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            x = float(data.get('x', 0))
+            y = float(data.get('y', 0))
+            e = int(data.get('e', 0))
+            sl = float(data.get('speed_limit', 1.0))
+            bridge_node.publish_control(x, y, e, sl)
+    except Exception as exc:
+        bridge_node.get_logger().info(f'WS /ws/control closed: {exc}')
+
+
+@sock.route('/ws/telemetry')
+def ws_telemetry(ws):
+    """Server-push telemetry stream. We register the connection in the
+    bridge node's pusher set; a background thread fans out snapshots at
+    10 Hz to every connected client. When the client disconnects (any send
+    raises), the thread evicts it from the set."""
+    with bridge_node._ws_lock:
+        bridge_node._ws_telemetry_clients.add(ws)
+    bridge_node.get_logger().info(
+        f'WS /ws/telemetry connected ({len(bridge_node._ws_telemetry_clients)} total)')
+    # Send an immediate snapshot so the client doesn't have to wait for the
+    # next push tick to populate its UI.
+    try:
+        ws.send(json.dumps(bridge_node.build_telemetry_snapshot()))
+    except Exception:
+        pass
+    try:
+        while True:
+            # Block on receive so flask-sock keeps the socket alive. We
+            # don't expect any inbound traffic, but this also lets us
+            # detect client-initiated disconnects promptly.
+            msg = ws.receive(timeout=10)
+            if msg is None:
+                continue
+    except Exception:
+        pass
+    finally:
+        with bridge_node._ws_lock:
+            bridge_node._ws_telemetry_clients.discard(ws)
+        bridge_node.get_logger().info('WS /ws/telemetry disconnected')
+
+
+def _telemetry_pusher_loop():
+    """Background thread: push a telemetry snapshot to every connected WS
+    client at 10 Hz. Clients that fail to send are evicted on the next pass."""
+    period = 0.1  # 10 Hz
+    while True:
+        time.sleep(period)
+        if bridge_node is None:
+            continue
+        with bridge_node._ws_lock:
+            clients = list(bridge_node._ws_telemetry_clients)
+        if not clients:
+            continue
+        try:
+            payload = json.dumps(bridge_node.build_telemetry_snapshot())
+        except Exception:
+            continue
+        dead = []
+        for ws in clients:
+            try:
+                ws.send(payload)
+            except Exception:
+                dead.append(ws)
+        if dead:
+            with bridge_node._ws_lock:
+                for ws in dead:
+                    bridge_node._ws_telemetry_clients.discard(ws)
+
+
 @flask_app.route('/video_feed')
 def video_feed():
     def generate():
@@ -640,6 +1025,10 @@ def index():
 <li>POST /api/estop_clear — clear emergency stop</li>
 <li>POST /api/nav_goal — send Nav2 goal (JSON: x, y, yaw)</li>
 <li>POST /api/cancel_nav — cancel active Nav2 goal</li>
+<li>GET/POST /api/mode — read or set AUTO/MANUAL/ESTOP</li>
+<li><a href="/api/nav_status">/api/nav_status</a> — Nav2 action status</li>
+<li>WS /ws/control — joystick stream (input-only)</li>
+<li>WS /ws/telemetry — server-pushed telemetry snapshots @ 10 Hz</li>
 <li><a href="/video_feed">/video_feed</a> — camera MJPEG</li>
 </ul>
 </body></html>'''
@@ -658,6 +1047,10 @@ def main():
     # Spin ROS2 in a background thread
     spin_thread = threading.Thread(target=rclpy.spin, args=(bridge_node,), daemon=True)
     spin_thread.start()
+
+    # 10 Hz telemetry fan-out for /ws/telemetry subscribers
+    pusher_thread = threading.Thread(target=_telemetry_pusher_loop, daemon=True)
+    pusher_thread.start()
 
     bridge_node.get_logger().info('Starting Flask server on http://0.0.0.0:5000')
     flask_app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

@@ -59,6 +59,34 @@ class MarkerInfo {
 
 enum MarkerStatus { live, stale, lost }
 
+/// Current Nav2 goal pose — populated from /api/goal. `active` is false when
+/// no goal is in flight (e.g. just cancelled).
+class NavGoal {
+  final double x;
+  final double y;
+  final double yaw;
+  final bool active;
+  final double stamp;
+
+  const NavGoal({
+    this.x = 0,
+    this.y = 0,
+    this.yaw = 0,
+    this.active = false,
+    this.stamp = 0,
+  });
+
+  factory NavGoal.fromJson(Map<String, dynamic> json) {
+    return NavGoal(
+      x: (json['x'] ?? 0).toDouble(),
+      y: (json['y'] ?? 0).toDouble(),
+      yaw: (json['yaw'] ?? 0).toDouble(),
+      active: json['active'] == true,
+      stamp: (json['stamp'] ?? 0).toDouble(),
+    );
+  }
+}
+
 /// Map metadata from /api/map_info.
 class MapInfo {
   final int width;
