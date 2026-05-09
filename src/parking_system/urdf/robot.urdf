@@ -42,11 +42,18 @@
     </inertial>
   </link>
 
-  <!-- Joint: Base to Laser -->
+  <!-- Joint: Base to Laser
+       LiDAR is mounted facing rearward (cable on the back of the chassis,
+       0° marker pointing backwards) — yaw rotation π compensates so the
+       scan rays are correctly resolved in the base_link frame. The runtime
+       static_transform_publisher in nav2_live_slam.launch.py applies the
+       same rotation; this URDF entry is kept consistent so that any launch
+       which loads robot_state_publisher (e.g. visualization.launch.py)
+       agrees with the live-SLAM launch. -->
   <joint name="laser_joint" type="fixed">
     <parent link="base_link"/>
     <child link="laser_link"/>
-    <origin xyz="0.15 0.0 0.12" rpy="0 0 0"/>
+    <origin xyz="0.15 0.0 0.12" rpy="0 0 3.14159"/>
   </joint>
 
   <!-- Camera Link (IMX 219) -->

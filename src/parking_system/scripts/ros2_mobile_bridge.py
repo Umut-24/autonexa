@@ -42,7 +42,16 @@ import time
 import io
 import zlib
 from collections import deque
-from math import cos, sin, isinf, isnan
+from math import cos, sin, isinf, isnan, pi as MATH_PI
+
+# Static yaw rotation from base_link to laser_link, in radians.
+# Mirrors the static TF in nav2_live_slam.launch.py — kept as a constant
+# here because _scan_to_points() does its own math instead of going through
+# tf2 (each scan callback would otherwise pay a TF lookup it doesn't need;
+# the laser orientation is fixed by hardware).
+# 2026-05-07: LiDAR mounted facing rearward → static TF set to π in yaw,
+# this offset must match or the app's scan dots rotate off the walls.
+LASER_LINK_YAW_OFFSET = MATH_PI
 
 import numpy as np
 import cv2
@@ -931,18 +940,27 @@ class MobileBridgeNode(Node):
 
     @staticmethod
     def _scan_to_points(scan_msg, robot_x, robot_y, robot_yaw):
-        """Convert LaserScan to list of (x, y) points in map frame."""
+        """Convert LaserScan to list of (x, y) points in map frame.
+
+        The scan rays are emitted in the laser_link frame. Since 2026-05-07
+        laser_link is yaw-rotated by π relative to base_link (LiDAR mounted
+        rearward). To get points in the map frame we rotate by the composed
+        yaw (laser→base→map) before translating by the robot pose.
+        Without this composition, app scan dots end up mirrored across the
+        robot vs. the SLAM walls.
+        """
         points = []
         angle = scan_msg.angle_min
-        cos_y = cos(robot_yaw)
-        sin_y = sin(robot_yaw)
+        yaw_eff = robot_yaw + LASER_LINK_YAW_OFFSET
+        cos_y = cos(yaw_eff)
+        sin_y = sin(yaw_eff)
         for r in scan_msg.ranges:
             if (not isinf(r) and not isnan(r)
                     and scan_msg.range_min < r < scan_msg.range_max):
-                # Point in robot frame
+                # Point in laser_link frame
                 px = r * cos(angle)
                 py = r * sin(angle)
-                # Transform to map frame
+                # Rotate by yaw_eff (laser→base→map) and translate to robot pose
                 mx = robot_x + px * cos_y - py * sin_y
                 my = robot_y + px * sin_y + py * cos_y
                 points.append([round(mx, 4), round(my, 4)])

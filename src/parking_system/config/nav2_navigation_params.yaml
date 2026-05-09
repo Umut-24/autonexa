@@ -81,7 +81,10 @@ bt_navigator:
 controller_server:
   ros__parameters:
     use_sim_time: false
-    controller_frequency: 10.0
+    # 20 Hz keeps RPP responsive on tight curves where each 10 Hz tick was
+    # ~3 cm of travel — non-trivial when the lookahead floor sits near R_min.
+    # RPP is cheap (no trajectory sampling) so the Pi5 has the headroom.
+    controller_frequency: 20.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -109,9 +112,14 @@ controller_server:
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.30
-      lookahead_dist: 0.45
-      min_lookahead_dist: 0.25
-      max_lookahead_dist: 0.70
+      # Lookahead floor lifted to ≈ R_min (= wheelbase / tan(max_steer)
+      # = 0.25 / tan(30°) ≈ 0.43 m) so the carrot is always reachable by
+      # the chassis. With min < R_min, RPP's velocity-scaled lookahead can
+      # shrink the carrot inside a circle the car physically can't draw,
+      # which manifests as oscillation around the path through curves.
+      lookahead_dist: 0.55
+      min_lookahead_dist: 0.45
+      max_lookahead_dist: 0.80
       use_velocity_scaled_lookahead_dist: true
       transform_tolerance: 0.2
       use_collision_detection: true
@@ -120,7 +128,11 @@ controller_server:
       use_cost_regulated_linear_velocity_scaling: true
       cost_scaling_dist: 0.6
       cost_scaling_gain: 1.0
-      regulated_linear_scaling_min_radius: 0.45
+      # Slow-down threshold sits ABOVE R_min (0.43 m) so the regulator
+      # decelerates BEFORE the chassis hits its physical turning limit,
+      # not at it. Previously this matched R_min exactly and the slowdown
+      # only kicked in once we'd already asked for the impossible.
+      regulated_linear_scaling_min_radius: 0.55
       # Aligned with the chassis's actual minimum movable speed: the L298N
       # firmware deadband-kicks any non-zero SPEED to ~60% PWM, which on this
       # chassis corresponds to ≈ 0.18 m/s. Below this the bridge's
@@ -128,9 +140,14 @@ controller_server:
       # mid-curve. Keeping the controller's regulated floor above the bridge
       # gate prevents that stall.
       regulated_linear_scaling_min_speed: 0.18
-      # Ackermann chassis: no rotate-in-place, but parking phases need reverse.
+      # Ackermann chassis: no rotate-in-place. Reversing is disabled here
+      # paired with the planner's DUBIN default (see planner_server below)
+      # — non-parking goals never need reverse and DUBIN paths never have
+      # cusps, eliminating the cusp-tracking error class. The parking
+      # mission node will flip both back on (REEDS_SHEPP + allow_reversing)
+      # per leg when phases 5–6 of docs/parking_plan.md land.
       use_rotate_to_heading: false
-      allow_reversing: true
+      allow_reversing: false
       max_robot_pose_search_dist: 5.0
 
 local_costmap:
@@ -244,7 +261,12 @@ planner_server:
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       max_planning_time: 2.0
-      motion_model_for_search: "REEDS_SHEPP"
+      # DUBIN (forward-only) is the safe default — REEDS_SHEPP allows the
+      # planner to insert reverse cusps which RPP follows poorly on this
+      # chassis (steer slew + L298N deadband make every cusp a tracking
+      # error spike). Mission node will dynamically switch back to
+      # REEDS_SHEPP for the staging→final leg of parking maneuvers.
+      motion_model_for_search: "DUBIN"
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
