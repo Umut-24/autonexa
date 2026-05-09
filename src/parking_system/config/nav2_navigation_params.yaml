@@ -111,7 +111,13 @@ controller_server:
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.30
+      # 0.20 m/s default — testbed-friendly. At 0.30 the robot crossed a
+      # 2x2 m testbed in ~5 s (felt rushed); 0.20 takes ~10 s and gives the
+      # regulator + collision_monitor headroom to react. Just above the
+      # chassis's L298N 60% PWM deadband floor (~0.18 m/s) so steady-state
+      # cruise is feasible. User can live-tune via Settings -> Nav2 Max
+      # Speed slider; that rewrites this in runtime_overrides.yaml.
+      desired_linear_vel: 0.20
       # Lookahead floor lifted to ≈ R_min (= wheelbase / tan(max_steer)
       # = 0.25 / tan(30°) ≈ 0.43 m) so the carrot is always reachable by
       # the chassis. With min < R_min, RPP's velocity-scaled lookahead can
@@ -337,7 +343,7 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.3, 0.0, 0.5]
+    max_velocity: [0.2, 0.0, 0.5]
     min_velocity: [-0.3, 0.0, -0.5]
     max_accel: [1.5, 0.0, 2.0]
     max_decel: [-1.5, 0.0, -2.0]
