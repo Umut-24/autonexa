@@ -220,6 +220,17 @@ class MobileBridgeNode(Node):
         self._health_stats = {topic: {'last_t': 0.0, 'rate': 0.0}
                               for topic, _, _ in HEALTH_TOPICS}
 
+        # --- Desktop screenshot stream (1 Hz) ---
+        # Captures GNOME desktop via gnome-screenshot every ~1 s, downsamples
+        # to ~720p, JPEG-encodes, caches bytes. Lets the app render a
+        # low-rate "Desktop" tab so the user can see RViz / dev windows
+        # without VNC. Wayland-friendly (gnome-screenshot uses portal API).
+        self._desktop_lock = threading.Lock()
+        self._desktop_jpeg = None     # JPEG bytes of latest shot
+        self._desktop_stamp = 0.0
+        self._desktop_version = 0
+        self._desktop_warned = False  # log only once if capture is failing
+
         # --- QoS for map (transient local, reliable) ---
         map_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -568,6 +579,82 @@ class MobileBridgeNode(Node):
             self._cmd_vel_manual_pub.publish(zero)
         self.get_logger().warning(f'Safety mode -> {mode}')
         return True
+
+    # --- Desktop screenshot ---
+
+    def capture_desktop_once(self) -> bool:
+        """Capture one frame of the GNOME desktop, downsample, JPEG-encode,
+        and cache. Returns True on success, False on any failure (and warns
+        once via the logger). Designed to be called at ~1 Hz from a worker
+        thread; safe to call concurrently with HTTP fetches via the lock.
+        """
+        tmp_path = '/dev/shm/autonexa_desktop.png'
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+        # Inherit DISPLAY/XDG_RUNTIME_DIR from launch env; the bridge runs
+        # as the same user that owns the GNOME session, which is what
+        # gnome-screenshot needs to talk to the screenshot portal.
+        env = dict(os.environ)
+        env.setdefault('DISPLAY', ':0')
+        try:
+            uid = os.getuid()
+            env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{uid}')
+        except OSError:
+            pass
+
+        try:
+            result = subprocess.run(
+                ['gnome-screenshot', '-f', tmp_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                env=env, timeout=2.0,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            if not self._desktop_warned:
+                self.get_logger().warning(
+                    f'desktop capture disabled: gnome-screenshot {exc}')
+                self._desktop_warned = True
+            return False
+
+        if result.returncode != 0 or not os.path.exists(tmp_path):
+            if not self._desktop_warned:
+                self.get_logger().warning(
+                    f'gnome-screenshot rc={result.returncode} '
+                    f'stderr={result.stderr.decode("utf-8", errors="replace")[:200]!r}')
+                self._desktop_warned = True
+            return False
+
+        img = cv2.imread(tmp_path)
+        if img is None:
+            return False
+
+        # Downsample if wider than 1280 px so a 1080p source becomes ~720p.
+        # Keeps JPEG payload around 80–200 KB at q=60.
+        h, w = img.shape[:2]
+        if w > 1280:
+            new_w = 1280
+            new_h = int(h * (new_w / w))
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        if not ok:
+            return False
+
+        with self._desktop_lock:
+            self._desktop_jpeg = buf.tobytes()
+            self._desktop_stamp = time.time()
+            self._desktop_version += 1
+            # Reset warning latch on success so a recovery is logged.
+            self._desktop_warned = False
+        return True
+
+    def get_desktop_jpeg(self):
+        with self._desktop_lock:
+            return self._desktop_jpeg, self._desktop_version, self._desktop_stamp
 
     # --- Health stats ---
 
@@ -1785,6 +1872,28 @@ def api_health():
     return jsonify({'topics': bridge_node.get_health()})
 
 
+# ---------------------------------------------------------------------------
+#  Desktop screenshot stream (1 Hz)
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/desktop_version')
+def api_desktop_version():
+    """Cheap version probe for ETag-style polling. Bumps every time
+    capture_desktop_once() succeeds (~1 Hz). Clients only refetch the
+    JPEG when v changes."""
+    _, v, stamp = bridge_node.get_desktop_jpeg()
+    return jsonify({'v': v, 'stamp': stamp})
+
+
+@flask_app.route('/api/desktop_shot')
+def api_desktop_shot():
+    """Latest desktop screenshot as JPEG bytes (~80–200 KB at 720p q=60)."""
+    jpeg, _, _ = bridge_node.get_desktop_jpeg()
+    if jpeg is None:
+        return jsonify({'error': 'No desktop capture available yet'}), 503
+    return Response(jpeg, mimetype='image/jpeg')
+
+
 # =============================================================================
 #  WebSocket endpoints — joystick (high-rate) + telemetry push
 # =============================================================================
@@ -1848,6 +1957,23 @@ def ws_telemetry(ws):
         with bridge_node._ws_lock:
             bridge_node._ws_telemetry_clients.discard(ws)
         bridge_node.get_logger().info('WS /ws/telemetry disconnected')
+
+
+def _desktop_capture_loop():
+    """Background thread: capture the GNOME desktop once per second and
+    cache the JPEG. Failures are logged once via capture_desktop_once and
+    silently retried on the next tick (the Pi's screenshot portal can
+    blip during heavy load)."""
+    period = 1.0
+    while True:
+        time.sleep(period)
+        if bridge_node is None:
+            continue
+        try:
+            bridge_node.capture_desktop_once()
+        except Exception:
+            # Last-resort safety net — never let this loop crash the bridge.
+            pass
 
 
 def _telemetry_pusher_loop():
@@ -1924,6 +2050,8 @@ def index():
 <li>POST /api/relocalize — set robot pose (x,y,yaw)</li>
 <li>GET/POST /api/params?node=&lt;name&gt; — live param tuner (whitelist only)</li>
 <li><a href="/api/health">/api/health</a> — topic rates / staleness</li>
+<li><a href="/api/desktop_shot">/api/desktop_shot</a> — 1 Hz GNOME desktop JPEG (Wayland-friendly)</li>
+<li><a href="/api/desktop_version">/api/desktop_version</a> — ETag counter for desktop_shot</li>
 <li>WS /ws/control — joystick stream (input-only)</li>
 <li>WS /ws/telemetry — server-pushed telemetry snapshots @ 10 Hz</li>
 <li><a href="/video_feed">/video_feed</a> — camera MJPEG</li>
@@ -1948,6 +2076,11 @@ def main():
     # 10 Hz telemetry fan-out for /ws/telemetry subscribers
     pusher_thread = threading.Thread(target=_telemetry_pusher_loop, daemon=True)
     pusher_thread.start()
+
+    # 1 Hz desktop capture for the Desktop tab. Cheap on the Pi and stays
+    # silent if gnome-screenshot is missing (capture_desktop_once warns once).
+    desktop_thread = threading.Thread(target=_desktop_capture_loop, daemon=True)
+    desktop_thread.start()
 
     bridge_node.get_logger().info('Starting Flask server on http://0.0.0.0:5000')
     flask_app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
