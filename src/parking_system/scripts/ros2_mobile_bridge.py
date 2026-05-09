@@ -587,14 +587,13 @@ class MobileBridgeNode(Node):
         and cache. Returns True on success, False on any failure (and warns
         once via the logger). Designed to be called at ~1 Hz from a worker
         thread; safe to call concurrently with HTTP fetches via the lock.
+
+        Storage: gnome-screenshot writes to /dev/shm (RAM-backed tmpfs, not
+        the SD card). The temp PNG is deleted immediately after we've
+        decoded it into memory, so steady-state on-disk footprint is zero
+        and RAM usage is just the cached JPEG bytes (~100 KB).
         """
         tmp_path = '/dev/shm/autonexa_desktop.png'
-        try:
-            os.unlink(tmp_path)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            pass
 
         # Inherit DISPLAY/XDG_RUNTIME_DIR from launch env; the bridge runs
         # as the same user that owns the GNOME session, which is what
@@ -604,6 +603,15 @@ class MobileBridgeNode(Node):
         try:
             uid = os.getuid()
             env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{uid}')
+        except OSError:
+            pass
+
+        # Pre-clean any leftover from a previous failed cycle so we never
+        # accidentally serve a stale frame on a transient failure.
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
         except OSError:
             pass
 
@@ -628,7 +636,17 @@ class MobileBridgeNode(Node):
                 self._desktop_warned = True
             return False
 
-        img = cv2.imread(tmp_path)
+        try:
+            img = cv2.imread(tmp_path)
+        finally:
+            # Delete the temp PNG immediately — we have the bytes in `img`
+            # now, so the file has served its purpose. Keeps /dev/shm at
+            # zero between captures.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
         if img is None:
             return False
 
