@@ -14,6 +14,8 @@ typedef struct {
     uint pwm_slice;
     uint pwm_chan;
     bool reversed;   /* if true, flip the sign of duty before applying */
+    int8_t last_duty; /* previous cycle's duty (signed); 0 = was stopped */
+    uint8_t kick_remaining; /* kick ticks left; 0 = not kicking */
 } l298n_chan_t;
 
 /* Index 0 = channel 1 (LEFT motor on OUT3-OUT4),
@@ -122,15 +124,41 @@ bool l298n_set_speed(uint8_t channel, int8_t speed)
     int8_t s = clamp_speed(speed);
     /* Map [-MOTOR_SPEED_MAX, +MOTOR_SPEED_MAX] → [-100, +100] %. */
     int duty = ((int)s * 100) / MOTOR_SPEED_MAX;
-    /* Static-friction kick-start: snap any non-zero duty up to the
-     * deadband floor so motors actually rotate. Does not affect duty=0
-     * (motors coast / stop normally). RAW_PWM path bypasses this. */
-    if (duty > 0 && duty < MOTOR_DEADBAND_PCT) {
-        duty = MOTOR_DEADBAND_PCT;
-    } else if (duty < 0 && duty > -MOTOR_DEADBAND_PCT) {
-        duty = -MOTOR_DEADBAND_PCT;
+
+    if (duty == 0) {
+        /* Full stop — clear kick state. */
+        channels[idx].kick_remaining = 0;
+        channels[idx].last_duty = 0;
+        apply_duty(idx, 0);
+        return true;
     }
-    apply_duty(idx, duty);
+
+    /* Kick-start: on 0→non-zero or direction reversal, fire a brief
+     * high-duty pulse to break static friction / gearbox stiction.
+     * Once the motor is already spinning in the same direction, skip
+     * straight to the commanded duty (dynamic friction is much lower). */
+    bool was_stopped = (channels[idx].last_duty == 0);
+    bool dir_changed = (duty > 0) != (channels[idx].last_duty > 0);
+    if (was_stopped || dir_changed) {
+        channels[idx].kick_remaining = MOTOR_KICK_TICKS;
+    }
+
+    if (channels[idx].kick_remaining > 0) {
+        int kick = (duty > 0) ? MOTOR_KICK_DUTY_PCT : -MOTOR_KICK_DUTY_PCT;
+        apply_duty(idx, kick);
+        channels[idx].kick_remaining--;
+    } else {
+        /* Motor already spinning — apply commanded duty, but clamp to
+         * the minimum sustainable duty so we don't stall under load. */
+        if (duty > 0 && duty < MOTOR_MIN_RUN_PCT) {
+            duty = MOTOR_MIN_RUN_PCT;
+        } else if (duty < 0 && duty > -MOTOR_MIN_RUN_PCT) {
+            duty = -MOTOR_MIN_RUN_PCT;
+        }
+        apply_duty(idx, duty);
+    }
+
+    channels[idx].last_duty = (duty > 0) ? 1 : -1;
     return true;
 }
 

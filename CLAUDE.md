@@ -239,15 +239,15 @@ For the bench-test CLI build (`autonexa_pico.uf2`) — a separate ASCII line pro
 | Item | Value | Rationale |
 |------|------:|-----------|
 | Costmap resolution | 0.02 m (2 cm) | Parking slot (~0.5×1.0 m) = 25×50 cells — enough for ArUco docking |
-| `max_vel_x` (DWB) | 0.30 m/s | Conservative for parking precision |
+| `desired_linear_vel` (RPP) | 0.15 m/s | Tight-testbed tuning; user can live-tune via speed slider |
 | `max_vel_theta` | 0.50 rad/s | ~28°/s |
-| Goal tolerance | 0.05 m XY, 0.10 rad yaw | Tight but reachable |
+| Goal tolerance | 0.15 m XY, 0.10 rad yaw | Loosened for L298N deadband |
 | Local costmap | 2×2 m rolling, 20 cm inflation | Generous margin (robot radius 10 cm; URDF footprint underestimates linkage) |
 | Global costmap | full `/map`, 15 cm inflation | Smaller than local so planner doesn't route unnecessarily wide |
 | `allow_unknown` | `false` | Robot won't plan into unmapped space — survey first, then goal |
-| DWB critics (high weights) | PathAlign/PathDist/RotateToGoal = 32 | Strongly biased to path-follow |
+| RPP lookahead | 0.40 m (min 0.30, max 0.60) | Shortened for 1-2 m testbed; prevents carrot landing beyond turns |
 
-DWB still uses a differential-drive motion model (known limitation). Ackermann-aware Smac Hybrid-A* migration is planned but deferred.
+Controller is Regulated Pure Pursuit (RPP) with SMAC Hybrid-A* planner (REEDS_SHEPP, `allow_reversing: true`).
 
 ## Pico Bridge (cmd_vel → micro-ROS)
 
@@ -278,7 +278,7 @@ DWB still uses a differential-drive motion model (known limitation). Ackermann-a
 | `max_wz_radps` | 0.8 | Yaw cap |
 | `max_ax_mps2` / `max_aw_radps2` | 0.8 / 1.2 | Per-cycle accel caps |
 | `max_steer_rate_radps` | 3.0 | Servo slew limit (rad/s in steering-angle space) |
-| `min_vx_creep` | 0.05 | Sub-deadband vx → SPEED 0 (L298N can't trim slow) |
+| `min_vx_creep` | 0.02 | Sub-deadband vx → SPEED 0 (lowered to let slow curve speeds through) |
 | `vx_polarity` | +1 | Forward/back inversion (calibration wizard flips this) |
 | `servo_polarity` | -1 | Steering inversion (chassis-specific) |
 | `servo_center_us` / `servo_us_min` / `servo_us_max` | 1650 / 1100 / 1900 | Calibrated servo bounds |

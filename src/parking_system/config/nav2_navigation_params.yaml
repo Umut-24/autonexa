@@ -101,31 +101,31 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 15 cm tolerance: tightened from 5 cm because the L298N chassis has a
-      # ~60% PWM static-friction deadband — it can't trim the last few cm at
-      # creep speed without lurching. Loosen tolerance so the controller
-      # commits to one final approach and stops cleanly.
-      xy_goal_tolerance: 0.15
+      # 20 cm: with regulated_linear_scaling_min_speed at 0.10 the robot
+      # can approach slowly but the kick-start still produces a brief lurch.
+      # 0.20 m lets the controller commit and stop cleanly without hunting.
+      xy_goal_tolerance: 0.20
       yaw_goal_tolerance: 0.1  # ~6 degrees
     
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      # 0.20 m/s default — testbed-friendly. At 0.30 the robot crossed a
-      # 2x2 m testbed in ~5 s (felt rushed); 0.20 takes ~10 s and gives the
-      # regulator + collision_monitor headroom to react. Just above the
-      # chassis's L298N 60% PWM deadband floor (~0.18 m/s) so steady-state
-      # cruise is feasible. User can live-tune via Settings -> Nav2 Max
+      # 0.15 m/s — tight-testbed tuning.  At 0.20 the robot was still too
+      # fast for 1-2 m curves; RPP's carrot landed beyond turns and the
+      # chassis drove opposite/perpendicular to the path. 0.15 gives the
+      # regulator + collision_monitor more headroom and keeps the velocity-
+      # scaled lookahead short enough that the carrot stays on the near
+      # side of tight curves. User can live-tune via Settings -> Nav2 Max
       # Speed slider; that rewrites this in runtime_overrides.yaml.
-      desired_linear_vel: 0.20
-      # Lookahead floor lifted to ≈ R_min (= wheelbase / tan(max_steer)
-      # = 0.25 / tan(30°) ≈ 0.43 m) so the carrot is always reachable by
-      # the chassis. With min < R_min, RPP's velocity-scaled lookahead can
-      # shrink the carrot inside a circle the car physically can't draw,
-      # which manifests as oscillation around the path through curves.
-      lookahead_dist: 0.55
-      min_lookahead_dist: 0.45
-      max_lookahead_dist: 0.80
+      desired_linear_vel: 0.15
+      # Lookahead shortened for 1-2 m testbed so the carrot doesn't land
+      # around corners or beyond cusps. At 0.45 m min the carrot was
+      # 22-45% of the testbed — too far for tight turns. 0.30 m still
+      # exceeds the minimum useful distance but keeps the carrot close
+      # enough that RPP can track tight REEDS_SHEPP arcs.
+      lookahead_dist: 0.40
+      min_lookahead_dist: 0.30
+      max_lookahead_dist: 0.60
       use_velocity_scaled_lookahead_dist: true
       transform_tolerance: 0.2
       use_collision_detection: true
@@ -134,18 +134,16 @@ controller_server:
       use_cost_regulated_linear_velocity_scaling: true
       cost_scaling_dist: 0.6
       cost_scaling_gain: 1.0
-      # Slow-down threshold sits ABOVE R_min (0.43 m) so the regulator
-      # decelerates BEFORE the chassis hits its physical turning limit,
-      # not at it. Previously this matched R_min exactly and the slowdown
-      # only kicked in once we'd already asked for the impossible.
-      regulated_linear_scaling_min_radius: 0.55
-      # Aligned with the chassis's actual minimum movable speed: the L298N
-      # firmware deadband-kicks any non-zero SPEED to ~60% PWM, which on this
-      # chassis corresponds to ≈ 0.18 m/s. Below this the bridge's
-      # min_vx_creep (0.05 m/s) gates output to SPEED 0, stalling the robot
-      # mid-curve. Keeping the controller's regulated floor above the bridge
-      # gate prevents that stall.
-      regulated_linear_scaling_min_speed: 0.18
+      # Start slowing at 0.50 m curvature radius — slightly above R_min
+      # (0.43 m) so the regulator decelerates before the chassis hits its
+      # physical turning limit.
+      regulated_linear_scaling_min_radius: 0.50
+      # Lowered from 0.18 to 0.10 so the controller CAN command slow
+      # speeds in tight curves. Below ~0.18 the L298N deadband means the
+      # motor will lurch or stall, but the cusp-detection grace period in
+      # the bridge (Fix 4) handles the transition; a brief stall is better
+      # than driving off-path at 0.18 m/s when the curve needs 0.10.
+      regulated_linear_scaling_min_speed: 0.10
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
       # DUBIN's forward-only paths produced contorted loops that satisfied
@@ -155,7 +153,11 @@ controller_server:
       # acceptable for parking-style maneuvers in tight spaces.
       use_rotate_to_heading: false
       allow_reversing: true
-      max_robot_pose_search_dist: 5.0
+      # Clamped to testbed scale so RPP only matches nearby path segments.
+      # At 5.0 m (previous default), REEDS_SHEPP cusps that overlap in XY
+      # caused RPP to match the robot to the wrong segment (e.g. reverse
+      # when it should be forward), producing opposite/perpendicular motion.
+      max_robot_pose_search_dist: 1.0
 
 local_costmap:
   local_costmap:
@@ -343,15 +345,15 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.2, 0.0, 0.5]
+    max_velocity: [0.15, 0.0, 0.5]
     min_velocity: [-0.3, 0.0, -0.5]
     max_accel: [1.5, 0.0, 2.0]
     max_decel: [-1.5, 0.0, -2.0]
     odom_topic: "odom"
     odom_duration: 0.1
-    # vx deadband matches the bridge's min_vx_creep (0.05 m/s). Keeps the
-    # smoother from emitting fractional values the chassis can't realize.
-    deadband_velocity: [0.05, 0.0, 0.0]
+    # Smoother deadband removed — let small velocities through. The
+    # bridge's own min_vx_creep (0.02 m/s) handles the final gate.
+    deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
 
 collision_monitor:
