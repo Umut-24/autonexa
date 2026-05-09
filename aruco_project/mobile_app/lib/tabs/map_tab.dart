@@ -30,6 +30,12 @@ class _MapTabState extends State<MapTab> {
   bool _showTrail = true;
   bool _showPlan = true;
 
+  // Most recent tap in map-frame meters. Surfaced in the bottom info bar so
+  // the user can sanity-check the tap-to-coordinate math against the robot's
+  // displayed pose / known wall locations / RViz when debugging.
+  double? _lastTapMx;
+  double? _lastTapMy;
+
   // Decoded map image — rebuilt asynchronously when the PNG bytes change so
   // the painter can blit it directly via canvas.drawImage. Caching by length
   // is good enough as a change-detection cheat (the bridge increments
@@ -94,6 +100,10 @@ class _MapTabState extends State<MapTab> {
   void _onTapMap(BuildContext context, TapUpDetails details, ConnectionService conn) {
     final coords = _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
     if (coords == null || conn.mapImage == null) return;
+    setState(() {
+      _lastTapMx = coords[0];
+      _lastTapMy = coords[1];
+    });
     NavGoalDialog.show(
       context,
       conn,
@@ -252,33 +262,46 @@ class _MapTabState extends State<MapTab> {
                 borderRadius: BorderRadius.circular(16),
                 child: mapImage == null || !conn.isConnected || _decodedMap == null
                     ? _placeholder(colors)
-                    : GestureDetector(
-                        onTapUp: (d) => _onTapMap(context, d, conn),
-                        onLongPressStart: (d) => _onLongPressMap(context, d, conn),
-                        child: InteractiveViewer(
-                          transformationController: _transformController,
-                          minScale: 0.5,
-                          maxScale: 10,
-                          constrained: false,
-                          child: CustomPaint(
-                            painter: _MapPainter(
-                              mapImage: _decodedMap!,
-                              pose: status.pose,
-                              markers: _showMarkers ? status.markers : {},
-                              scanPoints: _showScan ? conn.scanPoints : [],
-                              pathTrail: _showTrail ? conn.pathTrail : [],
-                              plannedPath: _showPlan ? conn.plannedPath : [],
-                              goal: goal.active ? goal : null,
-                              waypoints: conn.namedWaypoints,
-                              mapInfo: status.mapInfo,
-                              accentColor: colors.accent,
-                            ),
-                            size: Size(
-                              _decodedMap!.width.toDouble(),
-                              _decodedMap!.height.toDouble(),
+                    : Stack(
+                        children: [
+                          GestureDetector(
+                            onTapUp: (d) => _onTapMap(context, d, conn),
+                            onLongPressStart: (d) => _onLongPressMap(context, d, conn),
+                            child: InteractiveViewer(
+                              transformationController: _transformController,
+                              minScale: 0.5,
+                              maxScale: 10,
+                              constrained: false,
+                              child: CustomPaint(
+                                painter: _MapPainter(
+                                  mapImage: _decodedMap!,
+                                  pose: status.pose,
+                                  markers: _showMarkers ? status.markers : {},
+                                  scanPoints: _showScan ? conn.scanPoints : [],
+                                  pathTrail: _showTrail ? conn.pathTrail : [],
+                                  plannedPath: _showPlan ? conn.plannedPath : [],
+                                  goal: goal.active ? goal : null,
+                                  waypoints: conn.namedWaypoints,
+                                  mapInfo: status.mapInfo,
+                                  accentColor: colors.accent,
+                                ),
+                                size: Size(
+                                  _decodedMap!.width.toDouble(),
+                                  _decodedMap!.height.toDouble(),
+                                ),
+                              ),
                             ),
                           ),
-                        ),
+                          // Cardinal-direction compass: pinned to top-right,
+                          // does NOT pan/zoom with the map. Lets the user
+                          // verify which world axis the screen is showing as
+                          // "up" — should match RViz's orientation.
+                          const Positioned(
+                            top: 8,
+                            right: 8,
+                            child: _MapCompass(),
+                          ),
+                        ],
                       ),
               ),
             ),
@@ -295,6 +318,13 @@ class _MapTabState extends State<MapTab> {
                 _infoItem('Scan', '${status.scan.count}', colors),
                 _infoItem('Plan', '${conn.plannedPath.length}', colors),
                 _infoItem('Nav2', conn.navStatus, colors),
+                _infoItem(
+                  'Last tap',
+                  _lastTapMx == null
+                      ? '—'
+                      : '${_lastTapMx!.toStringAsFixed(2)}, ${_lastTapMy!.toStringAsFixed(2)}',
+                  colors,
+                ),
               ],
             ),
           ),
@@ -607,8 +637,169 @@ class _MapPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
     canvas.drawCircle(robotPos, 6, outlinePaint);
+
+    // 7. Debug: world-frame axis gizmo at (0, 0). Mirrors RViz's tf axes
+    //    display so we can A/B compare orientation. RED = +X, GREEN = +Y.
+    //    If these arrows point the same direction in the app and in RViz,
+    //    the maps are oriented identically. If they don't, that's the bug.
+    final origin = toPixel(0.0, 0.0);
+    const axisLenM = 0.30; // 30 cm in world frame
+    final pXEnd = toPixel(axisLenM, 0.0);
+    final pYEnd = toPixel(0.0, axisLenM);
+    final xPaint = Paint()
+      ..color = AppColors.danger
+      ..strokeWidth = 2.5
+      ..strokeCap = StrokeCap.round;
+    final yPaint = Paint()
+      ..color = AppColors.success
+      ..strokeWidth = 2.5
+      ..strokeCap = StrokeCap.round;
+    canvas.drawLine(origin, pXEnd, xPaint);
+    canvas.drawLine(origin, pYEnd, yPaint);
+    // Origin dot
+    canvas.drawCircle(origin, 2.5,
+        Paint()..color = Colors.white.withValues(alpha: 0.95));
+    // Axis tip labels
+    void drawTip(Offset p, String label, Color color) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: TextStyle(
+            fontSize: 10, fontWeight: FontWeight.w700,
+            color: color,
+            shadows: const [Shadow(color: Color(0xCC000000), blurRadius: 2)],
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(p.dx + 3, p.dy - 6));
+    }
+    drawTip(pXEnd, 'X', AppColors.danger);
+    drawTip(pYEnd, 'Y', AppColors.success);
+
+    // 8. Debug: scale bar (0.5 m horizontal). Drawn in painter coords so it
+    //    pans/zooms with the map; its on-screen length always represents
+    //    0.5 m in the world frame.
+    const scaleM = 0.5;
+    final barLenPx = scaleM / mapInfo!.resolution;
+    final barY = mapInfo!.height - 14.0; // ~14 px above the bottom edge
+    final barXStart = 14.0;
+    final barPaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.9)
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.square;
+    canvas.drawLine(
+      Offset(barXStart, barY),
+      Offset(barXStart + barLenPx, barY),
+      barPaint,
+    );
+    // Tick marks on each end
+    canvas.drawLine(Offset(barXStart, barY - 4),
+        Offset(barXStart, barY + 4), barPaint);
+    canvas.drawLine(Offset(barXStart + barLenPx, barY - 4),
+        Offset(barXStart + barLenPx, barY + 4), barPaint);
+    final scaleTp = TextPainter(
+      text: TextSpan(
+        text: '0.5 m',
+        style: TextStyle(
+          fontSize: 10, fontWeight: FontWeight.w600,
+          color: Colors.white.withValues(alpha: 0.95),
+          shadows: const [Shadow(color: Color(0xCC000000), blurRadius: 2)],
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    scaleTp.paint(canvas, Offset(barXStart + barLenPx / 2 - scaleTp.width / 2,
+        barY - 14));
   }
 
   @override
   bool shouldRepaint(covariant _MapPainter oldDelegate) => true;
+}
+
+// ─── Compass overlay ────────────────────────────────────────────────────────
+
+/// Static cardinal-direction indicator pinned outside the InteractiveViewer
+/// (so it does NOT pan/zoom with the map). Shows N/E/S/W around the rim and
+/// labels the screen's "up" direction with the world axis it corresponds to.
+///
+/// With the bridge's `np.flipud` rendering, screen-up = world +Y, so this
+/// always shows "+Y up". If the user sees that in RViz "screen up" maps to
+/// a different world axis (e.g. +X, or -Y), that's the bug.
+class _MapCompass extends StatelessWidget {
+  const _MapCompass();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 36, height: 36,
+            child: CustomPaint(painter: _CompassPainter()),
+          ),
+          const SizedBox(width: 8),
+          const Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('screen↑',
+                  style: TextStyle(fontSize: 9, color: Colors.white70,
+                      fontWeight: FontWeight.w600, letterSpacing: 0.4)),
+              Text('= world +Y',
+                  style: TextStyle(fontSize: 11, color: Colors.white,
+                      fontFamily: 'monospace', fontWeight: FontWeight.w700)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CompassPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final c = Offset(size.width / 2, size.height / 2);
+    final r = size.width / 2 - 1;
+    final ring = Paint()
+      ..color = Colors.white.withValues(alpha: 0.7)
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+    canvas.drawCircle(c, r, ring);
+    // Arrow pointing UP (north on screen)
+    final arrow = Path()
+      ..moveTo(c.dx, c.dy - r + 4)
+      ..lineTo(c.dx - 4, c.dy + 2)
+      ..lineTo(c.dx + 4, c.dy + 2)
+      ..close();
+    canvas.drawPath(arrow,
+        Paint()..color = Colors.redAccent.withValues(alpha: 0.95));
+    // Cardinal letters around the rim (N at top of screen)
+    void cardinal(String letter, Offset offset) {
+      final tp = TextPainter(
+        text: TextSpan(
+          text: letter,
+          style: const TextStyle(
+            fontSize: 8, fontWeight: FontWeight.w800, color: Colors.white,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, offset - Offset(tp.width / 2, tp.height / 2));
+    }
+    cardinal('N', Offset(c.dx, c.dy - r + 6));
+    cardinal('S', Offset(c.dx, c.dy + r - 6));
+    cardinal('E', Offset(c.dx + r - 6, c.dy));
+    cardinal('W', Offset(c.dx - r + 6, c.dy));
+  }
+
+  @override
+  bool shouldRepaint(covariant _CompassPainter oldDelegate) => false;
 }
