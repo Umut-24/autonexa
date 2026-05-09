@@ -105,13 +105,11 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('max_ax_mps2', 0.8)
         self.declare_parameter('max_aw_radps2', 1.2)
 
-        # Deadband gate: the L298N firmware snaps any non-zero SPEED to a
-        # ~60% PWM kick (see MOTOR_DEADBAND_PCT in pico_firmware/include/config.h).
-        # That makes Nav2's slow-creep approach lurch instead of trim. If the
-        # smoothed |vx| is below this threshold, send SPEED 0 and let the
-        # chassis coast — combined with a looser goal_xy_tolerance this gives
-        # clean stops without overshoot.
-        self.declare_parameter('min_vx_creep', 0.05)
+        # Deadband gate: the L298N firmware uses a kick-start to break
+        # static friction, then sustains at MOTOR_MIN_RUN_PCT (~30%).
+        # Sub-creep vx still gets SPEED 0 to avoid micro-lurching at the
+        # goal approach.
+        self.declare_parameter('min_vx_creep', 0.02)
 
         self.declare_parameter('wheelbase_m', 0.25)
         # 100 = vx 0.30 m/s -> SPEED 30 -> 100% PWM duty on the L298N path.
@@ -186,6 +184,8 @@ class Nav2PicoBridge(Node):
         self._last_speed_sent = None
         self._last_steer_sent_rad = 0.0
         self._last_steer_t = self.get_clock().now()
+        self._last_vx_sign = 0          # +1, -1, or 0
+        self._cusp_cooldown_end = None  # Time object; non-None ⇒ in cooldown
         self._lock_fh = None
         self._serial = None
         self._write_lock = threading.Lock()
@@ -437,6 +437,25 @@ class Nav2PicoBridge(Node):
         # Steering still tracks the commanded wz so the wheels keep pointing
         # toward the goal direction even while the chassis is coasting.
         gated_vx = 0.0 if abs(self.output.vx) < self.min_vx_creep else self.output.vx
+
+        # Cusp detection: when vx changes sign (forward↔reverse), hold speed
+        # at zero for 150 ms so the servo can swing to the new steering angle
+        # before the wheels drive.  Without this, RPP's REEDS_SHEPP cusps
+        # cause the robot to drive several centimeters with stale steering.
+        cur_sign = (1 if gated_vx > 0 else (-1 if gated_vx < 0 else 0))
+        if (self._last_vx_sign != 0 and cur_sign != 0
+                and cur_sign != self._last_vx_sign):
+            self._cusp_cooldown_end = now + Duration(seconds=0.25)
+            self.get_logger().info(
+                f"Cusp detected ({self._last_vx_sign:+d}→{cur_sign:+d}), "
+                f"holding speed=0 for 250 ms")
+        if cur_sign != 0:
+            self._last_vx_sign = cur_sign
+        if (self._cusp_cooldown_end is not None
+                and now < self._cusp_cooldown_end):
+            gated_vx = 0.0
+        elif self._cusp_cooldown_end is not None:
+            self._cusp_cooldown_end = None
 
         speed = self._vx_to_speed_pulses(gated_vx)
         steer = self._vx_wz_to_steer(self.output.vx, self.output.wz)

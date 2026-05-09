@@ -59,17 +59,19 @@
 #define MOTOR_SPEED_MAX      30      /* SPEED 30  -> 100% PWM duty         */
 #define MOTOR_SPEED_MIN     -30      /* SPEED -30 -> 100% reverse duty     */
 
-/* Static-friction kick-start: motors on this chassis need ~60% duty
- * cycle to actually start rotating under load (verified on the bench
- * via RAW_PWM mag sweep — 60% spins slowly, below that doesn't move).
- * Any non-zero SPEED command is snapped up to this floor so the GUI's
- * W/S keys (and Nav2 vx commands) produce real motion even at low
- * commanded speeds. SPEED 0 still produces 0% duty (full stop).
+/* Kick-start: motors need ~60% duty to overcome static friction from
+ * standstill (1:30 gearbox + ground contact), but once spinning they
+ * sustain at much lower duty (~25-30%).  MOTOR_KICK_DUTY_PCT is applied
+ * for MOTOR_KICK_TICKS control cycles on any 0→non-zero transition,
+ * then the real commanded duty takes over.  MOTOR_MIN_RUN_PCT is the
+ * lowest duty we send while the motor is already spinning — below this
+ * the motor stalls under load, so we clamp up.  Set MOTOR_KICK_TICKS=0
+ * to disable the kick and fall back to a flat deadband at MIN_RUN.
  *
- * RAW_PWM bypasses this — it's a diagnostic verb where the literal duty
- * matters (e.g. for hunting the deadband threshold). Set to 0 to disable
- * the kick-start entirely. */
-#define MOTOR_DEADBAND_PCT   60
+ * RAW_PWM bypasses all of this. */
+#define MOTOR_KICK_DUTY_PCT   60   /* brief pulse to break stiction      */
+#define MOTOR_KICK_TICKS       3   /* 3 × 20 ms = 60 ms kick duration    */
+#define MOTOR_MIN_RUN_PCT     30   /* min sustainable duty once spinning  */
 
 /* ---------- Servo (Steering) — LD-1501MG ---------- */
 #define SERVO_PIN            15      /* GPIO 15 (servo debug wiring)       */
