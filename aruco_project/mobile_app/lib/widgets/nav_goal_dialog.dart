@@ -52,7 +52,14 @@ class _NavGoalDialogState extends State<NavGoalDialog> {
     super.initState();
     _xCtrl = TextEditingController(text: widget.initialX?.toStringAsFixed(2) ?? '');
     _yCtrl = TextEditingController(text: widget.initialY?.toStringAsFixed(2) ?? '');
-    _yawCtrl = TextEditingController(text: (widget.initialYaw ?? 0).toStringAsFixed(2));
+    // Fallback (when no initialYaw is provided): use the robot's current
+    // yaw, NOT a hardcoded 0. The map-tap path already passes an explicit
+    // initialYaw so this only affects callers like the Home tab's "Nav
+    // Goal" button — but those previously sent yaw=0 every time, forcing
+    // Nav2 into contorted paths. Defaulting to the robot's heading is a
+    // safer "neutral" goal yaw.
+    final fallbackYaw = widget.initialYaw ?? widget.connection.robotStatus.pose.yaw;
+    _yawCtrl = TextEditingController(text: fallbackYaw.toStringAsFixed(2));
   }
 
   @override

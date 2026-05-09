@@ -35,6 +35,7 @@ class _MapTabState extends State<MapTab> {
   // displayed pose / known wall locations / RViz when debugging.
   double? _lastTapMx;
   double? _lastTapMy;
+  double? _lastTapYaw;
 
   // Decoded map image — rebuilt asynchronously when the PNG bytes change so
   // the painter can blit it directly via canvas.drawImage. Caching by length
@@ -100,15 +101,23 @@ class _MapTabState extends State<MapTab> {
   void _onTapMap(BuildContext context, TapUpDetails details, ConnectionService conn) {
     final coords = _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
     if (coords == null || conn.mapImage == null) return;
+    // Auto-yaw: have the robot face TOWARD the tapped point (its direction of
+    // approach), so the planner doesn't have to construct contorted paths
+    // just to satisfy a hardcoded yaw=0. User can still override in the
+    // dialog before sending.
+    final pose = conn.robotStatus.pose;
+    final autoYaw = math.atan2(coords[1] - pose.y, coords[0] - pose.x);
     setState(() {
       _lastTapMx = coords[0];
       _lastTapMy = coords[1];
+      _lastTapYaw = autoYaw;
     });
     NavGoalDialog.show(
       context,
       conn,
       initialX: double.parse(coords[0].toStringAsFixed(2)),
       initialY: double.parse(coords[1].toStringAsFixed(2)),
+      initialYaw: double.parse(autoYaw.toStringAsFixed(2)),
     );
   }
 
@@ -322,7 +331,8 @@ class _MapTabState extends State<MapTab> {
                   'Last tap',
                   _lastTapMx == null
                       ? '—'
-                      : '${_lastTapMx!.toStringAsFixed(2)}, ${_lastTapMy!.toStringAsFixed(2)}',
+                      : '${_lastTapMx!.toStringAsFixed(2)}, ${_lastTapMy!.toStringAsFixed(2)} '
+                        '@${(_lastTapYaw! * 57.2958).toStringAsFixed(0)}°',
                   colors,
                 ),
               ],
