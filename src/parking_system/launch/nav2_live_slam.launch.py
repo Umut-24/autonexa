@@ -79,7 +79,7 @@ def generate_launch_description():
     )
     min_vx_creep_arg = DeclareLaunchArgument(
         'min_vx_creep',
-        default_value='0.05',
+        default_value='0.02',
         description='|vx| below this -> SPEED 0 in the ASCII bridge (firmware deadband workaround).'
     )
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')

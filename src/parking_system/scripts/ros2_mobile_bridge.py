@@ -796,8 +796,11 @@ class MobileBridgeNode(Node):
         if wp is None:
             return False
         pose = wp.get('pose') or {}
-        self.send_nav_goal(pose.get('x', 0.0), pose.get('y', 0.0), pose.get('yaw', 0.0))
-        return True
+        return self.send_nav_goal(
+            pose.get('x', 0.0),
+            pose.get('y', 0.0),
+            pose.get('yaw', 0.0),
+        )
 
     # --- Remote SetParameters / GetParameters / ListParameters ---
 
@@ -1194,8 +1197,8 @@ class MobileBridgeNode(Node):
         Side effects on entry:
           MANUAL  — cancel any active Nav2 goal so the BT navigator stops
                     publishing /cmd_vel; clear the Pico E-STOP latch.
-          AUTO    — clear the Pico E-STOP latch; do nothing to Nav2 (the
-                    user is expected to set a goal next).
+          AUTO    — clear the Pico E-STOP latch; silence manual velocity
+                    streams so Nav2 gets exclusive control.
           ESTOP   — full estop() — cancel Nav2, zero /cmd_vel, latch Pico.
         """
         new_mode = (new_mode or '').upper()
@@ -1218,6 +1221,11 @@ class MobileBridgeNode(Node):
         elif new_mode == 'AUTO':
             if self._estop_latched:
                 self._clear_pico_estop()
+            zero = Twist()
+            self._cmd_vel_pub.publish(zero)
+            self._cmd_vel_manual_pub.publish(zero)
+            with self._control_lock:
+                self._last_control_time = 0.0
         elif new_mode == 'ESTOP':
             self.estop()
         return True
@@ -1336,7 +1344,29 @@ class MobileBridgeNode(Node):
         future.add_done_callback(_clear_done)
 
     def send_nav_goal(self, x, y, yaw):
-        """Publish a Nav2 goal."""
+        """Publish a Nav2 goal and hand command authority to Nav2.
+
+        The mobile app streams joystick frames continuously. If a goal is
+        accepted while the bridge is still in MANUAL, those frames keep
+        publishing zero/manual Twist messages and can fight the Nav2
+        controller. Treat every nav goal as an AUTO transition first so the
+        goal, plan, and vehicle command stream are one coherent operation.
+        """
+        with self._mode_lock:
+            mode = self._mode
+        if mode != 'AUTO':
+            if not self.set_mode('AUTO'):
+                return False
+        else:
+            if self._estop_latched:
+                self._clear_pico_estop()
+
+        zero = Twist()
+        self._cmd_vel_pub.publish(zero)
+        self._cmd_vel_manual_pub.publish(zero)
+        with self._control_lock:
+            self._last_control_time = 0.0
+
         msg = PoseStamped()
         msg.header.frame_id = 'map'
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -1345,8 +1375,17 @@ class MobileBridgeNode(Node):
         from math import cos as mcos, sin as msin
         msg.pose.orientation.z = msin(float(yaw) / 2.0)
         msg.pose.orientation.w = mcos(float(yaw) / 2.0)
+        with self._goal_lock:
+            self._current_goal = {
+                'x': float(x),
+                'y': float(y),
+                'yaw': float(yaw),
+                'active': True,
+                'stamp': time.time(),
+            }
         self._goal_pub.publish(msg)
         self.get_logger().info(f'Published nav goal: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
+        return True
 
     def cancel_nav_goal(self):
         """Cancel any in-flight NavigateToPose goal and stop motion.
@@ -1530,8 +1569,9 @@ def api_nav_goal():
     if not data or 'x' not in data or 'y' not in data:
         return jsonify({'error': 'JSON body with x, y required'}), 400
     yaw = data.get('yaw', 0.0)
-    bridge_node.send_nav_goal(data['x'], data['y'], yaw)
-    return jsonify({'status': 'ok'})
+    if not bridge_node.send_nav_goal(data['x'], data['y'], yaw):
+        return jsonify({'error': 'failed to enter AUTO mode'}), 409
+    return jsonify({'status': 'ok', 'mode': bridge_node.get_mode()})
 
 
 @flask_app.route('/api/cancel_nav', methods=['POST'])
@@ -1752,7 +1792,8 @@ def api_summon():
         return jsonify({'status': 'ok', 'id': spot_id})
     if 'x' not in data or 'y' not in data:
         return jsonify({'error': 'x and y required'}), 400
-    bridge_node.send_nav_goal(data['x'], data['y'], data.get('yaw', 0.0))
+    if not bridge_node.send_nav_goal(data['x'], data['y'], data.get('yaw', 0.0)):
+        return jsonify({'error': 'failed to enter AUTO mode'}), 409
     return jsonify({'status': 'ok'})
 
 

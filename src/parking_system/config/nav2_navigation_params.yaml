@@ -110,12 +110,14 @@ controller_server:
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+
       # 0.20 m/s default — testbed-friendly. At 0.30 the robot crossed a
       # 2x2 m testbed in ~5 s (felt rushed); 0.20 takes ~10 s and gives the
       # regulator + collision_monitor headroom to react. User can live-tune
       # via Settings -> Nav2 Max Speed slider; that rewrites this in
       # runtime_overrides.yaml.
       desired_linear_vel: 0.20
+
       # Lookahead shortened for 1-2 m testbed so the carrot doesn't land
       # around corners or beyond cusps. At 0.45 m min the carrot was
       # 22-45% of the testbed — too far for tight turns. 0.30 m still
@@ -136,9 +138,11 @@ controller_server:
       # (0.43 m) so the regulator decelerates before the chassis hits its
       # physical turning limit.
       regulated_linear_scaling_min_radius: 0.50
+
       # Aligned with the chassis's actual minimum movable speed: the L298N
       # kick-start sustains at ~30% PWM which corresponds to ~0.18 m/s.
       # Below this the bridge's min_vx_creep gates output to SPEED 0.
+
       regulated_linear_scaling_min_speed: 0.18
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
@@ -341,7 +345,9 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
+
     max_velocity: [0.2, 0.0, 0.5]
+
     min_velocity: [-0.3, 0.0, -0.5]
     max_accel: [1.5, 0.0, 2.0]
     max_decel: [-1.5, 0.0, -2.0]

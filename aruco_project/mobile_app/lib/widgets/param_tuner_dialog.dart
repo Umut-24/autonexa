@@ -37,10 +37,28 @@ const _quickParams = <String, List<String>>{
     'min_vx_creep',
   ],
   '/controller_server': [
-    'FollowPath.max_vel_x', 'FollowPath.max_vel_theta',
-    'FollowPath.min_vel_x',
+    // RPP — the active controller. desired_linear_vel is THE knob for
+    // cruise speed; lookahead_dist controls how far ahead the carrot sits
+    // (smaller = tighter tracking but more oscillation).
+    'FollowPath.desired_linear_vel',
+    'FollowPath.lookahead_dist',
+    'FollowPath.min_lookahead_dist',
+    'FollowPath.max_lookahead_dist',
+    'FollowPath.regulated_linear_scaling_min_speed',
+    'FollowPath.regulated_linear_scaling_min_radius',
+    'FollowPath.allow_reversing',
+    // DWB legacy (no-op when RPP is loaded but kept for fallback).
+    'FollowPath.max_vel_x',
   ],
-  '/velocity_smoother': ['max_velocity', 'max_accel'],
+  '/velocity_smoother': [
+    // Cruise cap — should match controller's desired_linear_vel.
+    'max_velocity',
+    // Acceleration ramp — the knob that makes "feels too fast" go away
+    // even when steady-state speed is fine. Default [1.5, 0, 2]; lower
+    // first element to soften linear ramp-up (e.g. [0.5, 0, 1]).
+    'max_accel',
+    'max_decel',
+  ],
   '/global_costmap/global_costmap': [
     'inflation_layer.inflation_radius',
     'inflation_layer.cost_scaling_factor',
