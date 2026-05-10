@@ -110,14 +110,11 @@ controller_server:
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      # 0.15 m/s — tight-testbed tuning.  At 0.20 the robot was still too
-      # fast for 1-2 m curves; RPP's carrot landed beyond turns and the
-      # chassis drove opposite/perpendicular to the path. 0.15 gives the
-      # regulator + collision_monitor more headroom and keeps the velocity-
-      # scaled lookahead short enough that the carrot stays on the near
-      # side of tight curves. User can live-tune via Settings -> Nav2 Max
-      # Speed slider; that rewrites this in runtime_overrides.yaml.
-      desired_linear_vel: 0.15
+      # 0.18 m/s maps through nav2_pico_bridge to SPEED 18. With the L298N
+      # CLI firmware's SPEED range of -30..30, SPEED 18 is 60% PWM. Bench
+      # tests showed this chassis does not reliably produce enough torque
+      # below ~60%, so keep autonomous cruise at or above this floor.
+      desired_linear_vel: 0.18
       # Lookahead shortened for 1-2 m testbed so the carrot doesn't land
       # around corners or beyond cusps. At 0.45 m min the carrot was
       # 22-45% of the testbed — too far for tight turns. 0.30 m still
@@ -138,12 +135,11 @@ controller_server:
       # (0.43 m) so the regulator decelerates before the chassis hits its
       # physical turning limit.
       regulated_linear_scaling_min_radius: 0.50
-      # Lowered from 0.18 to 0.10 so the controller CAN command slow
-      # speeds in tight curves. Below ~0.18 the L298N deadband means the
-      # motor will lurch or stall, but the cusp-detection grace period in
-      # the bridge (Fix 4) handles the transition; a brief stall is better
-      # than driving off-path at 0.18 m/s when the curve needs 0.10.
-      regulated_linear_scaling_min_speed: 0.10
+      # Keep the controller's regulated curve speed above the same torque
+      # threshold. Slower requests produced SPEED <18, which looks like an
+      # autonomous failure because the robot plans but cannot overcome
+      # static friction.
+      regulated_linear_scaling_min_speed: 0.18
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
       # DUBIN's forward-only paths produced contorted loops that satisfied
@@ -345,7 +341,7 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.15, 0.0, 0.5]
+    max_velocity: [0.18, 0.0, 0.5]
     min_velocity: [-0.3, 0.0, -0.5]
     max_accel: [1.5, 0.0, 2.0]
     max_decel: [-1.5, 0.0, -2.0]
