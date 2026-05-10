@@ -577,6 +577,8 @@ class ConnectionService extends ChangeNotifier {
       ).timeout(const Duration(seconds: 3));
       final ok = resp.statusCode == 200;
       if (ok) {
+        _mode = ControlMode.auto;
+        _emergencyStopped = false;
         // Seed locally so the marker appears before the next /api/goal poll.
         _currentGoal = NavGoal(x: x, y: y, yaw: yaw, active: true,
             stamp: DateTime.now().millisecondsSinceEpoch / 1000.0);
