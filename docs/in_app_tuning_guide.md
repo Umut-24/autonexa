@@ -87,12 +87,14 @@ Settings -> Nav2 Max Speed
 `/local_costmap/local_costmap.inflation_layer.inflation_radius`
 
 - Local obstacle halo radius used by the controller.
+- Precision-testbed default: `0.05` m.
 - Lower value = walls/scan obstacles look less bulky and allow tighter motion.
 - Too low = less safety margin around obstacles.
 
 `/global_costmap/global_costmap.inflation_layer.inflation_radius`
 
 - Global obstacle halo radius used by the planner.
+- Precision-testbed default: `0.05` m.
 - Keep close to the local value so planner and controller agree.
 
 `inflation_layer.cost_scaling_factor`

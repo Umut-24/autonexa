@@ -208,10 +208,9 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 8.0
-        # Conservative shrink from 0.12 m. The radius stays just above the
-        # padded footprint's inscribed radius, while the higher cost scaling
-        # makes obstacle halos fall off faster on the tiny testbed map.
-        inflation_radius: 0.115
+        # Precision-testbed default: 5 cm scan/wall halo. Keep the high cost
+        # scaling so the small remaining inflation falls off quickly.
+        inflation_radius: 0.05
 
       always_send_full_costmap: true
 
@@ -263,7 +262,7 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0
-        inflation_radius: 0.115
+        inflation_radius: 0.05
       
       always_send_full_costmap: true
 
