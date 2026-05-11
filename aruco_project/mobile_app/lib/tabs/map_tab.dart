@@ -24,7 +24,8 @@ class MapTab extends StatefulWidget {
 
 class _MapTabState extends State<MapTab> {
   Timer? _scanTimer;
-  final TransformationController _transformController = TransformationController();
+  final TransformationController _transformController =
+      TransformationController();
   bool _showScan = true;
   bool _showMarkers = true;
   bool _showTrail = true;
@@ -94,12 +95,15 @@ class _MapTabState extends State<MapTab> {
     final inverseMatrix = Matrix4.inverted(matrix);
     final localPoint = MatrixUtils.transformPoint(inverseMatrix, localPos);
     final mapX = mapInfo.originX + localPoint.dx * mapInfo.resolution;
-    final mapY = mapInfo.originY + (mapInfo.height - localPoint.dy) * mapInfo.resolution;
+    final mapY =
+        mapInfo.originY + (mapInfo.height - localPoint.dy) * mapInfo.resolution;
     return [mapX, mapY];
   }
 
-  void _onTapMap(BuildContext context, TapUpDetails details, ConnectionService conn) {
-    final coords = _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
+  void _onTapMap(
+      BuildContext context, TapUpDetails details, ConnectionService conn) {
+    final coords =
+        _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
     if (coords == null || conn.mapImage == null) return;
     // Auto-yaw: have the robot face TOWARD the tapped point (its direction of
     // approach), so the planner doesn't have to construct contorted paths
@@ -126,9 +130,10 @@ class _MapTabState extends State<MapTab> {
   /// landed on empty floor, open a full picker of all saved waypoints
   /// (tap-to-navigate). Pose reset is no longer bound to long-press —
   /// it now lives in the ⋮ menu (see `_showResetMenu`).
-  Future<void> _onLongPressMap(
-      BuildContext context, LongPressStartDetails details, ConnectionService conn) async {
-    final coords = _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
+  Future<void> _onLongPressMap(BuildContext context,
+      LongPressStartDetails details, ConnectionService conn) async {
+    final coords =
+        _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
     if (coords == null || conn.mapImage == null) return;
 
     // Waypoint hit-test in map-frame meters. 0.30 m gives fat-finger
@@ -136,8 +141,8 @@ class _MapTabState extends State<MapTab> {
     NamedWaypoint? hit;
     double hitDist = 0.30;
     for (final wp in conn.namedWaypoints) {
-      final d = math.sqrt(
-          math.pow(wp.x - coords[0], 2) + math.pow(wp.y - coords[1], 2));
+      final d = math
+          .sqrt(math.pow(wp.x - coords[0], 2) + math.pow(wp.y - coords[1], 2));
       if (d < hitDist) {
         hit = wp;
         hitDist = d;
@@ -201,10 +206,10 @@ class _MapTabState extends State<MapTab> {
                       '${wp.y.toStringAsFixed(2)})'
                       '  yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°'
                       '${wp.stale ? '  • stale (map changed)' : ''}',
-                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                      style: const TextStyle(
+                          fontSize: 11, fontFamily: 'monospace'),
                     ),
-                    enabled: !wp.stale,
-                    onTap: wp.stale ? null : () => Navigator.pop(ctx, wp),
+                    onTap: () => Navigator.pop(ctx, wp),
                   );
                 },
               ),
@@ -229,7 +234,8 @@ class _MapTabState extends State<MapTab> {
   /// Pose-reset dialog. Replaces the long-press flow; now invoked from
   /// the ⋮ menu. Pre-fills the current pose so a small correction is one
   /// edit away.
-  Future<void> _resetPoseDialog(BuildContext context, ConnectionService conn) async {
+  Future<void> _resetPoseDialog(
+      BuildContext context, ConnectionService conn) async {
     final pose = conn.robotStatus.pose;
     final xCtrl = TextEditingController(text: pose.x.toStringAsFixed(2));
     final yCtrl = TextEditingController(text: pose.y.toStringAsFixed(2));
@@ -247,22 +253,27 @@ class _MapTabState extends State<MapTab> {
           const SizedBox(height: 12),
           TextField(
             controller: xCtrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            keyboardType: const TextInputType.numberWithOptions(
+                decimal: true, signed: true),
             decoration: const InputDecoration(labelText: 'x (m)'),
           ),
           TextField(
             controller: yCtrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            keyboardType: const TextInputType.numberWithOptions(
+                decimal: true, signed: true),
             decoration: const InputDecoration(labelText: 'y (m)'),
           ),
           TextField(
             controller: yawCtrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            keyboardType: const TextInputType.numberWithOptions(
+                decimal: true, signed: true),
             decoration: const InputDecoration(labelText: 'yaw (rad)'),
           ),
         ]),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.warning),
             onPressed: () => Navigator.pop(ctx, true),
@@ -303,7 +314,8 @@ class _MapTabState extends State<MapTab> {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(wp.name,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600)),
               ),
               Text(wp.kind,
                   style: TextStyle(fontSize: 11, color: colors.textTertiary)),
@@ -316,25 +328,24 @@ class _MapTabState extends State<MapTab> {
               '  yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°'
               '${wp.stale ? '  • stale' : ''}',
               style: TextStyle(
-                  fontSize: 11, fontFamily: 'monospace', color: colors.textSecondary),
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: colors.textSecondary),
             ),
           ),
           const Divider(),
           ListTile(
-            leading: const Icon(Icons.navigation_rounded, color: AppColors.info),
+            leading:
+                const Icon(Icons.navigation_rounded, color: AppColors.info),
             title: const Text('Navigate here'),
-            enabled: !wp.stale,
-            onTap: wp.stale
-                ? null
-                : () async {
-                    Navigator.pop(ctx);
-                    final ok = await conn.navigateToNamedWaypoint(wp.name);
-                    if (!context.mounted) return;
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(
-                          ok ? 'Going to "${wp.name}"' : 'Navigate failed'),
-                    ));
-                  },
+            onTap: () async {
+              Navigator.pop(ctx);
+              final ok = await conn.navigateToNamedWaypoint(wp.name);
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(ok ? 'Going to "${wp.name}"' : 'Navigate failed'),
+              ));
+            },
           ),
           ListTile(
             leading: const Icon(Icons.edit_rounded, color: AppColors.brand),
@@ -345,7 +356,8 @@ class _MapTabState extends State<MapTab> {
             },
           ),
           ListTile(
-            leading: const Icon(Icons.delete_outline_rounded, color: AppColors.danger),
+            leading: const Icon(Icons.delete_outline_rounded,
+                color: AppColors.danger),
             title: const Text('Delete'),
             onTap: () async {
               Navigator.pop(ctx);
@@ -390,21 +402,26 @@ class _MapTabState extends State<MapTab> {
     // Upsert under the new name first; if that fails we still have the old
     // entry untouched. Only delete the old name on success.
     final saved = await conn.saveNamedWaypoint(
-      name: newName, kind: wp.kind, x: wp.x, y: wp.y, yaw: wp.yaw,
+      name: newName,
+      kind: wp.kind,
+      x: wp.x,
+      y: wp.y,
+      yaw: wp.yaw,
     );
     if (saved == null) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Rename failed: could not save new name')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Rename failed: could not save new name')));
       return;
     }
     await conn.deleteNamedWaypoint(wp.name);
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Renamed to "$newName"')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('Renamed to "$newName"')));
   }
 
-  Future<void> _showResetMenu(BuildContext context, ConnectionService conn) async {
+  Future<void> _showResetMenu(
+      BuildContext context, ConnectionService conn) async {
     final colors = context.read<ThemeProvider>().colors;
     await showModalBottomSheet(
       context: context,
@@ -414,17 +431,20 @@ class _MapTabState extends State<MapTab> {
           ListTile(
             leading: const Icon(Icons.refresh_rounded, color: AppColors.info),
             title: const Text('Clear obstacles'),
-            subtitle: const Text('Wipe global + local costmaps. Keeps the SLAM map.'),
+            subtitle:
+                const Text('Wipe global + local costmaps. Keeps the SLAM map.'),
             onTap: () async {
               Navigator.pop(ctx);
               final ok = await conn.clearCostmaps();
               if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text(ok ? 'Costmaps cleared' : 'Costmap clear failed')));
+                  content:
+                      Text(ok ? 'Costmaps cleared' : 'Costmap clear failed')));
             },
           ),
           ListTile(
-            leading: const Icon(Icons.my_location_rounded, color: AppColors.warning),
+            leading:
+                const Icon(Icons.my_location_rounded, color: AppColors.warning),
             title: const Text('Reset robot pose…'),
             subtitle: const Text(
                 'Tell SLAM / AMCL where the robot actually is right now.'),
@@ -434,9 +454,11 @@ class _MapTabState extends State<MapTab> {
             },
           ),
           ListTile(
-            leading: const Icon(Icons.restart_alt_rounded, color: AppColors.warning),
+            leading:
+                const Icon(Icons.restart_alt_rounded, color: AppColors.warning),
             title: const Text('Restart mapping'),
-            subtitle: const Text('Drops the current SLAM map. Robot pose resets to origin.'),
+            subtitle: const Text(
+                'Drops the current SLAM map. Robot pose resets to origin.'),
             onTap: () async {
               Navigator.pop(ctx);
               final confirm = await showDialog<bool>(
@@ -446,9 +468,12 @@ class _MapTabState extends State<MapTab> {
                   content: const Text(
                       'The current map will be discarded. Use this when relocating the robot to a new area.'),
                   actions: [
-                    TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('Cancel')),
+                    TextButton(
+                        onPressed: () => Navigator.pop(c2, false),
+                        child: const Text('Cancel')),
                     ElevatedButton(
-                      style: ElevatedButton.styleFrom(backgroundColor: AppColors.warning),
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.warning),
                       onPressed: () => Navigator.pop(c2, true),
                       child: const Text('Restart SLAM'),
                     ),
@@ -459,7 +484,8 @@ class _MapTabState extends State<MapTab> {
                 final ok = await conn.restartMapping();
                 if (!context.mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                    content: Text(ok ? 'SLAM restarted' : 'SLAM restart failed')));
+                    content:
+                        Text(ok ? 'SLAM restarted' : 'SLAM restart failed')));
               }
             },
           ),
@@ -489,24 +515,34 @@ class _MapTabState extends State<MapTab> {
             child: Row(
               children: [
                 Text('Map',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700,
-                        color: colors.textPrimary, letterSpacing: -0.5)),
+                    style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w700,
+                        color: colors.textPrimary,
+                        letterSpacing: -0.5)),
                 const Spacer(),
-                _toggleChip('Scan', _showScan, () => setState(() => _showScan = !_showScan), colors),
+                _toggleChip('Scan', _showScan,
+                    () => setState(() => _showScan = !_showScan), colors),
                 const SizedBox(width: 6),
-                _toggleChip('Plan', _showPlan, () => setState(() => _showPlan = !_showPlan), colors),
+                _toggleChip('Plan', _showPlan,
+                    () => setState(() => _showPlan = !_showPlan), colors),
                 const SizedBox(width: 6),
-                _toggleChip('Trail', _showTrail, () => setState(() => _showTrail = !_showTrail), colors),
+                _toggleChip('Trail', _showTrail,
+                    () => setState(() => _showTrail = !_showTrail), colors),
                 const SizedBox(width: 6),
-                _toggleChip('Markers', _showMarkers, () => setState(() => _showMarkers = !_showMarkers), colors),
+                _toggleChip('Markers', _showMarkers,
+                    () => setState(() => _showMarkers = !_showMarkers), colors),
                 const SizedBox(width: 6),
                 IconButton(
                   iconSize: 20,
                   padding: EdgeInsets.zero,
                   visualDensity: VisualDensity.compact,
                   tooltip: 'Reset map / costmaps',
-                  icon: Icon(Icons.more_vert_rounded, color: colors.textSecondary),
-                  onPressed: conn.isConnected ? () => _showResetMenu(context, conn) : null,
+                  icon: Icon(Icons.more_vert_rounded,
+                      color: colors.textSecondary),
+                  onPressed: conn.isConnected
+                      ? () => _showResetMenu(context, conn)
+                      : null,
                 ),
               ],
             ),
@@ -523,13 +559,16 @@ class _MapTabState extends State<MapTab> {
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
-                child: mapImage == null || !conn.isConnected || _decodedMap == null
+                child: mapImage == null ||
+                        !conn.isConnected ||
+                        _decodedMap == null
                     ? _placeholder(colors)
                     : Stack(
                         children: [
                           GestureDetector(
                             onTapUp: (d) => _onTapMap(context, d, conn),
-                            onLongPressStart: (d) => _onLongPressMap(context, d, conn),
+                            onLongPressStart: (d) =>
+                                _onLongPressMap(context, d, conn),
                             child: InteractiveViewer(
                               transformationController: _transformController,
                               minScale: 0.5,
@@ -542,7 +581,8 @@ class _MapTabState extends State<MapTab> {
                                   markers: _showMarkers ? status.markers : {},
                                   scanPoints: _showScan ? conn.scanPoints : [],
                                   pathTrail: _showTrail ? conn.pathTrail : [],
-                                  plannedPath: _showPlan ? conn.plannedPath : [],
+                                  plannedPath:
+                                      _showPlan ? conn.plannedPath : [],
                                   goal: goal.active ? goal : null,
                                   waypoints: conn.namedWaypoints,
                                   mapInfo: status.mapInfo,
@@ -577,7 +617,10 @@ class _MapTabState extends State<MapTab> {
               children: [
                 _infoItem('X', '${status.pose.x.toStringAsFixed(2)}m', colors),
                 _infoItem('Y', '${status.pose.y.toStringAsFixed(2)}m', colors),
-                _infoItem('Yaw', '${(status.pose.yaw * 57.2958).toStringAsFixed(0)}°', colors),
+                _infoItem(
+                    'Yaw',
+                    '${(status.pose.yaw * 57.2958).toStringAsFixed(0)}°',
+                    colors),
                 _infoItem('Scan', '${status.scan.count}', colors),
                 _infoItem('Plan', '${conn.plannedPath.length}', colors),
                 _infoItem('Nav2', conn.navStatus, colors),
@@ -586,7 +629,7 @@ class _MapTabState extends State<MapTab> {
                   _lastTapMx == null
                       ? '—'
                       : '${_lastTapMx!.toStringAsFixed(2)}, ${_lastTapMy!.toStringAsFixed(2)} '
-                        '@${(_lastTapYaw! * 57.2958).toStringAsFixed(0)}°',
+                          '@${(_lastTapYaw! * 57.2958).toStringAsFixed(0)}°',
                   colors,
                 ),
               ],
@@ -608,13 +651,15 @@ class _MapTabState extends State<MapTab> {
                   GestureDetector(
                     onTap: () => conn.clearPathTrail(),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
                       decoration: BoxDecoration(
                         color: colors.surfaceLight,
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text('Clear trail',
-                          style: TextStyle(fontSize: 10, color: colors.textSecondary)),
+                          style: TextStyle(
+                              fontSize: 10, color: colors.textSecondary)),
                     ),
                   ),
                 if (goal.active) ...[
@@ -622,13 +667,15 @@ class _MapTabState extends State<MapTab> {
                   GestureDetector(
                     onTap: () => conn.cancelNavGoal(),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
                       decoration: BoxDecoration(
                         color: const Color(0xFFE53935),
                         borderRadius: BorderRadius.circular(8),
                         boxShadow: [
                           BoxShadow(
-                            color: const Color(0xFFE53935).withValues(alpha: 0.4),
+                            color:
+                                const Color(0xFFE53935).withValues(alpha: 0.4),
                             blurRadius: 6,
                             offset: const Offset(0, 2),
                           ),
@@ -637,11 +684,15 @@ class _MapTabState extends State<MapTab> {
                       child: const Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.cancel_rounded, size: 14, color: Colors.white),
+                          Icon(Icons.cancel_rounded,
+                              size: 14, color: Colors.white),
                           SizedBox(width: 4),
                           Text('Cancel Goal',
-                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
-                                  color: Colors.white, letterSpacing: 0.3)),
+                              style: TextStyle(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: Colors.white,
+                                  letterSpacing: 0.3)),
                         ],
                       ),
                     ),
@@ -656,7 +707,8 @@ class _MapTabState extends State<MapTab> {
     );
   }
 
-  Widget _toggleChip(String label, bool active, VoidCallback onTap, ResolvedColors colors) {
+  Widget _toggleChip(
+      String label, bool active, VoidCallback onTap, ResolvedColors colors) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -664,10 +716,15 @@ class _MapTabState extends State<MapTab> {
         decoration: BoxDecoration(
           color: active ? colors.accentSurface : colors.surfaceLight,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: active ? colors.accent.withValues(alpha: 0.3) : colors.border),
+          border: Border.all(
+              color: active
+                  ? colors.accent.withValues(alpha: 0.3)
+                  : colors.border),
         ),
         child: Text(label,
-            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+            style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
                 color: active ? colors.accent : colors.textSecondary)),
       ),
     );
@@ -691,11 +748,19 @@ class _MapTabState extends State<MapTab> {
     return Expanded(
       child: Column(
         children: [
-          Text(label, style: TextStyle(fontSize: 9, color: colors.textTertiary,
-              fontWeight: FontWeight.w600, letterSpacing: 0.8)),
+          Text(label,
+              style: TextStyle(
+                  fontSize: 9,
+                  color: colors.textTertiary,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.8)),
           const SizedBox(height: 2),
-          Text(value, style: TextStyle(fontSize: 12, fontFamily: 'monospace',
-              fontWeight: FontWeight.w600, color: colors.textPrimary)),
+          Text(value,
+              style: TextStyle(
+                  fontSize: 12,
+                  fontFamily: 'monospace',
+                  fontWeight: FontWeight.w600,
+                  color: colors.textPrimary)),
         ],
       ),
     );
@@ -810,10 +875,17 @@ class _MapPainter extends CustomPainter {
         final p = toPixel(wp.x, wp.y);
         Color color;
         switch (wp.kind) {
-          case 'park': color = AppColors.brand; break;
-          case 'summon': color = AppColors.info; break;
-          case 'home': color = AppColors.success; break;
-          default: color = const Color(0xFF6F87FF);
+          case 'park':
+            color = AppColors.brand;
+            break;
+          case 'summon':
+            color = AppColors.info;
+            break;
+          case 'home':
+            color = AppColors.success;
+            break;
+          default:
+            color = const Color(0xFF6F87FF);
         }
         // Stale waypoints render half-faded so the user notices.
         final alpha = wp.stale ? 0.45 : 0.95;
@@ -832,7 +904,7 @@ class _MapPainter extends CustomPainter {
         canvas.drawPath(diamond, fill);
         canvas.drawPath(diamond, outline);
         // Heading tick — short stub so users can tell the saved orientation.
-        final ya = 9.0;
+        const ya = 9.0;
         final ydx = ya * math.cos(-wp.yaw);
         final ydy = ya * math.sin(-wp.yaw);
         final yaPaint = Paint()
@@ -845,7 +917,8 @@ class _MapPainter extends CustomPainter {
           text: TextSpan(
             text: wp.name,
             style: TextStyle(
-              fontSize: 9, fontWeight: FontWeight.w600,
+              fontSize: 9,
+              fontWeight: FontWeight.w600,
               color: Colors.white.withValues(alpha: 0.95),
               shadows: const [Shadow(color: Color(0xCC000000), blurRadius: 2)],
             ),
@@ -874,7 +947,7 @@ class _MapPainter extends CustomPainter {
       canvas.drawPath(diamond, goalFill);
       canvas.drawPath(diamond, goalEdge);
       // Heading arrow
-      final ga = 14.0;
+      const ga = 14.0;
       final gdx = ga * math.cos(-goal!.yaw);
       final gdy = ga * math.sin(-goal!.yaw);
       final goalArrow = Paint()
@@ -888,7 +961,7 @@ class _MapPainter extends CustomPainter {
     final robotPos = toPixel(pose.x, pose.y);
     final robotPaint = Paint()..color = accentColor;
     canvas.drawCircle(robotPos, 6, robotPaint);
-    final arrowLen = 14.0;
+    const arrowLen = 14.0;
     final dx = arrowLen * math.cos(-pose.yaw);
     final dy = arrowLen * math.sin(-pose.yaw);
     final arrowPaint = Paint()
@@ -921,15 +994,16 @@ class _MapPainter extends CustomPainter {
     canvas.drawLine(origin, pXEnd, xPaint);
     canvas.drawLine(origin, pYEnd, yPaint);
     // Origin dot
-    canvas.drawCircle(origin, 2.5,
-        Paint()..color = Colors.white.withValues(alpha: 0.95));
+    canvas.drawCircle(
+        origin, 2.5, Paint()..color = Colors.white.withValues(alpha: 0.95));
     // Axis tip labels
     void drawTip(Offset p, String label, Color color) {
       final tp = TextPainter(
         text: TextSpan(
           text: label,
           style: TextStyle(
-            fontSize: 10, fontWeight: FontWeight.w700,
+            fontSize: 10,
+            fontWeight: FontWeight.w700,
             color: color,
             shadows: const [Shadow(color: Color(0xCC000000), blurRadius: 2)],
           ),
@@ -938,6 +1012,7 @@ class _MapPainter extends CustomPainter {
       )..layout();
       tp.paint(canvas, Offset(p.dx + 3, p.dy - 6));
     }
+
     drawTip(pXEnd, 'X', AppColors.danger);
     drawTip(pYEnd, 'Y', AppColors.success);
 
@@ -947,7 +1022,7 @@ class _MapPainter extends CustomPainter {
     const scaleM = 0.5;
     final barLenPx = scaleM / mapInfo!.resolution;
     final barY = mapInfo!.height - 14.0; // ~14 px above the bottom edge
-    final barXStart = 14.0;
+    const barXStart = 14.0;
     final barPaint = Paint()
       ..color = Colors.white.withValues(alpha: 0.9)
       ..strokeWidth = 2.0
@@ -958,23 +1033,24 @@ class _MapPainter extends CustomPainter {
       barPaint,
     );
     // Tick marks on each end
-    canvas.drawLine(Offset(barXStart, barY - 4),
-        Offset(barXStart, barY + 4), barPaint);
+    canvas.drawLine(
+        Offset(barXStart, barY - 4), Offset(barXStart, barY + 4), barPaint);
     canvas.drawLine(Offset(barXStart + barLenPx, barY - 4),
         Offset(barXStart + barLenPx, barY + 4), barPaint);
     final scaleTp = TextPainter(
       text: TextSpan(
         text: '0.5 m',
         style: TextStyle(
-          fontSize: 10, fontWeight: FontWeight.w600,
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
           color: Colors.white.withValues(alpha: 0.95),
           shadows: const [Shadow(color: Color(0xCC000000), blurRadius: 2)],
         ),
       ),
       textDirection: TextDirection.ltr,
     )..layout();
-    scaleTp.paint(canvas, Offset(barXStart + barLenPx / 2 - scaleTp.width / 2,
-        barY - 14));
+    scaleTp.paint(canvas,
+        Offset(barXStart + barLenPx / 2 - scaleTp.width / 2, barY - 14));
   }
 
   @override
@@ -1005,7 +1081,8 @@ class _MapCompass extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox(
-            width: 36, height: 36,
+            width: 36,
+            height: 36,
             child: CustomPaint(painter: _CompassPainter()),
           ),
           const SizedBox(width: 8),
@@ -1014,11 +1091,17 @@ class _MapCompass extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('screen↑',
-                  style: TextStyle(fontSize: 9, color: Colors.white70,
-                      fontWeight: FontWeight.w600, letterSpacing: 0.4)),
+                  style: TextStyle(
+                      fontSize: 9,
+                      color: Colors.white70,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.4)),
               Text('= world +Y',
-                  style: TextStyle(fontSize: 11, color: Colors.white,
-                      fontFamily: 'monospace', fontWeight: FontWeight.w700)),
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.white,
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.w700)),
             ],
           ),
         ],
@@ -1043,21 +1126,24 @@ class _CompassPainter extends CustomPainter {
       ..lineTo(c.dx - 4, c.dy + 2)
       ..lineTo(c.dx + 4, c.dy + 2)
       ..close();
-    canvas.drawPath(arrow,
-        Paint()..color = Colors.redAccent.withValues(alpha: 0.95));
+    canvas.drawPath(
+        arrow, Paint()..color = Colors.redAccent.withValues(alpha: 0.95));
     // Cardinal letters around the rim (N at top of screen)
     void cardinal(String letter, Offset offset) {
       final tp = TextPainter(
         text: TextSpan(
           text: letter,
           style: const TextStyle(
-            fontSize: 8, fontWeight: FontWeight.w800, color: Colors.white,
+            fontSize: 8,
+            fontWeight: FontWeight.w800,
+            color: Colors.white,
           ),
         ),
         textDirection: TextDirection.ltr,
       )..layout();
       tp.paint(canvas, offset - Offset(tp.width / 2, tp.height / 2));
     }
+
     cardinal('N', Offset(c.dx, c.dy - r + 6));
     cardinal('S', Offset(c.dx, c.dy + r - 6));
     cardinal('E', Offset(c.dx + r - 6, c.dy));

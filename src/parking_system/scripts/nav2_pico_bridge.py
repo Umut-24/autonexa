@@ -19,7 +19,8 @@ angular.z = left turn = front wheels rotate counter-clockwise (top
 view). The firmware's bench-GUI calibration empirically gives
 "servo µs < center = wheels turn left", so the mapping negates steer
 before mapping to µs. Set `servo_polarity:=-1` to flip if your hardware
-is mounted opposite.
+is mounted opposite. Set `reverse_steer_polarity:=-1` when forward
+turns are correct but reverse-left/reverse-right are swapped.
 
 Lifecycle:
     on launch: open serial → send `ENABLE` (if auto_enable=true)
@@ -62,6 +63,7 @@ RUNTIME_OVERRIDES_PATH = os.path.expanduser('~/.autonexa/runtime_overrides.yaml'
 RUNTIME_OVERRIDABLE = (
     'vx_polarity',
     'servo_polarity',
+    'reverse_steer_polarity',
     'max_vx_mps',
     'max_wz_radps',
     'max_ax_mps2',
@@ -126,6 +128,10 @@ class Nav2PicoBridge(Node):
         # needs us > center, not us < center. Override to +1 if the hardware
         # is rewired the other way.
         self.declare_parameter('servo_polarity', -1)
+        # Flip steering only while reversing. This preserves the calibrated
+        # forward left/right behavior while matching reverse maneuvers to the
+        # same driver intuition and REEDS_SHEPP path curvature.
+        self.declare_parameter('reverse_steer_polarity', -1)
         # +1 = ROS-positive vx drives the chassis forward (standard).
         # -1 = forward/back swapped (use when motor wiring is reversed or the
         # LiDAR-defined map frame is yaw-flipped). Calibration wizard in the
@@ -161,6 +167,7 @@ class Nav2PicoBridge(Node):
         self.servo_us_max = int(self.get_parameter('servo_us_max').value)
         self.servo_max_steer = float(self.get_parameter('servo_max_steer_rad').value)
         self.servo_polarity = int(self.get_parameter('servo_polarity').value)
+        self.reverse_steer_polarity = int(self.get_parameter('reverse_steer_polarity').value)
         self.vx_polarity = int(self.get_parameter('vx_polarity').value)
         self.max_steer_rate = float(self.get_parameter('max_steer_rate_radps').value)
 
@@ -174,6 +181,9 @@ class Nav2PicoBridge(Node):
                 f"[{self.servo_us_min}, {self.servo_us_max}]")
         if self.servo_polarity not in (-1, 1):
             raise RuntimeError(f"servo_polarity must be +1 or -1, got {self.servo_polarity}")
+        if self.reverse_steer_polarity not in (-1, 1):
+            raise RuntimeError(
+                f"reverse_steer_polarity must be +1 or -1, got {self.reverse_steer_polarity}")
         if self.vx_polarity not in (-1, 1):
             raise RuntimeError(f"vx_polarity must be +1 or -1, got {self.vx_polarity}")
 
@@ -220,6 +230,7 @@ class Nav2PicoBridge(Node):
             f"min_vx_creep={self.min_vx_creep:.3f}m/s, "
             f"servo center={self.servo_center}us in [{self.servo_us_min},{self.servo_us_max}], "
             f"vx_polarity={self.vx_polarity:+d} servo_polarity={self.servo_polarity:+d}, "
+            f"reverse_steer_polarity={self.reverse_steer_polarity:+d}, "
             f"max_steer_rate={self.max_steer_rate:.2f}rad/s")
 
     # ── Lock + serial ─────────────────────────────────────────────
@@ -324,6 +335,11 @@ class Nav2PicoBridge(Node):
                     return SetParametersResult(
                         successful=False, reason='servo_polarity must be +1 or -1')
                 self.servo_polarity = int(p.value)
+            elif p.name == 'reverse_steer_polarity':
+                if p.value not in (-1, 1):
+                    return SetParametersResult(
+                        successful=False, reason='reverse_steer_polarity must be +1 or -1')
+                self.reverse_steer_polarity = int(p.value)
             elif p.name == 'max_vx_mps':
                 if not 0.0 < float(p.value) <= 1.0:
                     return SetParametersResult(
@@ -388,8 +404,10 @@ class Nav2PicoBridge(Node):
             # vx≈0 with wz≠0 is a pivot request — Ackermann can't do it.
             # Match firmware behavior: command max steering toward sign(wz).
             return self.servo_max_steer if wz > 0 else -self.servo_max_steer
-        return clamp(math.atan(self.wheelbase * wz / vx),
-                     -self.servo_max_steer, +self.servo_max_steer)
+        steer = math.atan(self.wheelbase * wz / vx)
+        if vx < 0.0:
+            steer *= self.reverse_steer_polarity
+        return clamp(steer, -self.servo_max_steer, +self.servo_max_steer)
 
     def _steer_to_servo_us(self, steer_rad: float) -> int:
         """Map Ackermann steering angle to calibrated servo µs.

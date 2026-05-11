@@ -20,7 +20,7 @@ class ParamTunerDialog extends StatefulWidget {
 
 const _whitelist = <String, String>{
   '/nav2_pico_bridge': 'Pico bridge',
-  '/controller_server': 'Nav2 Controller (DWB)',
+  '/controller_server': 'Nav2 Controller (RPP)',
   '/planner_server': 'Nav2 Planner',
   '/velocity_smoother': 'Velocity Smoother',
   '/global_costmap/global_costmap': 'Global Costmap',
@@ -32,8 +32,12 @@ const _whitelist = <String, String>{
 // the small-screen UX usable.
 const _quickParams = <String, List<String>>{
   '/nav2_pico_bridge': [
-    'vx_polarity', 'servo_polarity',
-    'max_vx_mps', 'max_wz_radps', 'max_steer_rate_radps',
+    'vx_polarity',
+    'servo_polarity',
+    'reverse_steer_polarity',
+    'max_vx_mps',
+    'max_wz_radps',
+    'max_steer_rate_radps',
     'min_vx_creep',
   ],
   '/controller_server': [
@@ -47,6 +51,8 @@ const _quickParams = <String, List<String>>{
     'FollowPath.regulated_linear_scaling_min_speed',
     'FollowPath.regulated_linear_scaling_min_radius',
     'FollowPath.allow_reversing',
+    'general_goal_checker.xy_goal_tolerance',
+    'general_goal_checker.yaw_goal_tolerance',
     // DWB legacy (no-op when RPP is loaded but kept for fallback).
     'FollowPath.max_vel_x',
   ],
@@ -103,7 +109,8 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
     }
     setState(() {
       _values = (res['params'] as Map?)?.cast<String, dynamic>() ?? {};
-      _allNames = ((res['names'] as List?) ?? []).map((e) => e.toString()).toList();
+      _allNames =
+          ((res['names'] as List?) ?? []).map((e) => e.toString()).toList();
       _loading = false;
     });
   }
@@ -114,18 +121,21 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
     if (!mounted) return;
     if (res[name] == true) {
       setState(() => _values[name] = value);
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$name = $value applied')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('$name = $value applied')));
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to apply $name')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Failed to apply $name')));
     }
   }
 
   List<String> _visibleNames() {
     if (_showAll) return _allNames;
     final quick = _quickParams[_node] ?? const <String>[];
-    return [for (final n in quick) if (_values.containsKey(n)) n];
+    return [
+      for (final n in quick)
+        if (_values.containsKey(n)) n
+    ];
   }
 
   @override
@@ -142,7 +152,9 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
               padding: const EdgeInsets.fromLTRB(16, 14, 8, 4),
               child: Row(children: [
                 Text('Parameter tuner',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
                         color: colors.textPrimary)),
                 const Spacer(),
                 IconButton(
@@ -157,7 +169,8 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
                 initialValue: _node,
                 isExpanded: true,
                 items: _whitelist.entries
-                    .map((e) => DropdownMenuItem(value: e.key, child: Text(e.value)))
+                    .map((e) =>
+                        DropdownMenuItem(value: e.key, child: Text(e.value)))
                     .toList(),
                 onChanged: (v) {
                   if (v == null) return;
@@ -188,12 +201,17 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
                   : _error != null
-                      ? Center(child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Text(_error!, textAlign: TextAlign.center,
-                              style: TextStyle(color: colors.textTertiary))))
+                      ? Center(
+                          child: Padding(
+                              padding: const EdgeInsets.all(24),
+                              child: Text(_error!,
+                                  textAlign: TextAlign.center,
+                                  style:
+                                      TextStyle(color: colors.textTertiary))))
                       : ListView(
-                          children: _visibleNames().map((n) => _paramRow(n, colors)).toList(),
+                          children: _visibleNames()
+                              .map((n) => _paramRow(n, colors))
+                              .toList(),
                         ),
             ),
           ],
@@ -206,13 +224,16 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
     final v = _values[name];
     if (v == null) {
       return ListTile(
-        title: Text(name, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
-        subtitle: Text('(unset on this node)', style: TextStyle(fontSize: 11, color: colors.textTertiary)),
+        title: Text(name,
+            style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+        subtitle: Text('(unset on this node)',
+            style: TextStyle(fontSize: 11, color: colors.textTertiary)),
       );
     }
     if (v is bool) {
       return SwitchListTile(
-        title: Text(name, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+        title: Text(name,
+            style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
         value: v,
         onChanged: (newV) => _setOne(name, newV),
       );
@@ -221,17 +242,24 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
       // Use a simple TextFormField — sliders need bounds we don't have a-priori.
       final ctrl = TextEditingController(text: v.toString());
       return ListTile(
-        title: Text(name, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+        title: Text(name,
+            style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
         subtitle: Row(children: [
-          Expanded(child: TextField(
+          Expanded(
+              child: TextField(
             controller: ctrl,
-            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-            decoration: const InputDecoration(isDense: true, contentPadding: EdgeInsets.symmetric(vertical: 6)),
+            keyboardType: const TextInputType.numberWithOptions(
+                decimal: true, signed: true),
+            decoration: const InputDecoration(
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(vertical: 6)),
           )),
           IconButton(
             icon: const Icon(Icons.check_rounded, size: 18),
             onPressed: () {
-              final parsed = v is int ? int.tryParse(ctrl.text) : double.tryParse(ctrl.text);
+              final parsed = v is int
+                  ? int.tryParse(ctrl.text)
+                  : double.tryParse(ctrl.text);
               if (parsed != null) _setOne(name, parsed);
             },
           ),
@@ -240,17 +268,25 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
     }
     if (v is List) {
       return ListTile(
-        title: Text(name, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+        title: Text(name,
+            style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
         subtitle: Text(v.toString(),
-            style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: colors.textSecondary)),
+            style: TextStyle(
+                fontSize: 11,
+                fontFamily: 'monospace',
+                color: colors.textSecondary)),
         trailing: Text('list',
             style: TextStyle(fontSize: 10, color: colors.textTertiary)),
       );
     }
     return ListTile(
-      title: Text(name, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+      title: Text(name,
+          style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
       subtitle: Text(v.toString(),
-          style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: colors.textSecondary)),
+          style: TextStyle(
+              fontSize: 11,
+              fontFamily: 'monospace',
+              color: colors.textSecondary)),
     );
   }
 }

@@ -429,10 +429,7 @@ class HomeTab extends StatelessWidget {
                               fontSize: 11, fontFamily: 'monospace'),
                         ),
                         selected: isSelected,
-                        enabled: !wp.stale,
-                        onTap: wp.stale
-                            ? null
-                            : () => setSheetState(() => selected = wp),
+                        onTap: () => setSheetState(() => selected = wp),
                       );
                     },
                   ),

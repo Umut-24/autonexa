@@ -40,7 +40,6 @@ import subprocess
 import threading
 import time
 import io
-import zlib
 from collections import deque
 from math import cos, sin, isinf, isnan, pi as MATH_PI
 
@@ -205,9 +204,10 @@ class MobileBridgeNode(Node):
         self._safety_mode = 'soft'
 
         # --- Map fingerprint (Part D) ---
-        # Lets waypoints know if the SLAM map under them has been replaced
-        # since they were saved (full SLAM restart -> new fingerprint).
-        self._map_fingerprint = ''
+        # Lets waypoints know if a new mapping session started. This stays
+        # stable while live SLAM expands/resizes the map, so saved spots do
+        # not become stale just because the robot drove away from them.
+        self._map_fingerprint = self._new_map_session_fingerprint()
 
         # --- Waypoints (Part D) ---
         self._waypoints_lock = threading.Lock()
@@ -362,25 +362,10 @@ class MobileBridgeNode(Node):
             'origin_x': msg.info.origin.position.x,
             'origin_y': msg.info.origin.position.y,
         }
-        # Cheap fingerprint over header + first 4 KB of cells. SLAM-Toolbox
-        # restarts always change width/height and reset the cell pattern, so
-        # this catches "same physical area, fresh map" as well as relocations.
-        try:
-            sample = bytes(msg.data[:4096]) if msg.data else b''
-        except (TypeError, ValueError):
-            sample = b''
-        crc = zlib.crc32(sample) & 0xffffffff
-        fingerprint = (
-            f"w={info['width']},h={info['height']},"
-            f"res={info['resolution']:.4f},"
-            f"origin={info['origin_x']:.3f},{info['origin_y']:.3f},"
-            f"h={crc:08x}"
-        )
         with self._map_lock:
             self._map_png = png_bytes
             self._map_info = info
             self._map_version += 1
-            self._map_fingerprint = fingerprint
 
     def _amcl_cb(self, msg: PoseWithCovarianceStamped):
         x = msg.pose.pose.position.x
@@ -750,6 +735,10 @@ class MobileBridgeNode(Node):
         with self._map_lock:
             return self._map_fingerprint
 
+    @staticmethod
+    def _new_map_session_fingerprint() -> str:
+        return f"session={int(time.time() * 1000)}"
+
     def list_waypoints(self) -> list:
         fp = self._current_fingerprint()
         with self._waypoints_lock:
@@ -1014,6 +1003,7 @@ class MobileBridgeNode(Node):
         with self._map_lock:
             self._map_version += 1
             self._map_png = None
+            self._map_fingerprint = self._new_map_session_fingerprint()
         return {'steps': steps, 'costmaps': cm}
 
     # --- Pose reset / relocalize (Part G1) ---

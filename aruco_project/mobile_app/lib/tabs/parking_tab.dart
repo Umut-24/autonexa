@@ -19,7 +19,8 @@ class ParkingTab extends StatefulWidget {
   State<ParkingTab> createState() => _ParkingTabState();
 }
 
-class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateMixin {
+class _ParkingTabState extends State<ParkingTab>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
 
   // Mission state
@@ -37,7 +38,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _refreshManualWaypoints());
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _refreshManualWaypoints());
   }
 
   @override
@@ -73,8 +75,11 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text('Parking',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700,
-                      color: colors.textPrimary, letterSpacing: -0.5)),
+                  style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                      color: colors.textPrimary,
+                      letterSpacing: -0.5)),
             ),
           ),
 
@@ -95,7 +100,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
               dividerColor: Colors.transparent,
               labelColor: colors.accent,
               unselectedLabelColor: colors.textSecondary,
-              labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              labelStyle:
+                  const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
               tabs: const [
                 Tab(text: 'Parking Spots'),
                 Tab(text: 'Manual Spots'),
@@ -154,7 +160,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
     );
   }
 
-  Widget _markerCard(MarkerInfo marker, ConnectionService conn, ResolvedColors colors) {
+  Widget _markerCard(
+      MarkerInfo marker, ConnectionService conn, ResolvedColors colors) {
     final Color statusColor;
     final String statusLabel;
     switch (marker.status) {
@@ -204,16 +211,20 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
                 Row(
                   children: [
                     Text('Spot #${marker.id}',
-                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                        style: const TextStyle(
+                            fontSize: 14, fontWeight: FontWeight.w600)),
                     const SizedBox(width: 8),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
                       decoration: BoxDecoration(
                         color: statusColor.withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(statusLabel,
-                          style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
+                          style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
                               color: statusColor)),
                     ),
                   ],
@@ -221,7 +232,9 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
                 const SizedBox(height: 4),
                 Text(
                   '${marker.distance.toStringAsFixed(2)}m away  ·  ${marker.bearing.toStringAsFixed(0)}° bearing',
-                  style: TextStyle(fontSize: 12, fontFamily: 'monospace',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontFamily: 'monospace',
                       color: colors.textSecondary),
                 ),
               ],
@@ -236,7 +249,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
                 color: AppColors.info.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: const Icon(Icons.navigation_rounded, size: 20, color: AppColors.info),
+              child: const Icon(Icons.navigation_rounded,
+                  size: 20, color: AppColors.info),
             ),
           ),
         ],
@@ -259,7 +273,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
     if (_lastFingerprint.isNotEmpty &&
         conn.mapFingerprint.isNotEmpty &&
         _lastFingerprint != conn.mapFingerprint) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _refreshManualWaypoints());
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _refreshManualWaypoints());
     }
     return RefreshIndicator(
       onRefresh: _refreshManualWaypoints,
@@ -267,10 +282,14 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         children: [
           GlassCard(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('SAVE CURRENT POSE',
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
-                      letterSpacing: 1.2, color: colors.textTertiary)),
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.2,
+                      color: colors.textTertiary)),
               const SizedBox(height: 8),
               Text(
                 'Drive the robot to the spot, then tap a kind to save its current map pose '
@@ -281,11 +300,17 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
               ),
               const SizedBox(height: 10),
               Row(children: [
-                Expanded(child: _saveKindBtn('park', Icons.local_parking_rounded, AppColors.brand, conn)),
+                Expanded(
+                    child: _saveKindBtn('park', Icons.local_parking_rounded,
+                        AppColors.brand, conn)),
                 const SizedBox(width: 6),
-                Expanded(child: _saveKindBtn('summon', Icons.hail_rounded, AppColors.info, conn)),
+                Expanded(
+                    child: _saveKindBtn(
+                        'summon', Icons.hail_rounded, AppColors.info, conn)),
                 const SizedBox(width: 6),
-                Expanded(child: _saveKindBtn('home', Icons.home_rounded, AppColors.success, conn)),
+                Expanded(
+                    child: _saveKindBtn(
+                        'home', Icons.home_rounded, AppColors.success, conn)),
               ]),
             ]),
           ),
@@ -309,7 +334,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
     );
   }
 
-  Widget _saveKindBtn(String kind, IconData icon, Color color, ConnectionService conn) {
+  Widget _saveKindBtn(
+      String kind, IconData icon, Color color, ConnectionService conn) {
     return ElevatedButton.icon(
       icon: Icon(icon, size: 16),
       label: Text(kind, style: const TextStyle(fontSize: 12)),
@@ -334,79 +360,110 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
           decoration: const InputDecoration(labelText: 'Name'),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Save')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Save')),
         ],
       ),
     );
     if (ok != true) return;
     final pose = conn.robotStatus.pose;
     final wp = await conn.saveNamedWaypoint(
-        name: ctrl.text.trim(), kind: kind, x: pose.x, y: pose.y, yaw: pose.yaw);
+        name: ctrl.text.trim(),
+        kind: kind,
+        x: pose.x,
+        y: pose.y,
+        yaw: pose.yaw);
     if (wp != null) await _refreshManualWaypoints();
   }
 
-  Widget _manualWpCard(NamedWaypoint wp, ConnectionService conn, ResolvedColors colors) {
+  Widget _manualWpCard(
+      NamedWaypoint wp, ConnectionService conn, ResolvedColors colors) {
     Color kindColor;
     switch (wp.kind) {
-      case 'park': kindColor = AppColors.brand; break;
-      case 'summon': kindColor = AppColors.info; break;
-      case 'home': kindColor = AppColors.success; break;
-      default: kindColor = colors.textTertiary;
+      case 'park':
+        kindColor = AppColors.brand;
+        break;
+      case 'summon':
+        kindColor = AppColors.info;
+        break;
+      case 'home':
+        kindColor = AppColors.success;
+        break;
+      default:
+        kindColor = colors.textTertiary;
     }
     return GlassCard(
       margin: const EdgeInsets.only(bottom: 8),
       child: Row(children: [
         Container(
-          width: 44, height: 44,
+          width: 44,
+          height: 44,
           decoration: BoxDecoration(
             color: kindColor.withValues(alpha: 0.18),
             borderRadius: BorderRadius.circular(10),
           ),
           child: Icon(
-            wp.kind == 'park' ? Icons.local_parking_rounded
-                : wp.kind == 'summon' ? Icons.hail_rounded
-                : wp.kind == 'home' ? Icons.home_rounded
-                : Icons.location_on_rounded,
+            wp.kind == 'park'
+                ? Icons.local_parking_rounded
+                : wp.kind == 'summon'
+                    ? Icons.hail_rounded
+                    : wp.kind == 'home'
+                        ? Icons.home_rounded
+                        : Icons.location_on_rounded,
             color: kindColor,
           ),
         ),
         const SizedBox(width: 12),
         Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
-              Text(wp.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              Text(wp.name,
+                  style: const TextStyle(
+                      fontSize: 14, fontWeight: FontWeight.w600)),
               const SizedBox(width: 8),
               if (wp.stale)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
                     color: AppColors.warning.withValues(alpha: 0.18),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: const Text('stale',
-                      style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700,
-                          color: AppColors.warning, letterSpacing: 0.6)),
+                      style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.warning,
+                          letterSpacing: 0.6)),
                 ),
             ]),
             const SizedBox(height: 2),
             Text(
               '(${wp.x.toStringAsFixed(2)}, ${wp.y.toStringAsFixed(2)})  '
               'yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°',
-              style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: colors.textSecondary),
+              style: TextStyle(
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                  color: colors.textSecondary),
             ),
           ]),
         ),
         IconButton(
           tooltip: 'Navigate',
-          onPressed: wp.stale ? null : () async {
+          onPressed: () async {
             final ok = await conn.navigateToNamedWaypoint(wp.name);
             if (!mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text(ok ? 'Going to "${wp.name}"' : 'Navigate failed')));
+                content:
+                    Text(ok ? 'Going to "${wp.name}"' : 'Navigate failed')));
           },
           icon: Icon(Icons.navigation_rounded,
-              color: wp.stale ? colors.textTertiary : AppColors.info),
+              color: wp.stale ? AppColors.warning : AppColors.info),
         ),
         IconButton(
           tooltip: 'Rename',
@@ -419,7 +476,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
             await conn.deleteNamedWaypoint(wp.name);
             await _refreshManualWaypoints();
           },
-          icon: const Icon(Icons.delete_outline_rounded, color: AppColors.danger),
+          icon:
+              const Icon(Icons.delete_outline_rounded, color: AppColors.danger),
         ),
       ]),
     );
@@ -454,19 +512,23 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
     );
     if (newName == null || newName.isEmpty || newName == wp.name) return;
     final saved = await conn.saveNamedWaypoint(
-      name: newName, kind: wp.kind, x: wp.x, y: wp.y, yaw: wp.yaw,
+      name: newName,
+      kind: wp.kind,
+      x: wp.x,
+      y: wp.y,
+      yaw: wp.yaw,
     );
     if (saved == null) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Rename failed: could not save new name')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Rename failed: could not save new name')));
       return;
     }
     await conn.deleteNamedWaypoint(wp.name);
     await _refreshManualWaypoints();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Renamed to "$newName"')));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('Renamed to "$newName"')));
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -488,7 +550,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
                   colors,
                 )
               : ReorderableListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                   itemCount: _waypoints.length,
                   onReorder: (oldIndex, newIndex) {
                     setState(() {
@@ -508,7 +571,9 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
             child: Column(
               children: [
                 LinearProgressIndicator(
-                  value: _waypoints.isEmpty ? 0 : _currentWaypointIndex / _waypoints.length,
+                  value: _waypoints.isEmpty
+                      ? 0
+                      : _currentWaypointIndex / _waypoints.length,
                   backgroundColor: colors.surfaceLight,
                   valueColor: const AlwaysStoppedAnimation(AppColors.info),
                 ),
@@ -531,10 +596,12 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
                 child: ElevatedButton.icon(
                   onPressed: () => _showAddWaypointDialog(context, colors),
                   icon: const Icon(Icons.add_location_rounded, size: 18),
-                  label: const Text('Add', style: TextStyle(fontWeight: FontWeight.w600)),
+                  label: const Text('Add',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: colors.accentDim,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
               ),
@@ -549,24 +616,32 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
                       : null,
                   icon: Icon(
                     _missionState == MissionExecutionState.running
-                        ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                        ? Icons.stop_rounded
+                        : Icons.play_arrow_rounded,
                     size: 18,
                   ),
                   label: Text(
-                    _missionState == MissionExecutionState.running ? 'Stop' : 'Execute',
+                    _missionState == MissionExecutionState.running
+                        ? 'Stop'
+                        : 'Execute',
                     style: const TextStyle(fontWeight: FontWeight.w600),
                   ),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _missionState == MissionExecutionState.running
-                        ? AppColors.danger : AppColors.success.withValues(alpha: 0.8),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    backgroundColor:
+                        _missionState == MissionExecutionState.running
+                            ? AppColors.danger
+                            : AppColors.success.withValues(alpha: 0.8),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
               ),
               const SizedBox(width: 8),
               // Save
               IconButton(
-                onPressed: _waypoints.isNotEmpty ? () => _saveMission(context, colors) : null,
+                onPressed: _waypoints.isNotEmpty
+                    ? () => _saveMission(context, colors)
+                    : null,
                 icon: const Icon(Icons.save_rounded, size: 22),
                 color: colors.textSecondary,
               ),
@@ -585,7 +660,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
 
   Widget _waypointTile(int index, ResolvedColors colors) {
     final wp = _waypoints[index];
-    final isCurrent = _missionState == MissionExecutionState.running && index == _currentWaypointIndex;
+    final isCurrent = _missionState == MissionExecutionState.running &&
+        index == _currentWaypointIndex;
 
     return GlassCard(
       key: ValueKey('wp_$index'),
@@ -606,7 +682,9 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
             ),
             child: Center(
               child: Text('${index + 1}',
-                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
                       color: isCurrent ? Colors.white : colors.textSecondary)),
             ),
           ),
@@ -617,10 +695,14 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (wp.label != null)
-                  Text(wp.label!, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+                  Text(wp.label!,
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600)),
                 Text(
                   'X: ${wp.x.toStringAsFixed(2)}  Y: ${wp.y.toStringAsFixed(2)}  Yaw: ${wp.yaw.toStringAsFixed(2)}',
-                  style: TextStyle(fontSize: 11, fontFamily: 'monospace',
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontFamily: 'monospace',
                       color: colors.textSecondary),
                 ),
               ],
@@ -629,7 +711,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
           // Delete
           IconButton(
             onPressed: () => setState(() => _waypoints.removeAt(index)),
-            icon: Icon(Icons.close_rounded, size: 18, color: colors.textTertiary),
+            icon:
+                Icon(Icons.close_rounded, size: 18, color: colors.textTertiary),
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
           ),
@@ -651,36 +734,46 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            TextField(controller: labelCtrl,
-                decoration: const InputDecoration(labelText: 'Label (optional)')),
+            TextField(
+                controller: labelCtrl,
+                decoration:
+                    const InputDecoration(labelText: 'Label (optional)')),
             const SizedBox(height: 10),
-            TextField(controller: xCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            TextField(
+                controller: xCtrl,
+                keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true, signed: true),
                 decoration: const InputDecoration(labelText: 'X (meters)')),
             const SizedBox(height: 10),
-            TextField(controller: yCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            TextField(
+                controller: yCtrl,
+                keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true, signed: true),
                 decoration: const InputDecoration(labelText: 'Y (meters)')),
             const SizedBox(height: 10),
-            TextField(controller: yawCtrl,
-                keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            TextField(
+                controller: yawCtrl,
+                keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true, signed: true),
                 decoration: const InputDecoration(labelText: 'Yaw (radians)')),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx),
-              child: Text('Cancel', style: TextStyle(color: colors.textSecondary))),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('Cancel',
+                  style: TextStyle(color: colors.textSecondary))),
           ElevatedButton(
             onPressed: () {
               final x = double.tryParse(xCtrl.text);
               final y = double.tryParse(yCtrl.text);
               if (x == null || y == null) return;
               setState(() => _waypoints.add(Waypoint(
-                x: x,
-                y: y,
-                yaw: double.tryParse(yawCtrl.text) ?? 0,
-                label: labelCtrl.text.isEmpty ? null : labelCtrl.text,
-              )));
+                    x: x,
+                    y: y,
+                    yaw: double.tryParse(yawCtrl.text) ?? 0,
+                    label: labelCtrl.text.isEmpty ? null : labelCtrl.text,
+                  )));
               Navigator.pop(ctx);
             },
             child: const Text('Add'),
@@ -700,7 +793,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
       _currentWaypointIndex = 0;
     });
 
-    logger.info('Mission started with ${_waypoints.length} waypoints', LogCategory.navigation);
+    logger.info('Mission started with ${_waypoints.length} waypoints',
+        LogCategory.navigation);
     _sendCurrentWaypoint(conn, logger);
   }
 
@@ -726,7 +820,9 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
   void _stopMission() {
     _missionTimer?.cancel();
     setState(() => _missionState = MissionExecutionState.idle);
-    context.read<EventLogger>().warn('Mission stopped by user', LogCategory.navigation);
+    context
+        .read<EventLogger>()
+        .warn('Mission stopped by user', LogCategory.navigation);
   }
 
   void _saveMission(BuildContext context, ResolvedColors colors) {
@@ -741,13 +837,18 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
           autofocus: true,
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx),
-              child: Text('Cancel', style: TextStyle(color: colors.textSecondary))),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('Cancel',
+                  style: TextStyle(color: colors.textSecondary))),
           ElevatedButton(
             onPressed: () {
               if (nameCtrl.text.isEmpty) return;
-              final mission = Mission(name: nameCtrl.text, waypoints: List.from(_waypoints));
-              context.read<PreferencesService>().saveMission(nameCtrl.text, mission.toJsonString());
+              final mission = Mission(
+                  name: nameCtrl.text, waypoints: List.from(_waypoints));
+              context
+                  .read<PreferencesService>()
+                  .saveMission(nameCtrl.text, mission.toJsonString());
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('Mission "${nameCtrl.text}" saved')),
@@ -786,7 +887,8 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
                 title: Text(mission.name),
                 subtitle: Text('${mission.waypoints.length} waypoints'),
                 trailing: IconButton(
-                  icon: const Icon(Icons.delete_outline, size: 20, color: AppColors.danger),
+                  icon: const Icon(Icons.delete_outline,
+                      size: 20, color: AppColors.danger),
                   onPressed: () {
                     prefs.deleteMission(mission.name);
                     Navigator.pop(ctx);
@@ -805,22 +907,28 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
           ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx),
-              child: Text('Close', style: TextStyle(color: colors.textSecondary))),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child:
+                  Text('Close', style: TextStyle(color: colors.textSecondary))),
         ],
       ),
     );
   }
 
-  Widget _emptyState(IconData icon, String title, String subtitle, ResolvedColors colors) {
+  Widget _emptyState(
+      IconData icon, String title, String subtitle, ResolvedColors colors) {
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(icon, size: 48, color: colors.textTertiary),
           const SizedBox(height: 14),
-          Text(title, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600,
-              color: colors.textSecondary)),
+          Text(title,
+              style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: colors.textSecondary)),
           const SizedBox(height: 6),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 40),

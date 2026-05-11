@@ -107,10 +107,9 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 20 cm: with regulated_linear_scaling_min_speed at 0.10 the robot
-      # can approach slowly but the kick-start still produces a brief lurch.
-      # 0.20 m lets the controller commit and stop cleanly without hunting.
-      xy_goal_tolerance: 0.20
+      # 15 cm: mildly stricter than the earlier 20 cm stop window, but still
+      # loose enough to avoid hunting in the small testbed.
+      xy_goal_tolerance: 0.15
       yaw_goal_tolerance: 0.1  # ~6 degrees
     
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
@@ -127,11 +126,11 @@ controller_server:
       # Lookahead shortened further for tight parking maneuvers — at 0.40 m
       # default the carrot was overshooting REEDS_SHEPP cusps on close
       # perpendicular goals, causing RPP to drive past the cusp and loop.
-      # 0.30 default / 0.20 floor lets the controller honor segment breaks;
-      # 0.45 ceiling still allows fast cruising on long straight plans.
-      lookahead_dist: 0.30
-      min_lookahead_dist: 0.20
-      max_lookahead_dist: 0.45
+      # Mildly tightened for the small testbed: smaller carrot keeps the car
+      # closer to the orange plan without going so low that it oscillates.
+      lookahead_dist: 0.25
+      min_lookahead_dist: 0.16
+      max_lookahead_dist: 0.38
       use_velocity_scaled_lookahead_dist: true
       transform_tolerance: 0.2
       use_collision_detection: true
@@ -188,7 +187,7 @@ local_costmap:
       # tight perpendicular goals look reachable to the planner but
       # blocked to the controller.
       footprint: "[[0.15, 0.10], [0.15, -0.10], [-0.15, -0.10], [-0.15, 0.10]]"
-      footprint_padding: 0.02
+      footprint_padding: 0.01
       plugins: ["obstacle_layer", "inflation_layer"]
       
       obstacle_layer:
@@ -208,13 +207,11 @@ local_costmap:
       
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 5.0
-        # Matched to global_costmap (0.12) so the planner and controller
-        # see the same drivable area. Earlier 0.20 m here created a
-        # pinch: planner happily routed into cells the local costmap
-        # treated as lethal-inflated, and the controller would refuse to
-        # follow, causing the perpendicular-goal loop.
-        inflation_radius: 0.12
+        cost_scaling_factor: 8.0
+        # Conservative shrink from 0.12 m. The radius stays just above the
+        # padded footprint's inscribed radius, while the higher cost scaling
+        # makes obstacle halos fall off faster on the tiny testbed map.
+        inflation_radius: 0.115
 
       always_send_full_costmap: true
 
@@ -229,7 +226,7 @@ global_costmap:
       # Same rectangular footprint as local_costmap. Keeps planner +
       # controller in lockstep about what fits.
       footprint: "[[0.15, 0.10], [0.15, -0.10], [-0.15, -0.10], [-0.15, 0.10]]"
-      footprint_padding: 0.02
+      footprint_padding: 0.01
       resolution: 0.05  # Coarser global grid for faster Hybrid-A* planning
       track_unknown_space: true
       # Plugins: static map, road mask (keepout), obstacles, inflation
@@ -265,8 +262,8 @@ global_costmap:
       
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 2.5
-        inflation_radius: 0.12
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.115
       
       always_send_full_costmap: true
 

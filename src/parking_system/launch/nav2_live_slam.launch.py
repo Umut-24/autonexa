@@ -91,6 +91,10 @@ def generate_launch_description():
     servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1150')
     servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='2150')
     servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='-1')
+    reverse_steer_polarity_arg = DeclareLaunchArgument(
+        'reverse_steer_polarity',
+        default_value='-1',
+        description='Flip steering sign only while reversing. -1 matches this chassis reverse maneuvering.')
     # +1 = ROS-positive vx -> chassis forward (standard). The mobile app's
     # Calibrate Direction wizard flips this at runtime via SetParameters and
     # persists the chosen value to ~/.autonexa/runtime_overrides.yaml.
@@ -357,6 +361,7 @@ def generate_launch_description():
             'servo_us_min':      LaunchConfiguration('servo_us_min'),
             'servo_us_max':      LaunchConfiguration('servo_us_max'),
             'servo_polarity':    LaunchConfiguration('servo_polarity'),
+            'reverse_steer_polarity': LaunchConfiguration('reverse_steer_polarity'),
             'vx_polarity':       LaunchConfiguration('vx_polarity'),
             'max_steer_rate_radps': LaunchConfiguration('max_steer_rate_radps'),
             'auto_enable':       True,
@@ -433,6 +438,7 @@ def generate_launch_description():
         servo_us_min_arg,
         servo_us_max_arg,
         servo_polarity_arg,
+        reverse_steer_polarity_arg,
         vx_polarity_arg,
         max_steer_rate_arg,
         use_mobile_bridge_arg,

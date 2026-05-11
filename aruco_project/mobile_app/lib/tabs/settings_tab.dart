@@ -81,7 +81,8 @@ class _SettingsTabState extends State<SettingsTab> {
       backgroundColor: colors.background,
       appBar: AppBar(
         backgroundColor: colors.surface,
-        title: const Text('Settings', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+        title: const Text('Settings',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_rounded),
           onPressed: () => Navigator.pop(context),
@@ -96,10 +97,13 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('SERVER CONNECTION', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('SERVER CONNECTION',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
-
                   Row(
                     children: [
                       Expanded(
@@ -107,17 +111,20 @@ class _SettingsTabState extends State<SettingsTab> {
                           controller: _serverController,
                           decoration: InputDecoration(
                             hintText: 'e.g. 192.168.1.5:5000',
-                            prefixIcon: Icon(Icons.dns_rounded, size: 20,
-                                color: colors.textSecondary),
+                            prefixIcon: Icon(Icons.dns_rounded,
+                                size: 20, color: colors.textSecondary),
                             suffixIcon: prefs.savedServers.isNotEmpty
                                 ? IconButton(
                                     icon: Icon(
                                       _showServerHistory
-                                          ? Icons.expand_less : Icons.expand_more,
-                                      size: 20, color: colors.textSecondary,
+                                          ? Icons.expand_less
+                                          : Icons.expand_more,
+                                      size: 20,
+                                      color: colors.textSecondary,
                                     ),
                                     onPressed: () => setState(() =>
-                                        _showServerHistory = !_showServerHistory),
+                                        _showServerHistory =
+                                            !_showServerHistory),
                                   )
                                 : null,
                           ),
@@ -125,7 +132,6 @@ class _SettingsTabState extends State<SettingsTab> {
                       ),
                     ],
                   ),
-
                   if (_showServerHistory && prefs.savedServers.isNotEmpty)
                     Container(
                       margin: const EdgeInsets.only(top: 6),
@@ -138,11 +144,12 @@ class _SettingsTabState extends State<SettingsTab> {
                         children: prefs.savedServers.map((server) {
                           return ListTile(
                             dense: true,
-                            title: Text(server, style: const TextStyle(fontSize: 13,
-                                fontFamily: 'monospace')),
+                            title: Text(server,
+                                style: const TextStyle(
+                                    fontSize: 13, fontFamily: 'monospace')),
                             trailing: IconButton(
-                              icon: Icon(Icons.close, size: 16,
-                                  color: colors.textTertiary),
+                              icon: Icon(Icons.close,
+                                  size: 16, color: colors.textTertiary),
                               onPressed: () {
                                 prefs.removeServer(server);
                                 setState(() {});
@@ -156,9 +163,7 @@ class _SettingsTabState extends State<SettingsTab> {
                         }).toList(),
                       ),
                     ),
-
                   const SizedBox(height: 14),
-
                   Row(
                     children: [
                       Expanded(
@@ -179,22 +184,25 @@ class _SettingsTabState extends State<SettingsTab> {
                           icon: const Icon(Icons.link_off_rounded, size: 18),
                           label: const Text('Disconnect'),
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: AppColors.danger.withValues(alpha: 0.8),
+                            backgroundColor:
+                                AppColors.danger.withValues(alpha: 0.8),
                             disabledBackgroundColor: colors.surfaceLight,
                           ),
                         ),
                       ),
                     ],
                   ),
-
                   if (conn.isConnected) ...[
                     const SizedBox(height: 12),
                     Row(
                       children: [
-                        ConnectionIndicator(status: conn.status, showLabel: true),
+                        ConnectionIndicator(
+                            status: conn.status, showLabel: true),
                         const Spacer(),
                         Text(conn.baseUrl ?? '',
-                            style: TextStyle(fontSize: 11, fontFamily: 'monospace',
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontFamily: 'monospace',
                                 color: colors.textSecondary)),
                       ],
                     ),
@@ -208,22 +216,29 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('APPEARANCE', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('APPEARANCE',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
                   Row(
                     children: [
-                      Icon(themeProvider.themeIcon, size: 20, color: colors.textSecondary),
+                      Icon(themeProvider.themeIcon,
+                          size: 20, color: colors.textSecondary),
                       const SizedBox(width: 12),
                       Text('Theme',
-                          style: TextStyle(fontSize: 13, color: colors.textSecondary)),
+                          style: TextStyle(
+                              fontSize: 13, color: colors.textSecondary)),
                       const Spacer(),
                       _themeToggle(themeProvider, colors),
                     ],
                   ),
                   if (themeProvider.isDark) ...[
                     const SizedBox(height: 12),
-                    _switchRow('AMOLED black mode', themeProvider.amoled, colors, (v) {
+                    _switchRow(
+                        'AMOLED black mode', themeProvider.amoled, colors, (v) {
                       themeProvider.setAmoled(v);
                     }),
                   ],
@@ -236,8 +251,12 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('COMMUNICATION', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('COMMUNICATION',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
                   _infoRow('Protocol', 'HTTP (Flask bridge)', colors),
                   const SizedBox(height: 8),
@@ -250,17 +269,21 @@ class _SettingsTabState extends State<SettingsTab> {
                     decoration: BoxDecoration(
                       color: AppColors.info.withValues(alpha: 0.08),
                       borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: AppColors.info.withValues(alpha: 0.15)),
+                      border: Border.all(
+                          color: AppColors.info.withValues(alpha: 0.15)),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Row(
+                        const Row(
                           children: [
-                            const Icon(Icons.tips_and_updates_rounded, size: 14, color: AppColors.info),
-                            const SizedBox(width: 6),
+                            Icon(Icons.tips_and_updates_rounded,
+                                size: 14, color: AppColors.info),
+                            SizedBox(width: 6),
                             Text('Upgrade tip',
-                                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
                                     color: AppColors.info)),
                           ],
                         ),
@@ -269,7 +292,8 @@ class _SettingsTabState extends State<SettingsTab> {
                           'For lower latency (5-15ms vs 20-80ms) and reduced RPi5 CPU load, '
                           'consider switching to WebSocket via Foxglove Bridge. '
                           'Install: sudo apt install ros-jazzy-foxglove-bridge',
-                          style: TextStyle(fontSize: 11, color: colors.textSecondary),
+                          style: TextStyle(
+                              fontSize: 11, color: colors.textSecondary),
                         ),
                       ],
                     ),
@@ -283,16 +307,23 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('CONTROL', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('CONTROL',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
                   Row(
                     children: [
                       Text('Default Speed Limit',
-                          style: TextStyle(fontSize: 13, color: colors.textSecondary)),
+                          style: TextStyle(
+                              fontSize: 13, color: colors.textSecondary)),
                       const Spacer(),
                       Text('${(prefs.defaultSpeedLimit * 100).toInt()}%',
-                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                          style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
                               color: AppColors.brand)),
                     ],
                   ),
@@ -302,7 +333,8 @@ class _SettingsTabState extends State<SettingsTab> {
                       inactiveTrackColor: colors.surfaceLight,
                       thumbColor: AppColors.brand,
                       trackHeight: 4,
-                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
+                      thumbShape:
+                          const RoundSliderThumbShape(enabledThumbRadius: 8),
                     ),
                     child: Slider(
                       value: prefs.defaultSpeedLimit,
@@ -316,12 +348,14 @@ class _SettingsTabState extends State<SettingsTab> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  _switchRow('Auto-reconnect', prefs.autoReconnect, colors, (v) {
+                  _switchRow('Auto-reconnect', prefs.autoReconnect, colors,
+                      (v) {
                     prefs.setAutoReconnect(v);
                     setState(() {});
                   }),
                   const SizedBox(height: 8),
-                  _switchRow('Haptic feedback', prefs.hapticEnabled, colors, (v) {
+                  _switchRow('Haptic feedback', prefs.hapticEnabled, colors,
+                      (v) {
                     prefs.setHapticEnabled(v);
                     setState(() {});
                   }),
@@ -334,25 +368,33 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('SUMMON POINT', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('SUMMON POINT',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
                   if (prefs.summonPose != null) ...[
                     Row(
                       children: [
-                        const Icon(Icons.hail_rounded, size: 18, color: AppColors.brand),
+                        const Icon(Icons.hail_rounded,
+                            size: 18, color: AppColors.brand),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
                             'X: ${prefs.summonPose!['x']!.toStringAsFixed(2)}  '
                             'Y: ${prefs.summonPose!['y']!.toStringAsFixed(2)}  '
                             'Yaw: ${prefs.summonPose!['yaw']!.toStringAsFixed(2)}',
-                            style: TextStyle(fontSize: 12, fontFamily: 'monospace',
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontFamily: 'monospace',
                                 color: colors.textSecondary),
                           ),
                         ),
                         IconButton(
-                          icon: const Icon(Icons.delete_outline, size: 20, color: AppColors.danger),
+                          icon: const Icon(Icons.delete_outline,
+                              size: 20, color: AppColors.danger),
                           onPressed: () {
                             prefs.clearSummonPose();
                             setState(() {});
@@ -363,7 +405,8 @@ class _SettingsTabState extends State<SettingsTab> {
                   ] else
                     Text(
                       'No summon point set. Tap "Summon" on the Home tab to set one.',
-                      style: TextStyle(fontSize: 12, color: colors.textTertiary),
+                      style:
+                          TextStyle(fontSize: 12, color: colors.textTertiary),
                     ),
                 ],
               ),
@@ -374,18 +417,24 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('DISPLAY', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('DISPLAY',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
                   Row(
                     children: [
                       Text('Map Refresh Rate',
-                          style: TextStyle(fontSize: 13, color: colors.textSecondary)),
+                          style: TextStyle(
+                              fontSize: 13, color: colors.textSecondary)),
                       const Spacer(),
                       DropdownButton<int>(
                         value: prefs.mapRefreshMs,
                         dropdownColor: colors.surface,
-                        style: TextStyle(fontSize: 13, color: colors.textPrimary),
+                        style:
+                            TextStyle(fontSize: 13, color: colors.textPrimary),
                         underline: const SizedBox.shrink(),
                         items: const [
                           DropdownMenuItem(value: 1000, child: Text('1s')),
@@ -408,13 +457,18 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('CALIBRATION', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('CALIBRATION',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
                   Text(
                     'If a Nav2 goal makes the robot drive the wrong way, '
                     'use this to flip vx_polarity (forward/back) or '
-                    'servo_polarity (left/right). Values persist on disk.',
+                    'servo_polarity (all left/right). Reverse-only steering '
+                    'is in Diagnostics → Param Tuner. Values persist on disk.',
                     style: TextStyle(fontSize: 12, color: colors.textSecondary),
                   ),
                   const SizedBox(height: 10),
@@ -441,13 +495,18 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('NAV2 MAX SPEED', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('NAV2 MAX SPEED',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
                   Builder(builder: (_) {
                     if (!conn.isConnected) {
                       return Text('Connect to adjust Nav2 speed.',
-                          style: TextStyle(fontSize: 12, color: colors.textTertiary));
+                          style: TextStyle(
+                              fontSize: 12, color: colors.textTertiary));
                     }
                     _ensureNav2Speed();
                     final value = _nav2MaxSpeed ?? 0.30;
@@ -456,11 +515,14 @@ class _SettingsTabState extends State<SettingsTab> {
                       children: [
                         Row(children: [
                           Text('target speed',
-                              style: TextStyle(fontSize: 13, color: colors.textSecondary)),
+                              style: TextStyle(
+                                  fontSize: 13, color: colors.textSecondary)),
                           const Spacer(),
                           Text('${value.toStringAsFixed(2)} m/s',
-                              style: const TextStyle(fontSize: 13,
-                                  fontWeight: FontWeight.w700, color: AppColors.brand)),
+                              style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.brand)),
                         ]),
                         SliderTheme(
                           data: SliderTheme.of(context).copyWith(
@@ -480,7 +542,9 @@ class _SettingsTabState extends State<SettingsTab> {
                               final ok = await conn.setNav2MaxSpeed(v);
                               if (!ok && mounted) {
                                 messenger.showSnackBar(
-                                  const SnackBar(content: Text('Failed to update Nav2 speed')),
+                                  const SnackBar(
+                                      content:
+                                          Text('Failed to update Nav2 speed')),
                                 );
                               }
                             },
@@ -489,7 +553,8 @@ class _SettingsTabState extends State<SettingsTab> {
                         Text(
                           'Applies to RPP FollowPath.desired_linear_vel and velocity_smoother in lockstep. '
                           'Persists across relaunches.',
-                          style: TextStyle(fontSize: 11, color: colors.textTertiary),
+                          style: TextStyle(
+                              fontSize: 11, color: colors.textTertiary),
                         ),
                       ],
                     );
@@ -503,8 +568,12 @@ class _SettingsTabState extends State<SettingsTab> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('ABOUT', style: TextStyle(fontSize: 11,
-                      fontWeight: FontWeight.w700, letterSpacing: 1.2, color: colors.textTertiary)),
+                  Text('ABOUT',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
                   const SizedBox(height: 14),
                   Row(
                     children: [
@@ -515,11 +584,14 @@ class _SettingsTabState extends State<SettingsTab> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text('AutoNexa Mobile Controller',
-                                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600,
+                                style: TextStyle(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w600,
                                     color: colors.textPrimary)),
                             const SizedBox(height: 4),
                             Text('Version 2.1.0',
-                                style: TextStyle(fontSize: 12, color: colors.textSecondary)),
+                                style: TextStyle(
+                                    fontSize: 12, color: colors.textSecondary)),
                           ],
                         ),
                       ),
@@ -560,8 +632,9 @@ class _SettingsTabState extends State<SettingsTab> {
             themeProvider.setAmoled(false);
             themeProvider.setMode(ThemeMode.dark);
           }),
-          _themeBtn(Icons.light_mode_rounded, 'Light',
-              !themeProvider.isDark, colors, () {
+          _themeBtn(
+              Icons.light_mode_rounded, 'Light', !themeProvider.isDark, colors,
+              () {
             themeProvider.setMode(ThemeMode.light);
           }),
         ],
@@ -569,7 +642,8 @@ class _SettingsTabState extends State<SettingsTab> {
     );
   }
 
-  Widget _themeBtn(IconData icon, String label, bool active, ResolvedColors colors, VoidCallback onTap) {
+  Widget _themeBtn(IconData icon, String label, bool active,
+      ResolvedColors colors, VoidCallback onTap) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -581,13 +655,16 @@ class _SettingsTabState extends State<SettingsTab> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 14, color: active ? AppColors.brand : colors.textTertiary),
+            Icon(icon,
+                size: 14,
+                color: active ? AppColors.brand : colors.textTertiary),
             const SizedBox(width: 4),
-            Text(label, style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-              color: active ? AppColors.brand : colors.textTertiary,
-            )),
+            Text(label,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: active ? AppColors.brand : colors.textTertiary,
+                )),
           ],
         ),
       ),
@@ -597,18 +674,25 @@ class _SettingsTabState extends State<SettingsTab> {
   Widget _infoRow(String label, String value, ResolvedColors colors) {
     return Row(
       children: [
-        Text(label, style: TextStyle(fontSize: 12, color: colors.textSecondary)),
+        Text(label,
+            style: TextStyle(fontSize: 12, color: colors.textSecondary)),
         const Spacer(),
-        Text(value, style: TextStyle(fontSize: 12, fontFamily: 'monospace',
-            fontWeight: FontWeight.w600, color: colors.textPrimary)),
+        Text(value,
+            style: TextStyle(
+                fontSize: 12,
+                fontFamily: 'monospace',
+                fontWeight: FontWeight.w600,
+                color: colors.textPrimary)),
       ],
     );
   }
 
-  Widget _switchRow(String label, bool value, ResolvedColors colors, ValueChanged<bool> onChanged) {
+  Widget _switchRow(String label, bool value, ResolvedColors colors,
+      ValueChanged<bool> onChanged) {
     return Row(
       children: [
-        Text(label, style: TextStyle(fontSize: 13, color: colors.textSecondary)),
+        Text(label,
+            style: TextStyle(fontSize: 13, color: colors.textSecondary)),
         const Spacer(),
         Switch(
           value: value,
