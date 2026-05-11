@@ -121,13 +121,33 @@ class _MapTabState extends State<MapTab> {
     );
   }
 
-  /// Long-press = pose reset. The user is asserting "this is where the robot
-  /// actually is right now"; we publish PoseWithCovarianceStamped on
-  /// /initialpose. AMCL or SLAM Toolbox snaps to the new pose.
+  /// Long-press = either waypoint context menu (if the press landed near a
+  /// saved waypoint marker) or pose reset (anywhere else). Pose reset
+  /// publishes PoseWithCovarianceStamped on /initialpose; AMCL or SLAM
+  /// Toolbox snaps to the new pose.
   Future<void> _onLongPressMap(
       BuildContext context, LongPressStartDetails details, ConnectionService conn) async {
     final coords = _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
     if (coords == null || conn.mapImage == null) return;
+
+    // Waypoint hit-test in map-frame meters. 0.15 m is generous enough to
+    // forgive fat fingers on a phone screen but tight enough that taps on
+    // empty floor fall through to pose reset.
+    NamedWaypoint? hit;
+    double hitDist = 0.15;
+    for (final wp in conn.namedWaypoints) {
+      final d = math.sqrt(
+          math.pow(wp.x - coords[0], 2) + math.pow(wp.y - coords[1], 2));
+      if (d < hitDist) {
+        hit = wp;
+        hitDist = d;
+      }
+    }
+    if (hit != null) {
+      await _waypointContextMenu(context, conn, hit);
+      return;
+    }
+
     final yawCtrl = TextEditingController(
         text: conn.robotStatus.pose.yaw.toStringAsFixed(2));
     final ok = await showDialog<bool>(
@@ -158,6 +178,128 @@ class _MapTabState extends State<MapTab> {
       final yaw = double.tryParse(yawCtrl.text) ?? 0.0;
       await conn.relocalize(coords[0], coords[1], yaw);
     }
+  }
+
+  /// Bottom sheet shown when a long-press lands on a saved waypoint marker.
+  Future<void> _waypointContextMenu(
+      BuildContext context, ConnectionService conn, NamedWaypoint wp) async {
+    final colors = context.read<ThemeProvider>().colors;
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: colors.surface,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+            child: Row(children: [
+              Icon(Icons.location_on_rounded,
+                  color: wp.kind == 'park'
+                      ? AppColors.success
+                      : wp.kind == 'summon'
+                          ? AppColors.info
+                          : AppColors.brand),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(wp.name,
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+              ),
+              Text(wp.kind,
+                  style: TextStyle(fontSize: 11, color: colors.textTertiary)),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
+              '(${wp.x.toStringAsFixed(2)}, ${wp.y.toStringAsFixed(2)})'
+              '  yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°'
+              '${wp.stale ? '  • stale' : ''}',
+              style: TextStyle(
+                  fontSize: 11, fontFamily: 'monospace', color: colors.textSecondary),
+            ),
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.navigation_rounded, color: AppColors.info),
+            title: const Text('Navigate here'),
+            enabled: !wp.stale,
+            onTap: wp.stale
+                ? null
+                : () async {
+                    Navigator.pop(ctx);
+                    final ok = await conn.navigateToNamedWaypoint(wp.name);
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(
+                          ok ? 'Going to "${wp.name}"' : 'Navigate failed'),
+                    ));
+                  },
+          ),
+          ListTile(
+            leading: const Icon(Icons.edit_rounded, color: AppColors.brand),
+            title: const Text('Rename'),
+            onTap: () async {
+              Navigator.pop(ctx);
+              await _renameWaypoint(context, conn, wp);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_outline_rounded, color: AppColors.danger),
+            title: const Text('Delete'),
+            onTap: () async {
+              Navigator.pop(ctx);
+              final ok = await conn.deleteNamedWaypoint(wp.name);
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                content: Text(ok ? 'Deleted "${wp.name}"' : 'Delete failed'),
+              ));
+            },
+          ),
+          const SizedBox(height: 8),
+        ]),
+      ),
+    );
+  }
+
+  /// Rename a waypoint via DELETE-old + POST-new (the bridge keys waypoints
+  /// by name, so this is an atomic-enough swap).
+  Future<void> _renameWaypoint(
+      BuildContext context, ConnectionService conn, NamedWaypoint wp) async {
+    final ctrl = TextEditingController(text: wp.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename waypoint'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty || newName == wp.name) return;
+    // Upsert under the new name first; if that fails we still have the old
+    // entry untouched. Only delete the old name on success.
+    final saved = await conn.saveNamedWaypoint(
+      name: newName, kind: wp.kind, x: wp.x, y: wp.y, yaw: wp.yaw,
+    );
+    if (saved == null) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Rename failed: could not save new name')));
+      return;
+    }
+    await conn.deleteNamedWaypoint(wp.name);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Renamed to "$newName"')));
   }
 
   Future<void> _showResetMenu(BuildContext context, ConnectionService conn) async {

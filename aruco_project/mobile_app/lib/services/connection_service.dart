@@ -869,8 +869,11 @@ class ConnectionService extends ChangeNotifier {
           body: jsonEncode({
             // Joystick 'y' maps to vx (linear), 'x' to wz (angular). Normalize
             // to [-1,1] against bridge clamps (max_vx=0.35, max_wz=0.8).
+            // Note: the bridge inverts 'x' before publishing to angular.z (so
+            // joystick-right = right turn). Pre-invert here so a positive
+            // wz argument (= ROS-positive = left turn) is honored.
             'y': (vx / 0.35).clamp(-1.0, 1.0),
-            'x': (wz / 0.8).clamp(-1.0, 1.0),
+            'x': (-wz / 0.8).clamp(-1.0, 1.0),
             'e': 0,
             'speed_limit': 1.0,
           }),
@@ -1094,35 +1097,6 @@ class ConnectionService extends ChangeNotifier {
       });
       return out;
     } catch (_) { return {}; }
-  }
-
-  // --- Desktop screenshot (1 Hz) ---
-
-  /// Cheap version-probe call; returns the bridge's current desktop_shot
-  /// counter (or null on transient HTTP error). Designed for ETag-style
-  /// polling: clients only refetch the JPEG when the version changes.
-  Future<int?> fetchDesktopVersion() async {
-    if (_baseUrl == null) return null;
-    try {
-      final resp = await http.get(Uri.parse('$_baseUrl/api/desktop_version'))
-          .timeout(const Duration(seconds: 1));
-      if (resp.statusCode != 200) return null;
-      final json = jsonDecode(resp.body) as Map<String, dynamic>;
-      final v = json['v'];
-      return v is num ? v.toInt() : null;
-    } catch (_) { return null; }
-  }
-
-  /// Fetch the latest desktop screenshot JPEG bytes (~80–200 KB at 720p).
-  /// Returns null on 503 (no shot yet) or any HTTP error.
-  Future<Uint8List?> fetchDesktopShot() async {
-    if (_baseUrl == null) return null;
-    try {
-      final resp = await http.get(Uri.parse('$_baseUrl/api/desktop_shot'))
-          .timeout(const Duration(seconds: 3));
-      if (resp.statusCode != 200 || resp.bodyBytes.isEmpty) return null;
-      return resp.bodyBytes;
-    } catch (_) { return null; }
   }
 
   // --- Health (Part G3) ---

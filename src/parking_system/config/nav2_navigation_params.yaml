@@ -118,14 +118,14 @@ controller_server:
       # runtime_overrides.yaml.
       desired_linear_vel: 0.20
 
-      # Lookahead shortened for 1-2 m testbed so the carrot doesn't land
-      # around corners or beyond cusps. At 0.45 m min the carrot was
-      # 22-45% of the testbed — too far for tight turns. 0.30 m still
-      # exceeds the minimum useful distance but keeps the carrot close
-      # enough that RPP can track tight REEDS_SHEPP arcs.
-      lookahead_dist: 0.40
-      min_lookahead_dist: 0.30
-      max_lookahead_dist: 0.60
+      # Lookahead shortened further for tight parking maneuvers — at 0.40 m
+      # default the carrot was overshooting REEDS_SHEPP cusps on close
+      # perpendicular goals, causing RPP to drive past the cusp and loop.
+      # 0.30 default / 0.20 floor lets the controller honor segment breaks;
+      # 0.45 ceiling still allows fast cruising on long straight plans.
+      lookahead_dist: 0.30
+      min_lookahead_dist: 0.20
+      max_lookahead_dist: 0.45
       use_velocity_scaled_lookahead_dist: true
       transform_tolerance: 0.2
       use_collision_detection: true
@@ -134,10 +134,10 @@ controller_server:
       use_cost_regulated_linear_velocity_scaling: true
       cost_scaling_dist: 0.6
       cost_scaling_gain: 1.0
-      # Start slowing at 0.50 m curvature radius — slightly above R_min
-      # (0.43 m) so the regulator decelerates before the chassis hits its
-      # physical turning limit.
-      regulated_linear_scaling_min_radius: 0.50
+      # Start slowing at 0.45 m curvature radius — slightly above the
+      # planner's new R_min (0.40 m) so the regulator decelerates before
+      # the chassis hits its physical turning limit.
+      regulated_linear_scaling_min_radius: 0.45
 
       # Aligned with the chassis's actual minimum movable speed: the L298N
       # kick-start sustains at ~30% PWM which corresponds to ~0.18 m/s.
@@ -153,11 +153,14 @@ controller_server:
       # acceptable for parking-style maneuvers in tight spaces.
       use_rotate_to_heading: false
       allow_reversing: true
-      # Clamped to testbed scale so RPP only matches nearby path segments.
-      # At 5.0 m (previous default), REEDS_SHEPP cusps that overlap in XY
-      # caused RPP to match the robot to the wrong segment (e.g. reverse
-      # when it should be forward), producing opposite/perpendicular motion.
-      max_robot_pose_search_dist: 1.0
+      # Raised from 1.0 m to 3.0 m so RPP can find the next path segment
+      # across REEDS_SHEPP cusps that may be 1.5-2 m apart along the plan
+      # arc even if their XY positions remain inside the 2x2 m testbed.
+      # The earlier 1.0 m clamp made multi-point parallel-park plans
+      # un-followable: after the first cusp, RPP couldn't reach the next
+      # segment and re-latched onto the first, looping. Cusp tracking is
+      # protected separately by the bridge's 250 ms cusp cooldown.
+      max_robot_pose_search_dist: 3.0
 
 local_costmap:
   local_costmap:
@@ -171,7 +174,14 @@ local_costmap:
       width: 2
       height: 2
       resolution: 0.02  # 2cm resolution for small spaces
-      robot_radius: 0.1
+      # Rectangular Ackermann footprint matches the URDF collision box
+      # (0.30 × 0.20 m centered on base_link). Using a circle (robot_radius)
+      # underestimated the chassis length and overestimated the width,
+      # which mismatched the global costmap (12 cm inflation) and made
+      # tight perpendicular goals look reachable to the planner but
+      # blocked to the controller.
+      footprint: "[[0.15, 0.10], [0.15, -0.10], [-0.15, -0.10], [-0.15, 0.10]]"
+      footprint_padding: 0.02
       plugins: ["obstacle_layer", "inflation_layer"]
       
       obstacle_layer:
@@ -192,8 +202,13 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0
-        inflation_radius: 0.2
-      
+        # Matched to global_costmap (0.12) so the planner and controller
+        # see the same drivable area. Earlier 0.20 m here created a
+        # pinch: planner happily routed into cells the local costmap
+        # treated as lethal-inflated, and the controller would refuse to
+        # follow, causing the perpendicular-goal loop.
+        inflation_radius: 0.12
+
       always_send_full_costmap: true
 
 global_costmap:
@@ -204,7 +219,10 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: false
-      robot_radius: 0.1
+      # Same rectangular footprint as local_costmap. Keeps planner +
+      # controller in lockstep about what fits.
+      footprint: "[[0.15, 0.10], [0.15, -0.10], [-0.15, -0.10], [-0.15, 0.10]]"
+      footprint_padding: 0.02
       resolution: 0.05  # Coarser global grid for faster Hybrid-A* planning
       track_unknown_space: true
       # Plugins: static map, road mask (keepout), obstacles, inflation
@@ -282,8 +300,15 @@ planner_server:
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
-      minimum_turning_radius: 0.45
-      reverse_penalty: 2.0
+      # Matches the chassis's physical R_min = L / tan(30°) ≈ 0.43 m
+      # (wheelbase 0.25 m, max steer 30°). Slightly under the geometric
+      # limit so the planner can emit primitives the bridge can actually
+      # execute. Dropping below 0.40 risks plans the servo can't follow.
+      minimum_turning_radius: 0.40
+      # Lower reverse penalty (2.0 -> 1.5) encourages the planner to emit
+      # 3-point parallel-park solutions when the geometry needs them
+      # instead of looping a too-tight forward arc.
+      reverse_penalty: 1.5
       change_penalty: 0.5
       non_straight_penalty: 1.20
       cost_penalty: 1.5
@@ -313,9 +338,13 @@ behavior_server:
     costmap_topic: local_costmap/costmap_raw
     footprint_topic: local_costmap/published_footprint
     cycle_frequency: 10.0
-    behavior_plugins: ["spin", "backup", "wait"]
-    spin:
-      plugin: "nav2_behaviors::Spin"
+    # Ackermann chassis: `spin` is geometrically impossible (front-wheel
+    # steer, rear-wheel drive — no in-place rotation). Removed from the
+    # recovery list so every BT recovery cycle no longer burns one tick
+    # on a guaranteed-fail behavior. BackUp + Wait remain useful: BackUp
+    # un-wedges from inflated corners, Wait gives moving obstacles time
+    # to clear.
+    behavior_plugins: ["backup", "wait"]
     backup:
       plugin: "nav2_behaviors::BackUp"
     wait:
@@ -324,9 +353,6 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.1
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.5
-    min_rotational_vel: 0.1
-    rotational_acc_lim: 1.5
 
 waypoint_follower:
   ros__parameters:

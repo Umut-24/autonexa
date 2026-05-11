@@ -11,6 +11,8 @@ What this provides:
 TF Tree: map -> odom -> base_link -> laser_link
 """
 
+import os
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
 from launch.conditions import IfCondition
@@ -95,11 +97,15 @@ def generate_launch_description():
         description='Servo slew-rate cap (rad/s). Smooths Nav2 wz step changes.')
 
     # In live SLAM mode there is no road-mask topic by default.
+    # Also point bt_navigator at our Ackermann-aware BT XML (no Spin recovery)
+    # — uses the package's installed share path so it works from any cwd.
+    ackermann_bt_xml = os.path.join(pkg_dir, 'config', 'bt_navigate_to_pose_ackermann.xml')
     configured_nav2_params = RewrittenYaml(
         source_file=nav2_params_file,
         root_key='',
         param_rewrites={
             'global_costmap.global_costmap.ros__parameters.keepout_filter.enabled': 'false',
+            'bt_navigator.ros__parameters.default_nav_to_pose_bt_xml': ackermann_bt_xml,
         },
         convert_types=True,
     )

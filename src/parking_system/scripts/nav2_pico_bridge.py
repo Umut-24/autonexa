@@ -118,8 +118,8 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('max_speed_pulses', 30)
 
         self.declare_parameter('servo_center_us', 1650)
-        self.declare_parameter('servo_us_min', 1100)
-        self.declare_parameter('servo_us_max', 1900)
+        self.declare_parameter('servo_us_min', 1150)
+        self.declare_parameter('servo_us_max', 2150)
         self.declare_parameter('servo_max_steer_rad', 0.5236)
         # Default -1 on this chassis: empirically the linkage geometry inverts
         # the firmware's intended sign so that ROS-positive wz (left turn)
@@ -357,19 +357,21 @@ class Nav2PicoBridge(Node):
                 self.servo_center = int(p.value)
             elif p.name == 'servo_us_min':
                 # Hard floor at 1100 µs — beyond this the linkage binds and
-                # the servo stalls/draws current. Param tuner cannot widen
-                # past mechanical safe range.
+                # the servo stalls/draws current. Param tuner can trim *up*
+                # from the 1150 default if the user wants to spare the servo.
                 if not 1100 <= int(p.value) <= self.servo_center:
                     return SetParametersResult(
                         successful=False,
                         reason='servo_us_min must be in [1100, servo_center_us]')
                 self.servo_us_min = int(p.value)
             elif p.name == 'servo_us_max':
-                # Hard ceiling at 1900 µs — same rationale as min above.
-                if not self.servo_center <= int(p.value) <= 1900:
+                # Hard ceiling at 2200 µs — keeps a margin below the Pico
+                # firmware's absolute 2500 µs mechanical limit. Param tuner
+                # can trim *down* from the 2150 default to ease the servo.
+                if not self.servo_center <= int(p.value) <= 2200:
                     return SetParametersResult(
                         successful=False,
-                        reason='servo_us_max must be in [servo_center_us, 1900]')
+                        reason='servo_us_max must be in [servo_center_us, 2200]')
                 self.servo_us_max = int(p.value)
         return SetParametersResult(successful=True)
 

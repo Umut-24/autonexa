@@ -409,6 +409,11 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
               color: wp.stale ? colors.textTertiary : AppColors.info),
         ),
         IconButton(
+          tooltip: 'Rename',
+          onPressed: () => _renameManualWaypoint(wp, conn),
+          icon: const Icon(Icons.edit_rounded, color: AppColors.brand),
+        ),
+        IconButton(
           tooltip: 'Delete',
           onPressed: () async {
             await conn.deleteNamedWaypoint(wp.name);
@@ -418,6 +423,50 @@ class _ParkingTabState extends State<ParkingTab> with SingleTickerProviderStateM
         ),
       ]),
     );
+  }
+
+  /// Rename a saved waypoint. The bridge keys waypoints by `name`, so the
+  /// rename is implemented as POST new + DELETE old. POST-first means a
+  /// failure leaves the original entry intact; a delete failure after a
+  /// successful post will produce a transient duplicate until the next
+  /// 5 s waypoint poll reconciles.
+  Future<void> _renameManualWaypoint(
+      NamedWaypoint wp, ConnectionService conn) async {
+    final ctrl = TextEditingController(text: wp.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Rename waypoint'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || newName.isEmpty || newName == wp.name) return;
+    final saved = await conn.saveNamedWaypoint(
+      name: newName, kind: wp.kind, x: wp.x, y: wp.y, yaw: wp.yaw,
+    );
+    if (saved == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Rename failed: could not save new name')));
+      return;
+    }
+    await conn.deleteNamedWaypoint(wp.name);
+    await _refreshManualWaypoints();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Renamed to "$newName"')));
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

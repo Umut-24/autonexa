@@ -543,9 +543,11 @@ class MobileBridgeNode(Node):
             if self._estop_latched:
                 self._clear_pico_estop()
             twist.linear.x = y * max_vx * sl
-            # Servo polarity: flipped 2026-05-07 so joystick X aligns with
-            # physical wheel direction (push right -> wheels turn right).
-            twist.angular.z = x * max_wz * sl
+            # ROS convention: +angular.z = CCW = left turn. Joystick: +X =
+            # right push. Invert so push-right -> right turn, letting the
+            # same servo_polarity in nav2_pico_bridge serve both this
+            # manual path and Nav2's correctly-signed wz output.
+            twist.angular.z = -x * max_wz * sl
 
         with self._safety_lock:
             safety = self._safety_mode

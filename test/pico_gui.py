@@ -62,8 +62,10 @@ RX_QUEUE_MAX = 512
 THROTTLE_DEFAULT = 10
 THROTTLE_MIN, THROTTLE_MAX = 1, 30
 
-# Servo (matches firmware bounds in pico_firmware/include/config.h)
-SERVO_US_MIN, SERVO_US_MAX = 1100, 1900
+# Servo (calibrated symmetric travel; firmware backstop is 500..2500 µs in
+# pico_firmware/include/config.h, but the GUI matches the nav2 bridge's
+# narrower mechanically-safe bounds).
+SERVO_US_MIN, SERVO_US_MAX = 1150, 2150
 SERVO_CENTER_US_DEFAULT = 1650
 STEER_DELTA_US_DEFAULT = 400
 STEER_DELTA_MIN, STEER_DELTA_MAX = 10, 1000

@@ -194,11 +194,11 @@ class HomeTab extends StatelessWidget {
                       )),
                       const SizedBox(width: 8),
                       Expanded(child: _actionButton(
-                        colors, 'Auto Park',
+                        colors, 'Park',
                         Icons.local_parking_rounded,
                         AppColors.success,
-                        conn.isConnected && markers.isNotEmpty
-                            ? () => _autoPark(context, conn, markers.first)
+                        conn.isConnected
+                            ? () => _chooseParkSpot(context, conn, colors)
                             : null,
                       )),
                       const SizedBox(width: 8),
@@ -322,15 +322,71 @@ class HomeTab extends StatelessWidget {
     }
   }
 
-  void _autoPark(BuildContext context, ConnectionService conn, dynamic marker) {
-    conn.sendNavGoal(
-      conn.robotStatus.pose.x + marker.distance * 0.8,
-      conn.robotStatus.pose.y,
-      conn.robotStatus.pose.yaw,
+  Future<void> _chooseParkSpot(
+      BuildContext context, ConnectionService conn, ResolvedColors colors) async {
+    // Use the cached waypoint list (refreshed every 5 s by ConnectionService).
+    // Filter to kind == 'park'. Empty -> nudge the user to add one in Parking.
+    final spots = conn.namedWaypoints.where((w) => w.kind == 'park').toList();
+    if (spots.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('No park spots saved — add one in the Parking tab.'),
+      ));
+      return;
+    }
+    final picked = await showModalBottomSheet<NamedWaypoint>(
+      context: context,
+      backgroundColor: colors.surface,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
+              Icon(Icons.local_parking_rounded, color: AppColors.success),
+              const SizedBox(width: 8),
+              const Text('Choose park spot',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ]),
+            const SizedBox(height: 12),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: spots.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 6),
+                itemBuilder: (_, i) {
+                  final wp = spots[i];
+                  return ListTile(
+                    leading: Icon(Icons.location_on_rounded,
+                        color: wp.stale ? colors.textTertiary : AppColors.success),
+                    title: Text(wp.name,
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                    subtitle: Text(
+                      '(${wp.x.toStringAsFixed(2)}, ${wp.y.toStringAsFixed(2)})'
+                      '  yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°'
+                      '${wp.stale ? '  • stale (map changed)' : ''}',
+                      style: TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                    enabled: !wp.stale,
+                    onTap: wp.stale ? null : () => Navigator.pop(ctx, wp),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 4),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+          ]),
+        ),
+      ),
     );
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Auto-parking to Spot #${marker.id}')),
-    );
+    if (picked == null) return;
+    final ok = await conn.navigateToNamedWaypoint(picked.name);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok ? 'Parking at "${picked.name}"' : 'Navigate failed'),
+    ));
   }
 
   Widget _header(BuildContext context, ConnectionService conn, ResolvedColors colors) {

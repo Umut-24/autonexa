@@ -16,7 +16,6 @@ import 'tabs/control_tab.dart';
 import 'tabs/map_tab.dart';
 import 'tabs/parking_tab.dart';
 import 'tabs/camera_tab.dart';
-import 'tabs/desktop_tab.dart';
 import 'tabs/diagnostics_tab.dart';
 import 'tabs/settings_tab.dart';
 
@@ -234,12 +233,6 @@ class _MoreSheet extends StatelessWidget {
             'Camera',
             'Live video feed with ArUco detection',
             () => onNavigate(const CameraTab()),
-          ),
-          _moreItem(context, colors,
-            Icons.desktop_windows_rounded,
-            'Desktop',
-            'Mirror the Pi desktop (RViz, terminals) at 1 Hz',
-            () => onNavigate(const DesktopTab()),
           ),
           _moreItem(context, colors,
             Icons.monitor_heart_rounded,
