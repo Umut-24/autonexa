@@ -85,8 +85,11 @@ def generate_launch_description():
         description='|vx| below this -> SPEED 0 in the ASCII bridge (firmware deadband workaround).'
     )
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
-    servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1100')
-    servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='1900')
+    # Symmetric ±500 µs around the 1650 center — the previous 1100/1900
+    # defaults gave 550 µs travel left vs 250 µs right, which translated
+    # to ~2× more steering on left turns than right.
+    servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1150')
+    servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='2150')
     servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='-1')
     # +1 = ROS-positive vx -> chassis forward (standard). The mobile app's
     # Calibrate Direction wizard flips this at runtime via SetParameters and
@@ -97,15 +100,15 @@ def generate_launch_description():
         description='Servo slew-rate cap (rad/s). Smooths Nav2 wz step changes.')
 
     # In live SLAM mode there is no road-mask topic by default.
-    # Also point bt_navigator at our Ackermann-aware BT XML (no Spin recovery)
-    # — uses the package's installed share path so it works from any cwd.
-    ackermann_bt_xml = os.path.join(pkg_dir, 'config', 'bt_navigate_to_pose_ackermann.xml')
+    # The Ackermann-aware BT XML at config/bt_navigate_to_pose_ackermann.xml
+    # is kept in the package for future opt-in; bt_navigator currently uses
+    # the stock minimal tree configured in nav2_navigation_params.yaml,
+    # which never invokes Spin so the Ackermann constraint is already met.
     configured_nav2_params = RewrittenYaml(
         source_file=nav2_params_file,
         root_key='',
         param_rewrites={
             'global_costmap.global_costmap.ros__parameters.keepout_filter.enabled': 'false',
-            'bt_navigator.ros__parameters.default_nav_to_pose_bt_xml': ackermann_bt_xml,
         },
         convert_types=True,
     )

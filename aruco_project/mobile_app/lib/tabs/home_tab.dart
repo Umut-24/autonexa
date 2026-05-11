@@ -194,7 +194,7 @@ class HomeTab extends StatelessWidget {
                       )),
                       const SizedBox(width: 8),
                       Expanded(child: _actionButton(
-                        colors, 'Park',
+                        colors, 'Pick Park Spot',
                         Icons.local_parking_rounded,
                         AppColors.success,
                         conn.isConnected

@@ -134,10 +134,11 @@ controller_server:
       use_cost_regulated_linear_velocity_scaling: true
       cost_scaling_dist: 0.6
       cost_scaling_gain: 1.0
-      # Start slowing at 0.45 m curvature radius — slightly above the
-      # planner's new R_min (0.40 m) so the regulator decelerates before
-      # the chassis hits its physical turning limit.
-      regulated_linear_scaling_min_radius: 0.45
+      # Start slowing at 0.50 m curvature radius — above the planner's
+      # R_min (0.45 m, restored after a brief detour to 0.40) so the
+      # regulator decelerates before the chassis hits its physical
+      # turning limit at ~0.43 m.
+      regulated_linear_scaling_min_radius: 0.50
 
       # Aligned with the chassis's actual minimum movable speed: the L298N
       # kick-start sustains at ~30% PWM which corresponds to ~0.18 m/s.
@@ -300,11 +301,13 @@ planner_server:
       angle_quantization_bins: 72
       analytic_expansion_ratio: 3.5
       analytic_expansion_max_length: 3.0
-      # Matches the chassis's physical R_min = L / tan(30°) ≈ 0.43 m
-      # (wheelbase 0.25 m, max steer 30°). Slightly under the geometric
-      # limit so the planner can emit primitives the bridge can actually
-      # execute. Dropping below 0.40 risks plans the servo can't follow.
-      minimum_turning_radius: 0.40
+      # Restored to 0.45 m (above the chassis's physical R_min =
+      # L / tan(30°) ≈ 0.43 m) so every planner primitive is something
+      # the steering linkage can actually trace. Dropping to 0.40 below
+      # the physical limit produced plans the controller couldn't follow,
+      # which appears to have cascaded into bt_navigator failures and an
+      # empty /plan topic. Keep margin above 0.43 here.
+      minimum_turning_radius: 0.45
       # Lower reverse penalty (2.0 -> 1.5) encourages the planner to emit
       # 3-point parallel-park solutions when the geometry needs them
       # instead of looping a too-tight forward arc.

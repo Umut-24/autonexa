@@ -121,20 +121,20 @@ class _MapTabState extends State<MapTab> {
     );
   }
 
-  /// Long-press = either waypoint context menu (if the press landed near a
-  /// saved waypoint marker) or pose reset (anywhere else). Pose reset
-  /// publishes PoseWithCovarianceStamped on /initialpose; AMCL or SLAM
-  /// Toolbox snaps to the new pose.
+  /// Long-press = spot selection. If the press landed near a saved
+  /// waypoint, open its context menu (Navigate / Rename / Delete). If it
+  /// landed on empty floor, open a full picker of all saved waypoints
+  /// (tap-to-navigate). Pose reset is no longer bound to long-press —
+  /// it now lives in the ⋮ menu (see `_showResetMenu`).
   Future<void> _onLongPressMap(
       BuildContext context, LongPressStartDetails details, ConnectionService conn) async {
     final coords = _tapToMapCoords(details.localPosition, conn.robotStatus.mapInfo);
     if (coords == null || conn.mapImage == null) return;
 
-    // Waypoint hit-test in map-frame meters. 0.15 m is generous enough to
-    // forgive fat fingers on a phone screen but tight enough that taps on
-    // empty floor fall through to pose reset.
+    // Waypoint hit-test in map-frame meters. 0.30 m gives fat-finger
+    // forgiveness — the marker glyph is small relative to a phone tap.
     NamedWaypoint? hit;
-    double hitDist = 0.15;
+    double hitDist = 0.30;
     for (final wp in conn.namedWaypoints) {
       final d = math.sqrt(
           math.pow(wp.x - coords[0], 2) + math.pow(wp.y - coords[1], 2));
@@ -147,21 +147,118 @@ class _MapTabState extends State<MapTab> {
       await _waypointContextMenu(context, conn, hit);
       return;
     }
+    await _waypointPicker(context, conn);
+  }
 
-    final yawCtrl = TextEditingController(
-        text: conn.robotStatus.pose.yaw.toStringAsFixed(2));
+  /// Bottom sheet shown when long-press lands on empty floor — lists every
+  /// saved waypoint; tap one to dispatch a Nav2 goal there.
+  Future<void> _waypointPicker(
+      BuildContext context, ConnectionService conn) async {
+    final colors = context.read<ThemeProvider>().colors;
+    final wps = conn.namedWaypoints;
+    if (wps.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('No saved spots — add one in the Parking tab.'),
+      ));
+      return;
+    }
+    final picked = await showModalBottomSheet<NamedWaypoint>(
+      context: context,
+      backgroundColor: colors.surface,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Row(children: [
+              Icon(Icons.place_rounded, color: AppColors.info),
+              SizedBox(width: 8),
+              Text('Go to a saved spot',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ]),
+            const SizedBox(height: 12),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: wps.length,
+                separatorBuilder: (_, __) => const SizedBox(height: 4),
+                itemBuilder: (_, i) {
+                  final wp = wps[i];
+                  final kindColor = wp.kind == 'park'
+                      ? AppColors.success
+                      : wp.kind == 'summon'
+                          ? AppColors.info
+                          : wp.kind == 'home'
+                              ? AppColors.brand
+                              : colors.textTertiary;
+                  return ListTile(
+                    leading: Icon(Icons.location_on_rounded,
+                        color: wp.stale ? colors.textTertiary : kindColor),
+                    title: Text(wp.name,
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
+                    subtitle: Text(
+                      '${wp.kind}  •  (${wp.x.toStringAsFixed(2)}, '
+                      '${wp.y.toStringAsFixed(2)})'
+                      '  yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°'
+                      '${wp.stale ? '  • stale (map changed)' : ''}',
+                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                    enabled: !wp.stale,
+                    onTap: wp.stale ? null : () => Navigator.pop(ctx, wp),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(height: 4),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+          ]),
+        ),
+      ),
+    );
+    if (picked == null) return;
+    final ok = await conn.navigateToNamedWaypoint(picked.name);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(ok ? 'Going to "${picked.name}"' : 'Navigate failed'),
+    ));
+  }
+
+  /// Pose-reset dialog. Replaces the long-press flow; now invoked from
+  /// the ⋮ menu. Pre-fills the current pose so a small correction is one
+  /// edit away.
+  Future<void> _resetPoseDialog(BuildContext context, ConnectionService conn) async {
+    final pose = conn.robotStatus.pose;
+    final xCtrl = TextEditingController(text: pose.x.toStringAsFixed(2));
+    final yCtrl = TextEditingController(text: pose.y.toStringAsFixed(2));
+    final yawCtrl = TextEditingController(text: pose.yaw.toStringAsFixed(2));
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Reset robot pose here?'),
+        title: const Text('Reset robot pose'),
         content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text('x: ${coords[0].toStringAsFixed(2)}  y: ${coords[1].toStringAsFixed(2)}',
-              style: const TextStyle(fontFamily: 'monospace')),
-          const SizedBox(height: 8),
+          const Text(
+            'Publish PoseWithCovarianceStamped on /initialpose so AMCL or '
+            'SLAM Toolbox snaps the robot to a known location.',
+            style: TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: xCtrl,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            decoration: const InputDecoration(labelText: 'x (m)'),
+          ),
+          TextField(
+            controller: yCtrl,
+            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+            decoration: const InputDecoration(labelText: 'y (m)'),
+          ),
           TextField(
             controller: yawCtrl,
             keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-            decoration: const InputDecoration(labelText: 'Yaw (rad)'),
+            decoration: const InputDecoration(labelText: 'yaw (rad)'),
           ),
         ]),
         actions: [
@@ -174,10 +271,15 @@ class _MapTabState extends State<MapTab> {
         ],
       ),
     );
-    if (ok == true) {
-      final yaw = double.tryParse(yawCtrl.text) ?? 0.0;
-      await conn.relocalize(coords[0], coords[1], yaw);
-    }
+    if (ok != true) return;
+    final x = double.tryParse(xCtrl.text) ?? pose.x;
+    final y = double.tryParse(yCtrl.text) ?? pose.y;
+    final yaw = double.tryParse(yawCtrl.text) ?? pose.yaw;
+    final success = await conn.relocalize(x, y, yaw);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(success ? 'Pose reset to ($x, $y)' : 'Pose reset failed'),
+    ));
   }
 
   /// Bottom sheet shown when a long-press lands on a saved waypoint marker.
@@ -319,6 +421,16 @@ class _MapTabState extends State<MapTab> {
               if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text(ok ? 'Costmaps cleared' : 'Costmap clear failed')));
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.my_location_rounded, color: AppColors.warning),
+            title: const Text('Reset robot pose…'),
+            subtitle: const Text(
+                'Tell SLAM / AMCL where the robot actually is right now.'),
+            onTap: () {
+              Navigator.pop(ctx);
+              _resetPoseDialog(context, conn);
             },
           ),
           ListTile(
