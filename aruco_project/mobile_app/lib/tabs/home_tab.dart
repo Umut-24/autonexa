@@ -46,22 +46,27 @@ class HomeTab extends StatelessWidget {
                     conn.telemetry.estimatedPercent >= 0 &&
                     conn.telemetry.estimatedPercent <= 15)
                   Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    margin:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
                       color: AppColors.warning.withValues(alpha: 0.12),
                       borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: AppColors.warning.withValues(alpha: 0.3)),
+                      border: Border.all(
+                          color: AppColors.warning.withValues(alpha: 0.3)),
                     ),
                     child: Row(
                       children: [
-                        const Icon(Icons.battery_alert_rounded, color: AppColors.warning, size: 20),
+                        const Icon(Icons.battery_alert_rounded,
+                            color: AppColors.warning, size: 20),
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
                             'Low battery: ${conn.telemetry.estimatedPercent}%  —  '
                             'Consider charging soon',
-                            style: const TextStyle(fontSize: 12, color: AppColors.warning),
+                            style: const TextStyle(
+                                fontSize: 12, color: AppColors.warning),
                           ),
                         ),
                       ],
@@ -75,23 +80,28 @@ class HomeTab extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
                     children: [
-                      Expanded(child: StatTile(
+                      Expanded(
+                          child: StatTile(
                         label: 'Position',
-                        value: '${status.pose.x.toStringAsFixed(2)}, ${status.pose.y.toStringAsFixed(2)}',
+                        value:
+                            '${status.pose.x.toStringAsFixed(2)}, ${status.pose.y.toStringAsFixed(2)}',
                         icon: Icons.my_location_rounded,
                         iconColor: AppColors.info,
                       )),
                       const SizedBox(width: 8),
-                      Expanded(child: StatTile(
+                      Expanded(
+                          child: StatTile(
                         label: 'Velocity',
                         value: '${telemetry.odomVx.toStringAsFixed(2)} m/s',
                         icon: Icons.speed_rounded,
                         iconColor: AppColors.brand,
                       )),
                       const SizedBox(width: 8),
-                      Expanded(child: StatTile(
+                      Expanded(
+                          child: StatTile(
                         label: 'Heading',
-                        value: '${(status.pose.yaw * 57.2958).toStringAsFixed(0)}\u00B0',
+                        value:
+                            '${(status.pose.yaw * 57.2958).toStringAsFixed(0)}\u00B0',
                         icon: Icons.explore_rounded,
                         iconColor: AppColors.warning,
                       )),
@@ -105,21 +115,25 @@ class HomeTab extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
                     children: [
-                      Expanded(child: StatTile(
+                      Expanded(
+                          child: StatTile(
                         label: 'Left Wheel',
                         value: telemetry.leftVel.toStringAsFixed(2),
                         icon: Icons.rotate_left_rounded,
                       )),
                       const SizedBox(width: 8),
-                      Expanded(child: StatTile(
+                      Expanded(
+                          child: StatTile(
                         label: 'Right Wheel',
                         value: telemetry.rightVel.toStringAsFixed(2),
                         icon: Icons.rotate_right_rounded,
                       )),
                       const SizedBox(width: 8),
-                      Expanded(child: StatTile(
+                      Expanded(
+                          child: StatTile(
                         label: 'Steering',
-                        value: '${(telemetry.steerPos * 57.2958).toStringAsFixed(0)}\u00B0',
+                        value:
+                            '${(telemetry.steerPos * 57.2958).toStringAsFixed(0)}\u00B0',
                         icon: Icons.swap_horiz_rounded,
                       )),
                     ],
@@ -150,10 +164,14 @@ class HomeTab extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
                     children: [
-                      Expanded(child: _actionButton(
-                        colors, 'E-STOP',
+                      Expanded(
+                          child: _actionButton(
+                        colors,
+                        'E-STOP',
                         Icons.stop_rounded,
-                        conn.emergencyStopped ? AppColors.warning : AppColors.danger,
+                        conn.emergencyStopped
+                            ? AppColors.warning
+                            : AppColors.danger,
                         () {
                           if (conn.emergencyStopped) {
                             conn.releaseEmergencyStop();
@@ -163,18 +181,26 @@ class HomeTab extends StatelessWidget {
                         },
                       )),
                       const SizedBox(width: 8),
-                      Expanded(child: _actionButton(
-                        colors, 'Go Home',
+                      Expanded(
+                          child: _actionButton(
+                        colors,
+                        'Go Home',
                         Icons.home_rounded,
                         AppColors.info,
-                        conn.isConnected ? () => conn.sendNavGoal(0, 0, 0) : null,
+                        conn.isConnected
+                            ? () => conn.sendNavGoal(0, 0, 0)
+                            : null,
                       )),
                       const SizedBox(width: 8),
-                      Expanded(child: _actionButton(
-                        colors, 'Summon',
+                      Expanded(
+                          child: _actionButton(
+                        colors,
+                        'Summon',
                         Icons.hail_rounded,
                         AppColors.brand,
-                        conn.isConnected ? () => _summonVehicle(context, conn, colors) : null,
+                        conn.isConnected
+                            ? () => _summonVehicle(context, conn, colors)
+                            : null,
                       )),
                     ],
                   ),
@@ -184,8 +210,10 @@ class HomeTab extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
                     children: [
-                      Expanded(child: _actionButton(
-                        colors, 'Nav Goal',
+                      Expanded(
+                          child: _actionButton(
+                        colors,
+                        'Nav Goal',
                         Icons.navigation_rounded,
                         AppColors.info,
                         conn.isConnected
@@ -193,8 +221,10 @@ class HomeTab extends StatelessWidget {
                             : null,
                       )),
                       const SizedBox(width: 8),
-                      Expanded(child: _actionButton(
-                        colors, 'Pick Park Spot',
+                      Expanded(
+                          child: _actionButton(
+                        colors,
+                        'Pick Park Spot',
                         Icons.local_parking_rounded,
                         AppColors.success,
                         conn.isConnected
@@ -202,12 +232,16 @@ class HomeTab extends StatelessWidget {
                             : null,
                       )),
                       const SizedBox(width: 8),
-                      Expanded(child: _actionButton(
-                        colors, 'Full Stop',
+                      Expanded(
+                          child: _actionButton(
+                        colors,
+                        'Full Stop',
                         Icons.pan_tool_rounded,
                         colors.textSecondary,
                         conn.isConnected
-                            ? () { conn.updateJoystick(0, 0); }
+                            ? () {
+                                conn.updateJoystick(0, 0);
+                              }
                             : null,
                       )),
                     ],
@@ -221,9 +255,12 @@ class HomeTab extends StatelessWidget {
                     children: [
                       _infoRow('Pose Source', status.pose.source, colors),
                       _infoRow('Scan Points', '${status.scan.count}', colors),
-                      _infoRow('Map', status.mapInfo != null
-                          ? '${status.mapInfo!.width}x${status.mapInfo!.height}'
-                          : 'No map', colors),
+                      _infoRow(
+                          'Map',
+                          status.mapInfo != null
+                              ? '${status.mapInfo!.width}x${status.mapInfo!.height}'
+                              : 'No map',
+                          colors),
                       _infoRow('Latency', '${conn.latencyMs}ms', colors),
                       _infoRow('Commands', '${conn.commandsSent}', colors),
                     ],
@@ -237,15 +274,17 @@ class HomeTab extends StatelessWidget {
     );
   }
 
-  Future<void> _summonVehicle(BuildContext context, ConnectionService conn, ResolvedColors colors) async {
+  Future<void> _summonVehicle(BuildContext context, ConnectionService conn,
+      ResolvedColors colors) async {
     // Prefer the bridge-side waypoint store (shared with Manual Spots tab,
     // map overlay, etc.) — that way "summon" is the same point regardless of
     // whether you defined it from this button or from Parking → Manual Spots.
     // Fall back to the legacy phone-only prefs.summonPose so existing users
     // don't lose their saved point.
     final bridgeWps = await conn.listNamedWaypoints();
-    final bridgeSummon = bridgeWps.where((w) =>
-        w.name == 'summon' || w.kind == 'summon').toList();
+    final bridgeSummon = bridgeWps
+        .where((w) => w.name == 'summon' || w.kind == 'summon')
+        .toList();
 
     if (bridgeSummon.isNotEmpty) {
       final wp = bridgeSummon.first;
@@ -259,6 +298,7 @@ class HomeTab extends StatelessWidget {
       return;
     }
 
+    if (!context.mounted) return;
     final prefs = context.read<PreferencesService>();
     final pose = prefs.summonPose;
 
@@ -278,7 +318,8 @@ class HomeTab extends StatelessWidget {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(ctx),
-              child: Text('Cancel', style: TextStyle(color: colors.textSecondary)),
+              child:
+                  Text('Cancel', style: TextStyle(color: colors.textSecondary)),
             ),
             ElevatedButton(
               onPressed: () async {
@@ -292,7 +333,8 @@ class HomeTab extends StatelessWidget {
                   y: status.pose.y,
                   yaw: status.pose.yaw,
                 );
-                prefs.setSummonPose(status.pose.x, status.pose.y, status.pose.yaw);
+                prefs.setSummonPose(
+                    status.pose.x, status.pose.y, status.pose.yaw);
                 if (!context.mounted) return;
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                   content: Text(wp != null
@@ -310,23 +352,28 @@ class HomeTab extends StatelessWidget {
       // best-effort upload it so it shows on the map next time, then navigate.
       // ignore: unawaited_futures
       conn.saveNamedWaypoint(
-        name: 'summon', kind: 'summon',
-        x: pose['x']!, y: pose['y']!, yaw: pose['yaw']!,
+        name: 'summon',
+        kind: 'summon',
+        x: pose['x']!,
+        y: pose['y']!,
+        yaw: pose['yaw']!,
       );
       conn.sendNavGoal(pose['x']!, pose['y']!, pose['yaw']!);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(
-          'Summoning to (${pose['x']!.toStringAsFixed(2)}, ${pose['y']!.toStringAsFixed(2)})'
-        )),
+        SnackBar(
+            content: Text(
+                'Summoning to (${pose['x']!.toStringAsFixed(2)}, ${pose['y']!.toStringAsFixed(2)})')),
       );
     }
   }
 
-  Future<void> _chooseParkSpot(
-      BuildContext context, ConnectionService conn, ResolvedColors colors) async {
-    // Use the cached waypoint list (refreshed every 5 s by ConnectionService).
-    // Filter to kind == 'park'. Empty -> nudge the user to add one in Parking.
-    final spots = conn.namedWaypoints.where((w) => w.kind == 'park').toList();
+  Future<void> _chooseParkSpot(BuildContext context, ConnectionService conn,
+      ResolvedColors colors) async {
+    // Fetch fresh waypoints so a newly saved park spot appears immediately.
+    final spots = (await conn.listNamedWaypoints())
+        .where((w) => w.kind == 'park')
+        .toList();
+    if (!context.mounted) return;
     if (spots.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
         content: Text('No park spots saved — add one in the Parking tab.'),
@@ -337,59 +384,92 @@ class HomeTab extends StatelessWidget {
       context: context,
       backgroundColor: colors.surface,
       isScrollControlled: true,
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Row(children: [
-              Icon(Icons.local_parking_rounded, color: AppColors.success),
-              const SizedBox(width: 8),
-              const Text('Choose park spot',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-            ]),
-            const SizedBox(height: 12),
-            Flexible(
-              child: ListView.separated(
-                shrinkWrap: true,
-                itemCount: spots.length,
-                separatorBuilder: (_, __) => const SizedBox(height: 6),
-                itemBuilder: (_, i) {
-                  final wp = spots[i];
-                  return ListTile(
-                    leading: Icon(Icons.location_on_rounded,
-                        color: wp.stale ? colors.textTertiary : AppColors.success),
-                    title: Text(wp.name,
-                        style: const TextStyle(fontWeight: FontWeight.w600)),
-                    subtitle: Text(
-                      '(${wp.x.toStringAsFixed(2)}, ${wp.y.toStringAsFixed(2)})'
-                      '  yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°'
-                      '${wp.stale ? '  • stale (map changed)' : ''}',
-                      style: TextStyle(fontSize: 11, fontFamily: 'monospace'),
-                    ),
-                    enabled: !wp.stale,
-                    onTap: wp.stale ? null : () => Navigator.pop(ctx, wp),
-                  );
-                },
-              ),
+      builder: (ctx) {
+        NamedWaypoint? selected;
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) => SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Row(children: [
+                  Icon(Icons.local_parking_rounded, color: AppColors.success),
+                  SizedBox(width: 8),
+                  Text('Choose park spot',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                ]),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: spots.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (_, i) {
+                      final wp = spots[i];
+                      final isSelected = selected?.name == wp.name;
+                      return ListTile(
+                        leading: Icon(
+                          isSelected
+                              ? Icons.check_circle_rounded
+                              : Icons.location_on_rounded,
+                          color: wp.stale
+                              ? colors.textTertiary
+                              : isSelected
+                                  ? AppColors.success
+                                  : colors.accent,
+                        ),
+                        title: Text(wp.name,
+                            style:
+                                const TextStyle(fontWeight: FontWeight.w600)),
+                        subtitle: Text(
+                          '(${wp.x.toStringAsFixed(2)}, ${wp.y.toStringAsFixed(2)})'
+                          '  yaw ${(wp.yaw * 57.2958).toStringAsFixed(0)}°'
+                          '${wp.stale ? '  • stale (map changed)' : ''}',
+                          style: const TextStyle(
+                              fontSize: 11, fontFamily: 'monospace'),
+                        ),
+                        selected: isSelected,
+                        enabled: !wp.stale,
+                        onTap: wp.stale
+                            ? null
+                            : () => setSheetState(() => selected = wp),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: selected == null
+                        ? null
+                        : () => Navigator.pop(ctx, selected),
+                    icon: const Icon(Icons.directions_car_rounded),
+                    label: Text(
+                        selected == null ? 'Select a spot' : 'Navigate Car'),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+              ]),
             ),
-            const SizedBox(height: 4),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancel'),
-            ),
-          ]),
-        ),
-      ),
+          ),
+        );
+      },
     );
     if (picked == null) return;
     final ok = await conn.navigateToNamedWaypoint(picked.name);
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      content: Text(ok ? 'Parking at "${picked.name}"' : 'Navigate failed'),
+      content:
+          Text(ok ? 'Navigating car to "${picked.name}"' : 'Navigate failed'),
     ));
   }
 
-  Widget _header(BuildContext context, ConnectionService conn, ResolvedColors colors) {
+  Widget _header(
+      BuildContext context, ConnectionService conn, ResolvedColors colors) {
     final themeProvider = context.watch<ThemeProvider>();
 
     return Padding(
@@ -457,7 +537,8 @@ class HomeTab extends StatelessWidget {
     );
   }
 
-  Widget _connectionCard(BuildContext context, ConnectionService conn, ResolvedColors colors) {
+  Widget _connectionCard(
+      BuildContext context, ConnectionService conn, ResolvedColors colors) {
     return GlassCard(
       child: Row(
         children: [
@@ -486,7 +567,9 @@ class HomeTab extends StatelessWidget {
                   style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    color: conn.isConnected ? AppColors.success : colors.textSecondary,
+                    color: conn.isConnected
+                        ? AppColors.success
+                        : colors.textSecondary,
                   ),
                 ),
                 if (conn.baseUrl != null)
@@ -544,7 +627,9 @@ class HomeTab extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
-          color: onTap != null ? color.withValues(alpha: 0.15) : colors.surfaceLight,
+          color: onTap != null
+              ? color.withValues(alpha: 0.15)
+              : colors.surfaceLight,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: onTap != null ? color.withValues(alpha: 0.3) : colors.border,
@@ -552,7 +637,8 @@ class HomeTab extends StatelessWidget {
         ),
         child: Column(
           children: [
-            Icon(icon, size: 24, color: onTap != null ? color : colors.textTertiary),
+            Icon(icon,
+                size: 24, color: onTap != null ? color : colors.textTertiary),
             const SizedBox(height: 6),
             Text(
               label,
@@ -574,7 +660,8 @@ class HomeTab extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(label, style: TextStyle(fontSize: 13, color: colors.textSecondary)),
+          Text(label,
+              style: TextStyle(fontSize: 13, color: colors.textSecondary)),
           Text(
             value,
             style: TextStyle(
