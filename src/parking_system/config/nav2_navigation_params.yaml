@@ -79,9 +79,12 @@ bt_navigator:
     navigators: ["navigate_to_pose"]
     navigate_to_pose:
       plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
-    # Replan only when the current path becomes invalid, not on a fixed timer.
-    # This cuts steady-state planner work while still reacting to obstacles.
-    default_nav_to_pose_bt_xml: "/opt/ros/jazzy/share/nav2_bt_navigator/behavior_trees/navigate_w_replanning_only_if_path_becomes_invalid.xml"
+    # Ackermann-aware BT with a periodic ComputePathToPose tick (RateController
+    # hz=1.0) so the planner re-evaluates every second — recovers automatically
+    # when collision_monitor stalls the chassis but the existing path is still
+    # nominally valid. The launch file rewrites this absolute path against the
+    # actual install share at runtime.
+    default_nav_to_pose_bt_xml: "/opt/ros/jazzy/share/nav2_bt_navigator/behavior_trees/navigate_to_pose_w_replanning_and_recovery.xml"
     enable_groot_monitoring: false
 
 controller_server:
@@ -129,7 +132,10 @@ controller_server:
       # Mildly tightened for the small testbed: smaller carrot keeps the car
       # closer to the orange plan without going so low that it oscillates.
       lookahead_dist: 0.25
-      min_lookahead_dist: 0.16
+      # Tightened from 0.16 -> 0.14 so the RPP carrot can sit closer to the
+      # robot during tight perpendicular parking maneuvers without falling
+      # below the min_speed deadband.
+      min_lookahead_dist: 0.14
       max_lookahead_dist: 0.38
       use_velocity_scaled_lookahead_dist: true
       transform_tolerance: 0.2
@@ -405,7 +411,11 @@ collision_monitor:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "/local_costmap/published_footprint"
-      time_before_collision: 1.2
+      # Lowered from 1.2 -> 0.9 s so the monitor stops eager-braking when the
+      # robot is merely PASSING CLOSE to an obstacle along a legitimate path.
+      # 0.9 s at 0.20 m/s is still ~18 cm of forward projection, enough to
+      # decelerate before contact given the bridge's 1.5 m/s^2 decel cap.
+      time_before_collision: 0.9
       simulation_time_step: 0.1
       min_points: 6
       visualize: false

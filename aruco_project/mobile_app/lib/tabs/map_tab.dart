@@ -8,6 +8,7 @@ import '../theme/app_colors.dart';
 import '../theme/theme_provider.dart';
 import '../services/connection_service.dart';
 import '../models/robot_state.dart';
+import '../models/robot_config.dart';
 import '../widgets/glass_card.dart';
 import '../widgets/nav_goal_dialog.dart';
 
@@ -587,6 +588,7 @@ class _MapTabState extends State<MapTab> {
                                   waypoints: conn.namedWaypoints,
                                   mapInfo: status.mapInfo,
                                   accentColor: colors.accent,
+                                  robotConfig: conn.robotConfig,
                                 ),
                                 size: Size(
                                   _decodedMap!.width.toDouble(),
@@ -780,6 +782,7 @@ class _MapPainter extends CustomPainter {
   final List<NamedWaypoint> waypoints;
   final MapInfo? mapInfo;
   final Color accentColor;
+  final RobotConfig robotConfig;
 
   _MapPainter({
     required this.mapImage,
@@ -792,6 +795,7 @@ class _MapPainter extends CustomPainter {
     this.waypoints = const [],
     this.mapInfo,
     required this.accentColor,
+    this.robotConfig = RobotConfig.defaults,
   });
 
   @override
@@ -957,8 +961,55 @@ class _MapPainter extends CustomPainter {
       canvas.drawLine(g, g + Offset(gdx, gdy), goalArrow);
     }
 
-    // 6. Robot pose (cyan/accent circle + heading arrow)
+    // 6a. Robot footprint rectangle (rotated to robot yaw). Drawn underneath
+    //     the pose dot so the operator can see actual chassis extent and the
+    //     LiDAR mount marker in the same frame.
     final robotPos = toPixel(pose.x, pose.y);
+    final cfg = robotConfig;
+    final cosY = math.cos(pose.yaw);
+    final sinY = math.sin(pose.yaw);
+    // Corners in base_link frame (x forward, y left), rectangle centered at
+    // base_link origin.
+    final halfL = cfg.chassisLength / 2.0;
+    final halfW = cfg.chassisWidth / 2.0;
+    final cornersWorld = [
+      [halfL, halfW],
+      [halfL, -halfW],
+      [-halfL, -halfW],
+      [-halfL, halfW],
+    ];
+    final footprintPath = Path();
+    for (var i = 0; i < cornersWorld.length; i++) {
+      final cx = cornersWorld[i][0];
+      final cy = cornersWorld[i][1];
+      // base_link -> map: rotate by yaw, translate by pose.
+      final wx = pose.x + cx * cosY - cy * sinY;
+      final wy = pose.y + cx * sinY + cy * cosY;
+      final p = toPixel(wx, wy);
+      if (i == 0) {
+        footprintPath.moveTo(p.dx, p.dy);
+      } else {
+        footprintPath.lineTo(p.dx, p.dy);
+      }
+    }
+    footprintPath.close();
+    final footprintFill = Paint()
+      ..color = accentColor.withValues(alpha: 0.18)
+      ..style = PaintingStyle.fill;
+    final footprintStroke = Paint()
+      ..color = Colors.white.withValues(alpha: 0.85)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5;
+    canvas.drawPath(footprintPath, footprintFill);
+    canvas.drawPath(footprintPath, footprintStroke);
+    // LiDAR mount marker — small red dot at the laser puck location.
+    final lidarWx = pose.x + cfg.lidarX * cosY - cfg.lidarY * sinY;
+    final lidarWy = pose.y + cfg.lidarX * sinY + cfg.lidarY * cosY;
+    final lidarPx = toPixel(lidarWx, lidarWy);
+    final lidarPaint = Paint()..color = const Color(0xFFE53935);
+    canvas.drawCircle(lidarPx, 2.5, lidarPaint);
+
+    // 6b. Robot pose (cyan/accent circle + heading arrow), on top of footprint
     final robotPaint = Paint()..color = accentColor;
     canvas.drawCircle(robotPos, 6, robotPaint);
     const arrowLen = 14.0;

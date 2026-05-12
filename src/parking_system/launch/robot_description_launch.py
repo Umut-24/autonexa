@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
-"""
-Helper launch file for robot description
+"""Helper launch for robot_state_publisher only.
+
+Reads ~/.autonexa/robot_dimensions.yaml via build_urdf.render() so it
+matches the live system's view of the robot.
 """
 
+import os
+import sys as _sys
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
-from launch_ros.parameter_descriptions import ParameterValue
+
+_scripts_dir = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, 'scripts'
+)
+if _scripts_dir not in _sys.path:
+    _sys.path.insert(0, _scripts_dir)
+
+from parking_system.build_urdf import render as _render_urdf
 
 
 def generate_launch_description():
-    pkg_dir = FindPackageShare('parking_system').find('parking_system')
-    
-    urdf_file = PathJoinSubstitution([
-        pkg_dir,
-        'urdf',
-        'robot.urdf'
-    ])
-    
-    robot_description_content = ParameterValue(
-        Command(['xacro ', urdf_file]),
-        value_type=str
-    )
-    
+    urdf_xml, _footprint, _dims = _render_urdf()
+
     robot_state_publisher = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
@@ -32,11 +30,10 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'use_sim_time': False,
-            'robot_description': robot_description_content
-        }]
+            'robot_description': urdf_xml,
+        }],
     )
-    
+
     return LaunchDescription([
         robot_state_publisher,
     ])
-

@@ -7,6 +7,7 @@ import 'package:web_socket_channel/status.dart' as ws_status;
 
 import '../models/telemetry.dart';
 import '../models/robot_state.dart';
+import '../models/robot_config.dart';
 import '../services/event_logger.dart';
 
 enum ConnectionStatus { disconnected, connecting, connected, error }
@@ -158,6 +159,11 @@ class ConnectionService extends ChangeNotifier {
   double _navStatusStamp = 0;
   String _mapFingerprint = '';
 
+  // Robot physical dimensions, refreshed from /api/robot_config on connect.
+  // Used by the map overlay (chassis footprint + LiDAR marker) and the
+  // Settings -> Robot Dimensions editor.
+  RobotConfig _robotConfig = RobotConfig.defaults;
+
   // Path trail (history of robot positions for map overlay)
   final List<List<double>> _pathTrail = [];
   static const int _maxTrailPoints = 500;
@@ -190,6 +196,7 @@ class ConnectionService extends ChangeNotifier {
   String get navStatus => _navStatus;
   double get navStatusStamp => _navStatusStamp;
   String get mapFingerprint => _mapFingerprint;
+  RobotConfig get robotConfig => _robotConfig;
   bool get emergencyStopped => _emergencyStopped;
   double get speedLimit => _speedLimit;
   int get latencyMs => _latencyMs;
@@ -229,6 +236,9 @@ class ConnectionService extends ChangeNotifier {
 
       _startPolling();
       _openSockets();
+      // Best-effort robot dimensions fetch; failure leaves the cached defaults.
+      // ignore: unawaited_futures
+      fetchRobotConfig();
       notifyListeners();
       logger.success('Connected to $normalized (${_latencyMs}ms)', LogCategory.connection);
       return true;
@@ -821,6 +831,63 @@ class ConnectionService extends ChangeNotifier {
     } catch (e) {
       logger.error('calibrate_direction: $e', LogCategory.control);
       return {};
+    }
+  }
+
+  // --- Robot dimensions (Settings -> Robot Dimensions) ---
+
+  /// Fetch live robot dimensions from the bridge. Updates the cached
+  /// `robotConfig` getter on success.
+  Future<RobotConfig?> fetchRobotConfig() async {
+    if (_baseUrl == null) return null;
+    try {
+      final resp = await http
+          .get(Uri.parse('$_baseUrl/api/robot_config'))
+          .timeout(const Duration(seconds: 3));
+      if (resp.statusCode != 200) return null;
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      _robotConfig = RobotConfig.fromJson(json);
+      notifyListeners();
+      return _robotConfig;
+    } catch (e) {
+      logger.error('fetchRobotConfig: $e', LogCategory.control);
+      return null;
+    }
+  }
+
+  /// Push a (partial) dimensions update to the bridge. Bridge regenerates
+  /// the URDF, syncs both Nav2 costmap footprints, and persists to
+  /// ~/.autonexa/robot_dimensions.yaml.
+  Future<bool> setRobotConfig(Map<String, double> overrides) async {
+    if (_baseUrl == null || overrides.isEmpty) return false;
+    try {
+      final resp = await http
+          .post(
+            Uri.parse('$_baseUrl/api/robot_config'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(overrides),
+          )
+          .timeout(const Duration(seconds: 4));
+      if (resp.statusCode != 200) {
+        logger.error('robot_config HTTP ${resp.statusCode}', LogCategory.control);
+        return false;
+      }
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      if (json['ok'] == false) {
+        logger.error(
+            'robot_config: ${json['reason'] ?? 'bridge rejected'}',
+            LogCategory.control);
+        return false;
+      }
+      _robotConfig = RobotConfig.fromJson(json);
+      notifyListeners();
+      logger.success(
+          'Robot dimensions applied (${overrides.keys.join(', ')})',
+          LogCategory.control);
+      return true;
+    } catch (e) {
+      logger.error('setRobotConfig: $e', LogCategory.control);
+      return false;
     }
   }
 

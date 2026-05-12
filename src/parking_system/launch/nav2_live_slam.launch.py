@@ -22,9 +22,32 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import RewrittenYaml
 
+# Render the robot description from the xacro template + any persisted
+# dimension overrides at launch time. The bridge can later re-publish
+# /robot_description live via SetParameters on robot_state_publisher.
+import sys as _sys
+_scripts_dir = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, 'scripts'
+)
+if _scripts_dir not in _sys.path:
+    _sys.path.insert(0, _scripts_dir)
+try:
+    from parking_system.build_urdf import render as _render_urdf
+except Exception:  # fallback to the static URDF if the renderer is unavailable
+    _render_urdf = None
+
 
 def generate_launch_description():
     pkg_dir = FindPackageShare('parking_system').find('parking_system')
+
+    if _render_urdf is not None:
+        robot_description_content, _rendered_footprint, _rendered_dims = _render_urdf()
+    else:
+        _legacy_urdf = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), os.pardir, 'urdf', 'robot.urdf'
+        )
+        with open(_legacy_urdf, 'r') as _f:
+            robot_description_content = _f.read()
 
     nav2_params_file = PathJoinSubstitution([pkg_dir, 'config', 'nav2_navigation_params.yaml'])
     slam_params_file = PathJoinSubstitution([pkg_dir, 'config', 'slam_toolbox_mapping.yaml'])
@@ -108,28 +131,48 @@ def generate_launch_description():
     # is kept in the package for future opt-in; bt_navigator currently uses
     # the stock minimal tree configured in nav2_navigation_params.yaml,
     # which never invokes Spin so the Ackermann constraint is already met.
+    # If we successfully rendered the URDF, push the matching footprint into
+    # both costmaps so Nav2 starts up consistent with any user dimension
+    # overrides. The bridge can further override at runtime via SetParameters.
+    _footprint_overrides = {}
+    if _render_urdf is not None:
+        _footprint_overrides = {
+            'global_costmap.global_costmap.ros__parameters.footprint': _rendered_footprint,
+            'global_costmap.global_costmap.ros__parameters.footprint_padding': str(_rendered_dims['footprint_padding']),
+            'local_costmap.local_costmap.ros__parameters.footprint': _rendered_footprint,
+            'local_costmap.local_costmap.ros__parameters.footprint_padding': str(_rendered_dims['footprint_padding']),
+        }
+
+    # Point bt_navigator at the package's Ackermann BT (Spin-stripped + 1 Hz
+    # periodic replan) instead of the stock invalidation-only tree.
+    _bt_xml_path = os.path.join(pkg_dir, 'config', 'bt_navigate_to_pose_ackermann.xml')
+
     configured_nav2_params = RewrittenYaml(
         source_file=nav2_params_file,
         root_key='',
         param_rewrites={
             'global_costmap.global_costmap.ros__parameters.keepout_filter.enabled': 'false',
+            'bt_navigator.ros__parameters.default_nav_to_pose_bt_xml': _bt_xml_path,
+            **_footprint_overrides,
         },
         convert_types=True,
     )
 
-    # LiDAR is physically mounted on this chassis facing the rear (cable on
-    # the back of the car, 0° marker pointing backwards). Compensate by
-    # yaw-rotating laser_link 180° here. Without this, SLAM builds a
-    # yaw-flipped map and Nav2 goals drive the chassis the wrong way even
-    # though manual joystick + motor wiring are correct.
-    # Arg order is: x y z yaw pitch roll parent child.
-    static_tf_base_to_laser = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_base_laser',
-        arguments=['0', '0', '0', '3.14159', '0', '0', 'base_link', 'laser_link'],
-        parameters=[{'use_sim_time': False}],
-        output='screen'
+    # base_link -> laser_link is now driven by robot_state_publisher from the
+    # rendered URDF (laser_joint origin honors the LiDAR's actual mount offset,
+    # ~1 cm forward of chassis center, plus the yaw=π for rear-facing mount).
+    # The earlier static_transform_publisher placed the LiDAR at base_link
+    # origin which made SLAM/costmaps mis-register obstacles by the URDF offset
+    # amount (was masked because the old URDF had a wrong 15 cm offset too).
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        name='robot_state_publisher',
+        output='screen',
+        parameters=[{
+            'use_sim_time': False,
+            'robot_description': robot_description_content,
+        }],
     )
 
     # sllidar_ros2 lives in this workspace under src/sllidar_ros2; resolve via
@@ -442,7 +485,7 @@ def generate_launch_description():
         vx_polarity_arg,
         max_steer_rate_arg,
         use_mobile_bridge_arg,
-        static_tf_base_to_laser,
+        robot_state_publisher,
         lidar,
         laser_scan_matcher,
         slam_toolbox,

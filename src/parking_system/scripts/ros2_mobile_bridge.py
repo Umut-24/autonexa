@@ -82,6 +82,11 @@ try:
 except ImportError:
     yaml = None
 
+try:
+    from parking_system import build_urdf as _build_urdf
+except Exception:  # pragma: no cover
+    _build_urdf = None
+
 # Persistent app data (waypoints + runtime overrides). Lives outside the ROS
 # workspace so it survives `colcon build --symlink-install` clobbering and is
 # trivial to back up / hand-edit.
@@ -1006,6 +1011,112 @@ class MobileBridgeNode(Node):
             self._map_fingerprint = self._new_map_session_fingerprint()
         return {'steps': steps, 'costmaps': cm}
 
+    # --- Robot dimension live-edit + goal inflation escape ---
+
+    def get_robot_dimensions(self) -> dict:
+        """Effective dimensions = defaults + persisted YAML. Always full dict."""
+        if _build_urdf is None:
+            return {}
+        return _build_urdf.merge_dimensions(_build_urdf.load_persisted_dimensions())
+
+    def apply_robot_dimensions(self, overrides: dict) -> dict:
+        """Render URDF with the requested overrides, push it to
+        robot_state_publisher, sync both costmap footprints, and persist
+        the merged result to ~/.autonexa/robot_dimensions.yaml.
+
+        Returns {'dims': effective, 'urdf_ok': bool, 'costmaps': {...},
+        'errors': [...]}.
+        """
+        if _build_urdf is None:
+            return {'ok': False, 'reason': 'build_urdf module unavailable'}
+        try:
+            urdf_xml, footprint_str, dims = _build_urdf.render(overrides)
+        except Exception as exc:
+            return {'ok': False, 'reason': f'render failed: {exc}'}
+
+        results = {'ok': True, 'dims': dims, 'errors': []}
+
+        rsp = self.set_remote_params(
+            '/robot_state_publisher', {'robot_description': urdf_xml})
+        results['robot_state_publisher'] = rsp
+        if not rsp.get('robot_description', {}).get('ok'):
+            results['errors'].append(
+                f"robot_state_publisher: {rsp.get('robot_description', {}).get('reason')}")
+
+        cm_payload = {
+            'footprint': footprint_str,
+            'footprint_padding': float(dims['footprint_padding']),
+        }
+        gc = self.set_remote_params('/global_costmap/global_costmap', cm_payload)
+        lc = self.set_remote_params('/local_costmap/local_costmap', cm_payload)
+        results['global_costmap'] = gc
+        results['local_costmap'] = lc
+        for label, batch in (('global_costmap', gc), ('local_costmap', lc)):
+            for k, r in batch.items():
+                if not r.get('ok'):
+                    results['errors'].append(f'{label}.{k}: {r.get("reason")}')
+
+        # Persist the full merged dims so a relaunch picks up the values.
+        try:
+            _build_urdf.save_persisted_dimensions(dims)
+        except Exception as exc:
+            results['errors'].append(f'persist failed: {exc}')
+
+        return results
+
+    def _escape_inflation_for_goal(self) -> None:
+        """Pre-goal inflation relax so SMAC Hybrid-A* can plan from a
+        start pose currently inside wall inflation (the wall-parked case).
+
+        Sequence:
+          1. Capture current inflation_radius on both costmaps.
+          2. ClearEntireCostmap on both (force a fresh obstacle pass).
+          3. Temporarily set inflation_radius -> 0.01 m on both.
+          4. After 4 s OR on first non-empty /plan, restore inflation.
+        """
+        global_key = '/global_costmap/global_costmap'
+        local_key = '/local_costmap/local_costmap'
+        ir_name = 'inflation_layer.inflation_radius'
+
+        saved_g = self.get_remote_params(global_key, [ir_name]).get(ir_name)
+        saved_l = self.get_remote_params(local_key, [ir_name]).get(ir_name)
+        # Fall back to the YAML default if read failed.
+        if saved_g is None:
+            saved_g = 0.05
+        if saved_l is None:
+            saved_l = 0.05
+
+        self.clear_costmaps()
+        self.set_remote_params(global_key, {ir_name: 0.01})
+        self.set_remote_params(local_key, {ir_name: 0.01})
+        self.get_logger().info(
+            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.01 '
+            f'(global/local), will restore in <=4 s or on first plan')
+
+        relaxed_at = time.time()
+
+        def _restorer():
+            deadline = relaxed_at + 4.0
+            # Watch /plan_stamp; restore as soon as a fresh plan arrives.
+            while time.time() < deadline:
+                with self._plan_lock:
+                    if self._plan_stamp >= relaxed_at and self._plan_points:
+                        break
+                time.sleep(0.1)
+            try:
+                self.set_remote_params(global_key, {ir_name: float(saved_g)})
+                self.set_remote_params(local_key, {ir_name: float(saved_l)})
+                self.get_logger().info(
+                    f'goal escape: inflation restored '
+                    f'({saved_g:.3f}/{saved_l:.3f})')
+            except Exception as exc:
+                self.get_logger().warning(
+                    f'inflation restore failed: {exc}')
+
+        t = threading.Thread(target=_restorer, daemon=True,
+                             name='inflation-restore')
+        t.start()
+
     # --- Pose reset / relocalize (Part G1) ---
 
     def publish_initial_pose(self, x: float, y: float, yaw: float) -> None:
@@ -1375,6 +1486,15 @@ class MobileBridgeNode(Node):
                 'active': True,
                 'stamp': time.time(),
             }
+
+        # Wall-parked escape: clear costmaps + temporarily relax inflation so
+        # SMAC Hybrid-A* can plan from a start pose inside wall inflation.
+        # Inflation snaps back as soon as a plan arrives (<=4 s deadline).
+        try:
+            self._escape_inflation_for_goal()
+        except Exception as exc:
+            self.get_logger().warning(f'goal escape sequence failed: {exc}')
+
         self._goal_pub.publish(msg)
         self.get_logger().info(f'Published nav goal: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
         return True
@@ -1603,6 +1723,42 @@ def api_safety_mode():
     if not bridge_node.set_safety_mode(requested):
         return jsonify({'error': f'invalid safety_mode: {requested!r}'}), 400
     return jsonify({'safety_mode': bridge_node.get_safety_mode()})
+
+
+# ---------------------------------------------------------------------------
+#  Robot dimensions live edit (URDF + Nav2 footprint)
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/robot_config', methods=['GET', 'POST'])
+def api_robot_config():
+    """GET: current effective robot dimensions (defaults + persisted overrides).
+    POST: {chassis_length?, chassis_width?, chassis_height?, wheelbase?,
+           lidar_x?, lidar_y?, lidar_z?, camera_x?, camera_z?,
+           footprint_padding?} — render URDF + sync costmaps + persist."""
+    if _build_urdf is None:
+        return jsonify({'error': 'build_urdf module unavailable'}), 500
+    if request.method == 'GET':
+        dims = bridge_node.get_robot_dimensions()
+        return jsonify({'dims': dims,
+                        'defaults': dict(_build_urdf.DEFAULT_DIMENSIONS),
+                        'footprint': _build_urdf.footprint_string(
+                            dims.get('chassis_length',
+                                     _build_urdf.DEFAULT_DIMENSIONS['chassis_length']),
+                            dims.get('chassis_width',
+                                     _build_urdf.DEFAULT_DIMENSIONS['chassis_width']))})
+    data = request.get_json(silent=True) or {}
+    overrides = {}
+    for k in _build_urdf.DIM_KEYS:
+        if k in data:
+            try:
+                overrides[k] = float(data[k])
+            except (TypeError, ValueError):
+                return jsonify({'error': f'{k!r} must be numeric'}), 400
+    if not overrides:
+        return jsonify({'error': 'no editable dimension keys in request',
+                        'editable_keys': list(_build_urdf.DIM_KEYS)}), 400
+    result = bridge_node.apply_robot_dimensions(overrides)
+    return jsonify(result)
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ import '../widgets/glass_card.dart';
 import '../widgets/connection_indicator.dart';
 import '../widgets/autonexa_logo.dart';
 import '../widgets/calibration_dialog.dart';
+import '../widgets/robot_dimensions_dialog.dart';
 
 /// Settings page with server connection, theme toggle, control prefs, and about info.
 class SettingsTab extends StatefulWidget {
@@ -480,6 +481,44 @@ class _SettingsTabState extends State<SettingsTab> {
                           : null,
                       icon: const Icon(Icons.compare_arrows_rounded, size: 18),
                       label: const Text('Calibrate Direction'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.brand,
+                        disabledBackgroundColor: colors.surfaceLight,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // ── Robot Dimensions ──
+            GlassCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('ROBOT DIMENSIONS',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
+                  const SizedBox(height: 14),
+                  Text(
+                    'Edit chassis length / width, LiDAR mount offset and '
+                    'footprint padding. The bridge regenerates the URDF '
+                    'live (RViz RobotModel + Nav2 costmap footprints '
+                    'update without restart) and persists values to disk.',
+                    style: TextStyle(fontSize: 12, color: colors.textSecondary),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: conn.isConnected
+                          ? () => RobotDimensionsDialog.show(context)
+                          : null,
+                      icon: const Icon(Icons.crop_din_rounded, size: 18),
+                      label: const Text('Edit Robot Dimensions'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.brand,
                         disabledBackgroundColor: colors.surfaceLight,

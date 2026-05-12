@@ -12,6 +12,17 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 import os
+import sys as _sys
+
+_scripts_dir = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, 'scripts'
+)
+if _scripts_dir not in _sys.path:
+    _sys.path.insert(0, _scripts_dir)
+try:
+    from parking_system.build_urdf import render as _render_urdf
+except Exception:
+    _render_urdf = None
 
 
 def generate_launch_description():
@@ -31,14 +42,19 @@ def generate_launch_description():
         'visualization.rviz'
     ])
     
-    # Robot description via robot_state_publisher
-    urdf_path = os.path.join(pkg_dir, 'urdf', 'robot.urdf')
-    robot_description_content = ''
-    if os.path.exists(urdf_path):
-        with open(urdf_path, 'r') as f:
-            robot_description_content = f.read()
+    # Robot description: rendered live from robot.urdf.xacro + persisted
+    # ~/.autonexa/robot_dimensions.yaml. Falls back to the static file only
+    # if the renderer is unimportable (e.g. yaml missing during test).
+    if _render_urdf is not None:
+        robot_description_content, _fp, _dims = _render_urdf()
     else:
-        print(f"Warning: URDF file not found at {urdf_path}")
+        urdf_path = os.path.join(pkg_dir, 'urdf', 'robot.urdf')
+        robot_description_content = ''
+        if os.path.exists(urdf_path):
+            with open(urdf_path, 'r') as f:
+                robot_description_content = f.read()
+        else:
+            print(f"Warning: URDF file not found at {urdf_path}")
     
     robot_state_publisher = Node(
         package='robot_state_publisher',

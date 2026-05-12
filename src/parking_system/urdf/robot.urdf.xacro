@@ -1,16 +1,21 @@
 <?xml version="1.0"?>
 <!--
-  Static fallback URDF. The authoritative source is robot.urdf.xacro plus
-  ~/.autonexa/robot_dimensions.yaml, rendered by scripts/build_urdf.py at
-  launch time and live-edited by the mobile bridge. This file is kept in
-  sync with the xacro defaults so any tool that still reads robot.urdf
-  directly gets the corrected geometry.
+  AutoNexa robot description — template form.
+
+  Substitution happens in scripts/parking_system/build_urdf.py (pure-Python,
+  no `xacro` subprocess). Each brace-delimited token below is replaced with a
+  numeric value coming from defaults + ~/.autonexa/robot_dimensions.yaml +
+  any in-flight override from the mobile bridge.
+
+  Coordinate frames are right-handed: x forward, y left, z up; base_link is
+  at the chassis geometric center on the ground plane (z=0 here, no wheel
+  links yet so the chassis box just hovers).
 -->
 <robot name="parking_robot">
   <link name="base_link">
     <visual>
       <geometry>
-        <box size="0.3 0.2 0.1"/>
+        <box size="{chassis_length} {chassis_width} {chassis_height}"/>
       </geometry>
       <material name="base_color">
         <color rgba="0.2 0.2 0.8 1.0"/>
@@ -18,7 +23,7 @@
     </visual>
     <collision>
       <geometry>
-        <box size="0.3 0.2 0.1"/>
+        <box size="{chassis_length} {chassis_width} {chassis_height}"/>
       </geometry>
     </collision>
     <inertial>
@@ -42,10 +47,16 @@
     </inertial>
   </link>
 
+  <!--
+    LiDAR is physically mounted with its cable / 0° marker pointing
+    backwards; yaw = π reconciles that so scan rays resolve correctly in
+    base_link frame. The XYZ offset is the puck's rotation axis relative to
+    the chassis geometric center.
+  -->
   <joint name="laser_joint" type="fixed">
     <parent link="base_link"/>
     <child link="laser_link"/>
-    <origin xyz="0.01 0.0 0.07" rpy="0 0 3.14159"/>
+    <origin xyz="{lidar_x} {lidar_y} {lidar_z}" rpy="0 0 3.14159"/>
   </joint>
 
   <link name="camera_link">
@@ -66,6 +77,6 @@
   <joint name="camera_joint" type="fixed">
     <parent link="base_link"/>
     <child link="camera_link"/>
-    <origin xyz="0.1 0.0 0.05" rpy="0 0 0"/>
+    <origin xyz="{camera_x} 0.0 {camera_z}" rpy="0 0 0"/>
   </joint>
 </robot>
