@@ -78,6 +78,7 @@ bt_navigator:
 controller_server:
   ros__parameters:
     use_sim_time: false
+    enable_stamped_cmd_vel: false
     controller_frequency: 10.0
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
@@ -98,46 +99,32 @@ controller_server:
       xy_goal_tolerance: 0.05  # 5cm tolerance for parking spots
       yaw_goal_tolerance: 0.1  # ~6 degrees
     
-    # DWB Local Planner - optimized for small spaces
+    # Regulated Pure Pursuit - Ackermann-friendly path tracking
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: false
-      min_vel_x: 0.0
-      min_vel_y: 0.0
-      max_vel_x: 0.3  # Slow for precise parking
-      max_vel_y: 0.0
-      max_vel_theta: 0.5
-      min_speed_xy: 0.0
-      max_speed_xy: 0.3
-      min_speed_theta: 0.0
-      acc_lim_x: 1.5
-      acc_lim_y: 0.0
-      acc_lim_theta: 2.0
-      decel_lim_x: -1.5
-      decel_lim_y: 0.0
-      decel_lim_theta: -2.0
-      vx_samples: 20
-      vy_samples: 1
-      vtheta_samples: 20
-      sim_time: 1.5
-      linear_granularity: 0.02
-      angular_granularity: 0.02
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.2
+      lookahead_dist: 0.35
+      min_lookahead_dist: 0.20
+      max_lookahead_dist: 0.50
+      lookahead_time: 1.5
+      use_velocity_scaled_lookahead_dist: true
+      min_approach_linear_velocity: 0.04
+      approach_velocity_scaling_dist: 0.35
+      use_regulated_linear_velocity_scaling: true
+      use_cost_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.43
+      regulated_linear_scaling_min_speed: 0.05
+      cost_scaling_dist: 0.12
+      cost_scaling_gain: 1.0
+      inflation_cost_scaling_factor: 3.0
+      use_fixed_curvature_lookahead: false
+      use_rotate_to_heading: false
+      allow_reversing: false
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.05
-      trans_stopped_velocity: 0.1
-      short_circuit_trajectory_evaluation: true
       stateful: true
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.02
-      PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.1
-      GoalAlign.scale: 24.0
-      GoalAlign.forward_point_distance: 0.1
-      PathDist.scale: 32.0
-      GoalDist.scale: 24.0
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
+      max_angular_accel: 1.2
 
 local_costmap:
   local_costmap:
@@ -151,7 +138,8 @@ local_costmap:
       width: 2
       height: 2
       resolution: 0.02  # 2cm resolution for small spaces
-      robot_radius: 0.1
+      footprint: "[[0.15, 0.10], [0.15, -0.10], [-0.15, -0.10], [-0.15, 0.10]]"
+      footprint_padding: 0.05
       plugins: ["obstacle_layer", "inflation_layer"]
       
       obstacle_layer:
@@ -171,8 +159,8 @@ local_costmap:
       
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 5.0
-        inflation_radius: 0.2
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.12
       
       always_send_full_costmap: true
 
@@ -184,7 +172,8 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: false
-      robot_radius: 0.1
+      footprint: "[[0.15, 0.10], [0.15, -0.10], [-0.15, -0.10], [-0.15, 0.10]]"
+      footprint_padding: 0.05
       resolution: 0.02  # Match map resolution
       track_unknown_space: true
       # Plugins: static map, road mask (keepout), obstacles, inflation
@@ -220,8 +209,8 @@ global_costmap:
       
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 5.0
-        inflation_radius: 0.15
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.12
       
       always_send_full_costmap: true
 
@@ -243,10 +232,35 @@ planner_server:
     use_sim_time: false
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_navfn_planner::NavfnPlanner"
+      plugin: "nav2_smac_planner::SmacPlannerHybrid"
       tolerance: 0.05  # 5cm tolerance
-      use_astar: true  # A* is better for small spaces
       allow_unknown: false
+      downsample_costmap: false
+      max_iterations: 100000
+      max_on_approach_iterations: 1000
+      terminal_checking_interval: 5000
+      max_planning_time: 2.0
+      motion_model_for_search: "DUBIN"
+      angle_quantization_bins: 72
+      analytic_expansion_ratio: 3.5
+      analytic_expansion_max_length: 1.2
+      analytic_expansion_max_cost: 200.0
+      analytic_expansion_max_cost_override: false
+      minimum_turning_radius: 0.43
+      reverse_penalty: 2.0
+      change_penalty: 0.0
+      non_straight_penalty: 1.2
+      cost_penalty: 2.0
+      retrospective_penalty: 0.015
+      lookup_table_size: 5.0
+      cache_obstacle_heuristic: false
+      smooth_path: true
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
+        do_refinement: true
 
 smoother_server:
   ros__parameters:
@@ -293,13 +307,14 @@ waypoint_follower:
 velocity_smoother:
   ros__parameters:
     use_sim_time: false
+    enable_stamped_cmd_vel: false
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.3, 0.0, 0.5]
-    min_velocity: [-0.3, 0.0, -0.5]
-    max_accel: [1.5, 0.0, 2.0]
-    max_decel: [-1.5, 0.0, -2.0]
+    max_velocity: [0.22, 0.0, 0.5]
+    min_velocity: [-0.22, 0.0, -0.5]
+    max_accel: [0.8, 0.0, 1.2]
+    max_decel: [-1.2, 0.0, -1.8]
     odom_topic: "odom"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
@@ -309,6 +324,7 @@ collision_monitor:
   ros__parameters:
     base_frame_id: "base_link"
     odom_frame_id: "odom"
+    enable_stamped_cmd_vel: false
     cmd_vel_in_topic: "cmd_vel_smoothed"
     cmd_vel_out_topic: "cmd_vel_safe"
     state_topic: "collision_monitor_state"
@@ -316,13 +332,34 @@ collision_monitor:
     source_timeout: 1.0
     base_shift_correction: true
     stop_pub_timeout: 2.0
-    polygons: ["FootprintApproach"]
+    polygons: ["StopZone", "SlowZone", "FootprintApproach"]
+    StopZone:
+      type: "polygon"
+      action_type: "stop"
+      points: "[[0.28, 0.17], [0.28, -0.17], [-0.20, -0.17], [-0.20, 0.17]]"
+      min_points: 2
+      trigger_consecutive_points: 1
+      release_consecutive_points: 2
+      visualize: true
+      polygon_pub_topic: "collision_stop_zone"
+      enabled: true
+    SlowZone:
+      type: "polygon"
+      action_type: "slowdown"
+      slowdown_ratio: 0.35
+      points: "[[0.55, 0.24], [0.55, -0.24], [-0.20, -0.20], [-0.20, 0.20]]"
+      min_points: 3
+      trigger_consecutive_points: 1
+      release_consecutive_points: 2
+      visualize: true
+      polygon_pub_topic: "collision_slow_zone"
+      enabled: true
     FootprintApproach:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "/local_costmap/published_footprint"
       time_before_collision: 1.2
-      simulation_time_step: 0.1
+      simulation_time_step: 0.05
       min_points: 6
       visualize: false
       enabled: true

@@ -65,6 +65,11 @@ static void control_cmd_callback(const void *msgin)
     const geometry_msgs__msg__TwistStamped *msg =
         (const geometry_msgs__msg__TwistStamped *)msgin;
 
+    if (safety_is_estopped()) {
+        motor_control_emergency_stop();
+        return;
+    }
+
     motor_control_set_velocity(
         (float)msg->twist.linear.x,
         (float)msg->twist.angular.z
@@ -75,6 +80,10 @@ static void control_cmd_callback(const void *msgin)
 static void enable_callback(const void *msgin)
 {
     const std_msgs__msg__Bool *msg = (const std_msgs__msg__Bool *)msgin;
+    if (safety_is_estopped() && msg->data) {
+        motor_control_emergency_stop();
+        return;
+    }
     motor_control_enable(msg->data);
 }
 
@@ -86,10 +95,12 @@ static void estop_service_callback(const void *reqin, void *resin)
         (std_srvs__srv__SetBool_Response *)resin;
 
     if (req->data) {
+        motor_control_emergency_stop();
         safety_estop_activate();
         res->success = true;
         /* res->message is left empty — static allocation, no dynamic string */
     } else {
+        motor_control_emergency_stop();
         safety_estop_clear();
         res->success = true;
     }

@@ -1,6 +1,7 @@
 #include "safety.h"
 #include "config.h"
 #include "hiwonder_driver.h"
+#include "motor_control.h"
 #include "servo.h"
 
 #include "pico/stdlib.h"
@@ -36,8 +37,7 @@ void safety_update(void)
         if ((now_ms - last_cmd_ms) > CMD_TIMEOUT_MS) {
             if (!timed_out) {
                 /* Transition: running → timed out */
-                hiwonder_stop_all();
-                servo_center();
+                motor_control_emergency_stop();
                 timed_out = true;
             }
         } else {
@@ -47,8 +47,7 @@ void safety_update(void)
 
     /* ── E-STOP enforcement ─────────────────────────────────── */
     if (estop_active) {
-        hiwonder_stop_all();
-        servo_center();
+        motor_control_emergency_stop();
     }
 
     /* ── Heartbeat LED ──────────────────────────────────────── */
@@ -69,8 +68,7 @@ void safety_feed_watchdog(void)
 void safety_estop_activate(void)
 {
     estop_active = true;
-    hiwonder_stop_all();
-    servo_center();
+    motor_control_emergency_stop();
 }
 
 void safety_estop_clear(void)

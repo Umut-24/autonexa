@@ -20,10 +20,12 @@ class Nav2Activator(Node):
             'amcl', 
             'controller_server',
             'planner_server',
+            'smoother_server',
             'behavior_server',
             'bt_navigator',
             'waypoint_follower',
-            'velocity_smoother'
+            'velocity_smoother',
+            'collision_monitor'
         ]
         
         self.activated_nodes = set()

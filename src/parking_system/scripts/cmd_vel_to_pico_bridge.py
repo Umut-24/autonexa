@@ -21,6 +21,7 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from geometry_msgs.msg import Twist, TwistStamped
 from std_msgs.msg import Bool
+from std_srvs.srv import SetBool
 
 
 @dataclass
@@ -38,6 +39,8 @@ class CmdVelToPicoBridge(Node):
         self.declare_parameter('control_cmd_topic', '/pico/control_cmd')
         self.declare_parameter('enable_topic', '/pico/enable')
         self.declare_parameter('heartbeat_topic', '/pico/heartbeat')
+        self.declare_parameter('drive_estop_service', '/drive/estop')
+        self.declare_parameter('pico_estop_service', '/pico/estop')
 
         # Timing and safety
         self.declare_parameter('publish_rate_hz', 30.0)
@@ -48,7 +51,7 @@ class CmdVelToPicoBridge(Node):
         self.declare_parameter('duplicate_check_startup_delay_s', 3.0)
 
         # Limits for Ackermann platform command stream
-        self.declare_parameter('max_vx_mps', 0.35)
+        self.declare_parameter('max_vx_mps', 0.22)
         self.declare_parameter('max_wz_radps', 0.8)
         self.declare_parameter('max_ax_mps2', 0.8)
         self.declare_parameter('max_aw_radps2', 1.2)
@@ -57,6 +60,8 @@ class CmdVelToPicoBridge(Node):
         self.control_cmd_topic = self.get_parameter('control_cmd_topic').value
         self.enable_topic = self.get_parameter('enable_topic').value
         self.heartbeat_topic = self.get_parameter('heartbeat_topic').value
+        self.drive_estop_service = self.get_parameter('drive_estop_service').value
+        self.pico_estop_service = self.get_parameter('pico_estop_service').value
 
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
         self.command_timeout = float(self.get_parameter('command_timeout_s').value)
@@ -78,6 +83,8 @@ class CmdVelToPicoBridge(Node):
         self.started_at = self.get_clock().now()
         self._lock_file_handle = None
         self._shutdown_requested = False
+        self._estop_latched = False
+        self._awaiting_fresh_command = True
 
         if self.enforce_single_publisher:
             self._acquire_bridge_lock()
@@ -86,6 +93,8 @@ class CmdVelToPicoBridge(Node):
         self.cmd_pub = self.create_publisher(TwistStamped, self.control_cmd_topic, 20)
         self.enable_pub = self.create_publisher(Bool, self.enable_topic, 20)
         self.heartbeat_pub = self.create_publisher(Bool, self.heartbeat_topic, 5)
+        self.estop_srv = self.create_service(SetBool, self.drive_estop_service, self.on_drive_estop)
+        self.pico_estop_client = self.create_client(SetBool, self.pico_estop_service)
 
         dt = 1.0 / max(1.0, self.publish_rate_hz)
         self.timer = self.create_timer(dt, self.on_timer)
@@ -131,9 +140,12 @@ class CmdVelToPicoBridge(Node):
         self._lock_file_handle = None
 
     def on_cmd_vel(self, msg: Twist) -> None:
+        if self._estop_latched:
+            return
         self.target.vx = self.clamp(msg.linear.x, -self.max_vx, self.max_vx)
         self.target.wz = self.clamp(msg.angular.z, -self.max_wz, self.max_wz)
         self.last_cmd_time = self.get_clock().now()
+        self._awaiting_fresh_command = False
 
     def apply_rate_limit(self, current: float, target: float, max_delta: float) -> float:
         delta = target - current
@@ -144,6 +156,8 @@ class CmdVelToPicoBridge(Node):
         return target
 
     def publish_safe_stop_once(self) -> None:
+        self.target = MotionState()
+        self.output = MotionState()
         now = self.get_clock().now()
 
         cmd_msg = TwistStamped()
@@ -156,6 +170,52 @@ class CmdVelToPicoBridge(Node):
         enable_msg = Bool()
         enable_msg.data = False
         self.enable_pub.publish(enable_msg)
+
+    @staticmethod
+    def is_zero_motion(state: MotionState) -> bool:
+        return abs(state.vx) < 1.0e-4 and abs(state.wz) < 1.0e-4
+
+    def call_pico_estop(self, active: bool) -> None:
+        if not self.pico_estop_client.wait_for_service(timeout_sec=0.05):
+            self.get_logger().warning(
+                f'{self.pico_estop_service} unavailable; bridge E-stop state remains active locally'
+            )
+            return
+
+        req = SetBool.Request()
+        req.data = active
+        future = self.pico_estop_client.call_async(req)
+
+        def _done(fut):
+            try:
+                res = fut.result()
+                if res is None or not res.success:
+                    self.get_logger().error(f'Pico E-stop request active={active} failed')
+            except Exception as exc:
+                self.get_logger().error(f'Pico E-stop request active={active} raised: {exc}')
+
+        future.add_done_callback(_done)
+
+    def on_drive_estop(self, request: SetBool.Request, response: SetBool.Response) -> SetBool.Response:
+        if request.data:
+            self._estop_latched = True
+            self._awaiting_fresh_command = True
+            self.publish_safe_stop_once()
+            self.call_pico_estop(True)
+            response.success = True
+            response.message = 'Drive E-stop latched; outputs forced to zero.'
+            self.get_logger().warning(response.message)
+            return response
+
+        self._estop_latched = False
+        self.target = MotionState()
+        self.output = MotionState()
+        self._awaiting_fresh_command = True
+        self.call_pico_estop(False)
+        response.success = True
+        response.message = 'Drive E-stop cleared; waiting for a fresh command.'
+        self.get_logger().info(response.message)
+        return response
 
     def check_for_duplicate_publishers(self) -> None:
         if self._shutdown_requested:
@@ -192,10 +252,14 @@ class CmdVelToPicoBridge(Node):
         dt = 1.0 / max(1.0, self.publish_rate_hz)
 
         command_stale = (now - self.last_cmd_time) > Duration(seconds=self.command_timeout)
-        desired = MotionState(0.0, 0.0) if command_stale else self.target
+        force_stop = self._estop_latched or command_stale or self._awaiting_fresh_command
+        desired = MotionState(0.0, 0.0) if force_stop else self.target
 
-        self.output.vx = self.apply_rate_limit(self.output.vx, desired.vx, self.max_ax * dt)
-        self.output.wz = self.apply_rate_limit(self.output.wz, desired.wz, self.max_aw * dt)
+        if force_stop or self.is_zero_motion(desired):
+            self.output = MotionState()
+        else:
+            self.output.vx = self.apply_rate_limit(self.output.vx, desired.vx, self.max_ax * dt)
+            self.output.wz = self.apply_rate_limit(self.output.wz, desired.wz, self.max_aw * dt)
 
         # Publish TwistStamped control command
         cmd_msg = TwistStamped()
@@ -207,7 +271,7 @@ class CmdVelToPicoBridge(Node):
 
         # Publish enable state
         enable_msg = Bool()
-        enable_msg.data = not command_stale
+        enable_msg.data = not force_stop
         self.enable_pub.publish(enable_msg)
 
         # Publish heartbeat

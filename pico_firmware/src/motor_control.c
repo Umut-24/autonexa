@@ -25,6 +25,12 @@ static bool    motors_enabled   = false;
 
 void motor_control_set_velocity(float vx, float wz)
 {
+    if (safety_is_estopped()) {
+        speed_left = 0;
+        speed_right = 0;
+        return;
+    }
+
     float steer, v_l, v_r;
     ackermann_inverse(vx, wz, &steer, &v_l, &v_r);
 
@@ -46,6 +52,15 @@ void motor_control_set_velocity(float vx, float wz)
 
 void motor_control_enable(bool enable)
 {
+    if (enable && safety_is_estopped()) {
+        motors_enabled = false;
+        speed_left = 0;
+        speed_right = 0;
+        hiwonder_stop_all();
+        servo_center();
+        return;
+    }
+
     motors_enabled = enable;
     if (enable) {
         safety_feed_watchdog();
@@ -60,8 +75,15 @@ void motor_control_stop(void)
 {
     speed_left  = 0;
     speed_right = 0;
+    target_steer_rad = 0.0f;
     hiwonder_stop_all();
     servo_center();
+}
+
+void motor_control_emergency_stop(void)
+{
+    motors_enabled = false;
+    motor_control_stop();
 }
 
 bool motor_control_is_enabled(void)
@@ -73,6 +95,8 @@ void motor_control_apply(void)
 {
     if (motors_enabled && safety_is_ok()) {
         hiwonder_set_speeds(speed_left, speed_right);
+    } else {
+        hiwonder_stop_all();
     }
 }
 

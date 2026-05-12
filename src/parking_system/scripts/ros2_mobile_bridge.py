@@ -22,7 +22,7 @@ Endpoints:
 import threading
 import time
 import io
-from math import cos, sin, isinf, isnan
+from math import atan2, ceil, cos, hypot, isinf, isnan, pi, sin
 
 import numpy as np
 import cv2
@@ -60,6 +60,8 @@ class MobileBridgeNode(Node):
         self._map_lock = threading.Lock()
         self._map_png = None         # Cached PNG bytes
         self._map_info = {}          # {width, height, resolution, origin_x, origin_y}
+        self._costmap_lock = threading.Lock()
+        self._costmap = None         # Latest global costmap as OccupancyGrid
 
         self._pose_lock = threading.Lock()
         self._pose = {'x_m': 0.0, 'y_m': 0.0, 'yaw_rad': 0.0, 'stamp': 0.0}
@@ -91,6 +93,8 @@ class MobileBridgeNode(Node):
         self.create_subscription(
             OccupancyGrid, '/map', self._map_cb, map_qos)
         self.create_subscription(
+            OccupancyGrid, '/global_costmap/costmap', self._costmap_cb, 10)
+        self.create_subscription(
             PoseWithCovarianceStamped, '/amcl_pose', self._amcl_cb, 10)
         self.create_subscription(
             Odometry, '/odometry/filtered', self._odom_cb, 10)
@@ -100,6 +104,7 @@ class MobileBridgeNode(Node):
 
         # --- Joystick control: publish to /cmd_vel ---
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self._drive_estop_client = self.create_client(SetBool, '/drive/estop')
         self._pico_estop_client = self.create_client(SetBool, '/pico/estop')
 
         # --- Pico telemetry subscriptions ---
@@ -140,6 +145,10 @@ class MobileBridgeNode(Node):
         with self._map_lock:
             self._map_png = png_bytes
             self._map_info = info
+
+    def _costmap_cb(self, msg: OccupancyGrid):
+        with self._costmap_lock:
+            self._costmap = msg
 
     def _amcl_cb(self, msg: PoseWithCovarianceStamped):
         x = msg.pose.pose.position.x
@@ -198,18 +207,18 @@ class MobileBridgeNode(Node):
 
     def publish_control(self, x: float, y: float, e: int, speed_limit: float):
         """Convert joystick input to Twist and publish on /cmd_vel."""
-        max_vx = 0.35
+        max_vx = 0.22
         max_wz = 0.8
         sl = max(0.1, min(1.0, speed_limit))
 
         twist = Twist()
         if e:
-            # Emergency: zero velocity (twist stays at zero)
-            pass
+            self.estop()
+            return
         else:
-            # If Pico E-STOP was previously latched, clear it now
             if self._estop_latched:
-                self._clear_pico_estop()
+                self.get_logger().warning('Ignoring joystick command while E-STOP is latched')
+                return
             twist.linear.x = y * max_vx * sl
             twist.angular.z = -x * max_wz * sl
 
@@ -224,7 +233,6 @@ class MobileBridgeNode(Node):
         """Extract yaw from quaternion."""
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        from math import atan2
         return atan2(siny_cosp, cosy_cosp)
 
     @staticmethod
@@ -268,6 +276,87 @@ class MobileBridgeNode(Node):
     def _get_pose(self):
         with self._pose_lock:
             return dict(self._pose)
+
+    @staticmethod
+    def _world_to_grid(map_msg: OccupancyGrid, x: float, y: float):
+        res = map_msg.info.resolution
+        ox = map_msg.info.origin.position.x
+        oy = map_msg.info.origin.position.y
+        mx = int((x - ox) / res)
+        my = int((y - oy) / res)
+        if mx < 0 or my < 0 or mx >= map_msg.info.width or my >= map_msg.info.height:
+            return None
+        return mx, my
+
+    @staticmethod
+    def _cost_at(map_msg: OccupancyGrid, x: float, y: float):
+        cell = MobileBridgeNode._world_to_grid(map_msg, x, y)
+        if cell is None:
+            return None
+        mx, my = cell
+        return map_msg.data[my * map_msg.info.width + mx]
+
+    @staticmethod
+    def _pose_is_safe(map_msg: OccupancyGrid, x: float, y: float, yaw: float) -> bool:
+        # URDF footprint 0.30 x 0.20m plus selected 5cm safety padding.
+        half_x = 0.20
+        half_y = 0.15
+        step = max(0.02, map_msg.info.resolution)
+        lethal_threshold = 65
+        cos_y = cos(yaw)
+        sin_y = sin(yaw)
+        x_steps = range(-ceil(half_x / step), ceil(half_x / step) + 1)
+        y_steps = range(-ceil(half_y / step), ceil(half_y / step) + 1)
+
+        for ix in x_steps:
+            local_x = ix * step
+            if abs(local_x) > half_x:
+                continue
+            for iy in y_steps:
+                local_y = iy * step
+                if abs(local_y) > half_y:
+                    continue
+                wx = x + local_x * cos_y - local_y * sin_y
+                wy = y + local_x * sin_y + local_y * cos_y
+                cost = MobileBridgeNode._cost_at(map_msg, wx, wy)
+                if cost is None or cost < 0 or cost >= lethal_threshold:
+                    return False
+        return True
+
+    @staticmethod
+    def _candidate_goal_offsets(max_shift: float = 0.40, step: float = 0.02):
+        yield 0.0, 0.0
+        directions = 24
+        for ring in range(1, int(max_shift / step) + 1):
+            radius = ring * step
+            for idx in range(directions):
+                angle = 2.0 * pi * idx / directions
+                yield radius * cos(angle), radius * sin(angle)
+
+    def find_safe_nav_goal(self, x: float, y: float, yaw: float):
+        with self._costmap_lock:
+            costmap = self._costmap
+        if costmap is None:
+            return None, 'global costmap is not available yet'
+
+        best = None
+        for dx, dy in self._candidate_goal_offsets():
+            cx = x + dx
+            cy = y + dy
+            if self._pose_is_safe(costmap, cx, cy, yaw):
+                shift = hypot(dx, dy)
+                best = {
+                    'x': cx,
+                    'y': cy,
+                    'yaw': yaw,
+                    'shift_m': shift,
+                    'adjusted': shift > 1.0e-6,
+                }
+                break
+
+        if best is None:
+            return None, 'no safe pose found within 0.40m of requested goal'
+        return best, None
 
     def _start_camera(self):
         """Start camera capture in background thread."""
@@ -372,25 +461,31 @@ class MobileBridgeNode(Node):
 
         self._estop_latched = True
 
-        if not self._pico_estop_client.wait_for_service(timeout_sec=0.2):
-            self.get_logger().warning('/pico/estop service not available, zero cmd_vel sent only')
+        if self._call_estop_service(self._drive_estop_client, True, '/drive/estop'):
             return
+        self._call_estop_service(self._pico_estop_client, True, '/pico/estop')
 
+    def _call_estop_service(self, client, active: bool, name: str) -> bool:
+        if not client.wait_for_service(timeout_sec=0.2):
+            self.get_logger().warning(f'{name} service not available')
+            return False
         req = SetBool.Request()
-        req.data = True
-        future = self._pico_estop_client.call_async(req)
+        req.data = active
+        future = client.call_async(req)
 
         def _estop_done(fut):
             try:
                 res = fut.result()
                 if res is not None and res.success:
-                    self.get_logger().warning('Pico E-STOP latched successfully')
+                    state = 'latched' if active else 'cleared'
+                    self.get_logger().warning(f'{name} E-STOP {state} successfully')
                 else:
-                    self.get_logger().error('Pico E-STOP request returned failure')
+                    self.get_logger().error(f'{name} E-STOP request returned failure')
             except Exception as exc:
-                self.get_logger().error(f'Pico E-STOP request failed: {exc}')
+                self.get_logger().error(f'{name} E-STOP request failed: {exc}')
 
         future.add_done_callback(_estop_done)
+        return True
 
     def clear_estop(self):
         """Clear the Pico E-STOP latch so motors can run again."""
@@ -401,27 +496,11 @@ class MobileBridgeNode(Node):
         if not self._estop_latched:
             return
 
-        self._estop_latched = False
-
-        if not self._pico_estop_client.wait_for_service(timeout_sec=0.2):
-            self.get_logger().warning('/pico/estop service not available for clear')
+        if self._call_estop_service(self._drive_estop_client, False, '/drive/estop'):
+            self._estop_latched = False
             return
-
-        req = SetBool.Request()
-        req.data = False
-        future = self._pico_estop_client.call_async(req)
-
-        def _clear_done(fut):
-            try:
-                res = fut.result()
-                if res is not None and res.success:
-                    self.get_logger().info('Pico E-STOP cleared')
-                else:
-                    self.get_logger().error('Pico E-STOP clear returned failure')
-            except Exception as exc:
-                self.get_logger().error(f'Pico E-STOP clear failed: {exc}')
-
-        future.add_done_callback(_clear_done)
+        if self._call_estop_service(self._pico_estop_client, False, '/pico/estop'):
+            self._estop_latched = False
 
     def send_nav_goal(self, x, y, yaw):
         """Publish a Nav2 goal."""
@@ -435,6 +514,11 @@ class MobileBridgeNode(Node):
         msg.pose.orientation.w = mcos(float(yaw) / 2.0)
         self._goal_pub.publish(msg)
         self.get_logger().info(f'Published nav goal: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
+        return {
+            'x': float(x),
+            'y': float(y),
+            'yaw': float(yaw),
+        }
 
 
 # =============================================================================
@@ -536,9 +620,29 @@ def api_nav_goal():
     data = request.get_json(silent=True)
     if not data or 'x' not in data or 'y' not in data:
         return jsonify({'error': 'JSON body with x, y required'}), 400
-    yaw = data.get('yaw', 0.0)
-    bridge_node.send_nav_goal(data['x'], data['y'], yaw)
-    return jsonify({'status': 'ok'})
+    requested = {
+        'x': float(data['x']),
+        'y': float(data['y']),
+        'yaw': float(data.get('yaw', 0.0)),
+    }
+    safe_goal, error = bridge_node.find_safe_nav_goal(
+        requested['x'], requested['y'], requested['yaw']
+    )
+    if safe_goal is None:
+        return jsonify({
+            'status': 'rejected',
+            'error': error,
+            'requested': requested,
+        }), 409
+
+    sent = bridge_node.send_nav_goal(safe_goal['x'], safe_goal['y'], safe_goal['yaw'])
+    return jsonify({
+        'status': 'adjusted' if safe_goal['adjusted'] else 'ok',
+        'requested': requested,
+        'sent': sent,
+        'adjusted': safe_goal['adjusted'],
+        'shift_m': round(safe_goal['shift_m'], 4),
+    })
 
 
 @flask_app.route('/video_feed')

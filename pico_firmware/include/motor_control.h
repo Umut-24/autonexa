@@ -30,6 +30,9 @@ void motor_control_enable(bool enable);
 /** Stop all motors and center steering. Keeps enabled state unchanged. */
 void motor_control_stop(void);
 
+/** Latching safety stop: stop all motors, center steering, and disable output. */
+void motor_control_emergency_stop(void);
+
 /** Returns true if motors are currently enabled. */
 bool motor_control_is_enabled(void);
 

@@ -60,7 +60,7 @@ def generate_launch_description():
             'control_cmd_topic': LaunchConfiguration('control_cmd_topic'),
             'publish_rate_hz': 30.0,
             'command_timeout_s': 0.20,
-            'max_vx_mps': 0.35,
+            'max_vx_mps': 0.22,
             'max_wz_radps': 0.8,
             'max_ax_mps2': 0.8,
             'max_aw_radps2': 1.2,

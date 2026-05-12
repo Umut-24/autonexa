@@ -23,6 +23,9 @@
 
   <exec_depend>rviz2</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_collision_monitor</exec_depend>
+  <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
+  <exec_depend>nav2_smac_planner</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
   <exec_depend>micro_ros_agent</exec_depend>
   <exec_depend>robot_localization</exec_depend>
