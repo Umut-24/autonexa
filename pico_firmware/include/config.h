@@ -5,7 +5,7 @@
 
 /* ============================================================
  * AUTONEXA — Pico Firmware Configuration
- * Hiwonder Ackermann Steering Chassis
+ * Ackermann Steering Chassis with L298N H-bridge
  * ============================================================ */
 
 /* ---------- Vehicle Geometry ---------- */
@@ -15,33 +15,64 @@
 #define TRACK_WIDTH_M        0.20f   /* left-to-right wheel distance [m]   */
 
 /* ---------- Motor Info ---------- */
-/* JGB37-520R30-12: 12V DC, 1:30 gear ratio, quadrature encoder            */
+/* JGB37-520R30-12: 12V DC, 1:30 gear ratio                                */
+/* Encoder constants kept for future use; no encoders connected currently. */
 #define MOTOR_GEAR_RATIO     30
 #define ENCODER_CPR          11      /* encoder disk slots (per motor rev)  */
 #define ENCODER_EDGES_PER_REV (ENCODER_CPR * 4 * MOTOR_GEAR_RATIO)
                                      /* 11 * 4 * 30 = 1320 edges/wheel rev */
 
-/* ---------- Hiwonder Motor Driver Board (I2C) ---------- */
-#define I2C_PORT             i2c0
-#define I2C_SDA_PIN          0
-#define I2C_SCL_PIN          1
-#define I2C_FREQ_HZ          100000  /* 100 kHz standard mode              */
-#define MOTOR_DRIVER_ADDR    0x34    /* Hiwonder 4-ch driver I2C address   */
+/* ---------- L298N H-bridge motor driver ---------- */
+/* Switched from Hiwonder I2C smart driver on 2026-05-06 — Hiwonder MCU
+ * burned. L298N is a dumb dual H-bridge: 2 direction pins + 1 PWM enable
+ * per motor. No on-board encoder counting; odometry is unavailable until
+ * external encoder hardware is wired in.
+ *
+ *   Right motor (OUT1-OUT2):  IN1 = GP2, IN2 = GP3, ENA = GP4
+ *   Left  motor (OUT3-OUT4):  IN3 = GP6, IN4 = GP7, ENB = GP8
+ */
+#define L298N_RIGHT_IN1_PIN  2
+#define L298N_RIGHT_IN2_PIN  3
+#define L298N_RIGHT_EN_PIN   4
+#define L298N_LEFT_IN3_PIN   6
+#define L298N_LEFT_IN4_PIN   7
+#define L298N_LEFT_EN_PIN    8
 
-/* Motor channel mapping on driver board */
-#define MOTOR_CHANNEL_LEFT   2       /* M2 = left rear                     */
-#define MOTOR_CHANNEL_RIGHT  4       /* M4 = right rear                    */
+#define L298N_PWM_FREQ_HZ    10000   /* 10 kHz PWM (above audible)         */
 
-/* Motor type for driver board init (register 0x14) */
-#define MOTOR_TYPE_JGB37     3       /* JGB37-520 series with Hall encoder */
-#define ENCODER_POLARITY_DEFAULT 0   /* default encoder counting direction */
+/* Per-channel direction polarity. 1 = swap "forward" / "reverse" so that
+ * positive PWM commands produce physical forward rotation. Verified
+ * empirically 2026-05-06: with the natural mapping (=0), the GUI's
+ * `M1 +fwd` and `M2 +fwd` both spun the wheels backward, so both
+ * channels live with this flipped. Re-zero a flag if the motor wires get
+ * physically swapped on that channel. */
+#define L298N_LEFT_REVERSED   1
+#define L298N_RIGHT_REVERSED  1
 
-/* Speed range for driver board commands (closed-loop: pulses per 10ms) */
-#define MOTOR_SPEED_MAX      30      /* max forward speed value            */
-#define MOTOR_SPEED_MIN     -30      /* max reverse speed value            */
+/* Logical channel numbering — matches CLI verbs SPEED_L/SPEED_R + the
+ * GUI's bench panel "M1/M2" buttons. M1 = left, M2 = right. */
+#define MOTOR_CHANNEL_LEFT   1
+#define MOTOR_CHANNEL_RIGHT  2
+
+/* CLI speed range (signed integer for SPEED/SPEED_L/SPEED_R verbs).
+ * Internally maps to PWM duty 0..100% via (value * 100 / MOTOR_SPEED_MAX). */
+#define MOTOR_SPEED_MAX      30      /* SPEED 30  -> 100% PWM duty         */
+#define MOTOR_SPEED_MIN     -30      /* SPEED -30 -> 100% reverse duty     */
+
+/* Static-friction kick-start: motors on this chassis need ~60% duty
+ * cycle to actually start rotating under load (verified on the bench
+ * via RAW_PWM mag sweep — 60% spins slowly, below that doesn't move).
+ * Any non-zero SPEED command is snapped up to this floor so the GUI's
+ * W/S keys (and Nav2 vx commands) produce real motion even at low
+ * commanded speeds. SPEED 0 still produces 0% duty (full stop).
+ *
+ * RAW_PWM bypasses this — it's a diagnostic verb where the literal duty
+ * matters (e.g. for hunting the deadband threshold). Set to 0 to disable
+ * the kick-start entirely. */
+#define MOTOR_DEADBAND_PCT   60
 
 /* ---------- Servo (Steering) — LD-1501MG ---------- */
-#define SERVO_PIN            12      /* GPIO 12 (Hiwonder standard)        */
+#define SERVO_PIN            15      /* GPIO 15 (servo debug wiring)       */
 
 #define SERVO_PWM_CENTER_US  1500    /* straight ahead                     */
 #define SERVO_PWM_MIN_US     500     /* full one direction (0°)            */

@@ -1,15 +1,19 @@
 /**
  * Autonexa — Pico Firmware Main
  *
- * Hiwonder Ackermann Steering Chassis
+ * Ackermann Steering Chassis with L298N H-bridge
  *
  * Phase 1: Bench test via serial CLI
- *   - I2C communication with Hiwonder motor driver board
- *   - LD-1501MG servo steering on GPIO 12
- *   - Encoder reading from driver board
+ *   - L298N dual H-bridge (open-loop PWM, no on-board encoders)
+ *   - LD-1501MG servo steering on configured PWM GPIO
  *   - Safety watchdog with command timeout and E-STOP
  *
  * Phase 2: micro-ROS executor replaces serial CLI (compile with -DUSE_MICRO_ROS)
+ *
+ * Hardware migrated from Hiwonder I2C smart driver to L298N on 2026-05-06
+ * after the Hiwonder board's MCU burned. Without on-board encoders, ENC_READ
+ * and the odometry fields in TEL/STATUS report zero. Encoders to be added
+ * back as external quadrature inputs later.
  */
 
 #include <stdio.h>
@@ -19,17 +23,17 @@
 
 #include "pico/stdlib.h"
 #include "hardware/timer.h"
-#include "hardware/i2c.h"
 
 #include "config.h"
 #include "servo.h"
-#include "hiwonder_driver.h"
+#include "l298n_driver.h"
 #include "safety.h"
 #include "ackermann.h"
 #include "motor_control.h"
 
 #ifdef USE_MICRO_ROS
 #include "uros_transport.h"
+#include <rmw_microros/rmw_microros.h>
 #endif
 
 /* ── State ───────────────────────────────────────────────────── */
@@ -73,21 +77,62 @@ static void process_serial_command(const char *cmd)
         servo_center();
         printf("OK SERVO_CENTER\n");
     }
+    else if (strcmp(cmd, "SERVO_SWEEP") == 0) {
+        const uint16_t pulses[] = {1000, 1500, 2000, 1500};
+        printf("OK SERVO_SWEEP pin=GP%d pulses=1000,1500,2000,1500\n", SERVO_PIN);
+        for (int repeat = 0; repeat < 3; repeat++) {
+            for (int i = 0; i < 4; i++) {
+                servo_set_pwm_us(pulses[i]);
+                printf("SERVO pulse_us=%u\n", pulses[i]);
+                sleep_ms(700);
+            }
+        }
+        printf("OK SERVO_SWEEP done\n");
+    }
+    else if (strcmp(cmd, "SERVO_PIN_TEST") == 0) {
+        printf("OK SERVO_PIN_TEST GP%d toggling 0V/3V3\n", SERVO_PIN);
+        gpio_init(SERVO_PIN);
+        gpio_set_dir(SERVO_PIN, GPIO_OUT);
+        for (int i = 0; i < 10; i++) {
+            gpio_put(SERVO_PIN, 1);
+            printf("SERVO_PIN_TEST high\n");
+            sleep_ms(500);
+            gpio_put(SERVO_PIN, 0);
+            printf("SERVO_PIN_TEST low\n");
+            sleep_ms(500);
+        }
+        servo_init();
+        printf("OK SERVO_PIN_TEST done pwm_restored\n");
+    }
+    else if (strcmp(cmd, "SERVO_PIN_HOLD") == 0) {
+        printf("OK SERVO_PIN_HOLD GP%d high 10s then low 10s\n", SERVO_PIN);
+        gpio_init(SERVO_PIN);
+        gpio_set_dir(SERVO_PIN, GPIO_OUT);
+        gpio_put(SERVO_PIN, 1);
+        printf("SERVO_PIN_HOLD high_now measure GP%d to GND\n", SERVO_PIN);
+        sleep_ms(10000);
+        gpio_put(SERVO_PIN, 0);
+        printf("SERVO_PIN_HOLD low_now measure GP%d to GND\n", SERVO_PIN);
+        sleep_ms(10000);
+        servo_init();
+        printf("OK SERVO_PIN_HOLD done pwm_restored\n");
+    }
 
-    /* === MOTOR (I2C via Hiwonder driver board) === */
+    /* === MOTOR (L298N H-bridge) ===
+     * Important: persist via motor_control_set_speeds() so the next
+     * motor_control_apply() tick picks them up. Writing only once via
+     * l298n_set_speed() here would be overridden 20 ms later when the
+     * control loop calls motor_control_apply() with its own (stale,
+     * zero) state. */
     else if (strncmp(cmd, "SPEED_L ", 8) == 0) {
         speed_left = (int8_t)atoi(cmd + 8);
-        if (motor_control_is_enabled() && safety_is_ok()) {
-            hiwonder_set_speed(MOTOR_CHANNEL_LEFT, speed_left);
-        }
+        motor_control_set_speed_left(speed_left);
         safety_feed_watchdog();
         printf("OK SPEED_L %d\n", speed_left);
     }
     else if (strncmp(cmd, "SPEED_R ", 8) == 0) {
         speed_right = (int8_t)atoi(cmd + 8);
-        if (motor_control_is_enabled() && safety_is_ok()) {
-            hiwonder_set_speed(MOTOR_CHANNEL_RIGHT, speed_right);
-        }
+        motor_control_set_speed_right(speed_right);
         safety_feed_watchdog();
         printf("OK SPEED_R %d\n", speed_right);
     }
@@ -95,9 +140,7 @@ static void process_serial_command(const char *cmd)
         int8_t spd = (int8_t)atoi(cmd + 6);
         speed_left  = spd;
         speed_right = spd;
-        if (motor_control_is_enabled() && safety_is_ok()) {
-            hiwonder_set_speeds(speed_left, speed_right);
-        }
+        motor_control_set_speeds(spd, spd);
         safety_feed_watchdog();
         printf("OK SPEED %d\n", spd);
     }
@@ -123,73 +166,34 @@ static void process_serial_command(const char *cmd)
         }
     }
 
-    /* === ENCODER === */
+    /* === ENCODER (no encoders connected on L298N path) === */
     else if (strcmp(cmd, "ENC_READ") == 0) {
-        int32_t l = 0, r = 0;
-        hiwonder_read_encoders(&l, &r);
-        printf("ENC L=%ld R=%ld\n", (long)l, (long)r);
+        printf("ENC L=0 R=0 (no encoders on L298N)\n");
     }
-    
-    /* === RAW PWM INJECTION (M1, M2, M3, M4) === */
+
+    /* === RAW PWM INJECTION (open-loop, bypasses motor_control) ===
+     * Format kept as 4 channels for protocol compatibility with the GUI's
+     * bench panel. m3/m4 are accepted but ignored — L298N has only 2
+     * channels. m1 = LEFT motor, m2 = RIGHT motor (matches GUI bench
+     * "M1+/M2+" buttons). Each value is a duty percentage in [-100, 100]. */
     else if (strncmp(cmd, "RAW_PWM ", 8) == 0) {
         int m1, m2, m3, m4;
         if (sscanf(cmd + 8, "%d %d %d %d", &m1, &m2, &m3, &m4) == 4) {
-            uint8_t buf[5] = {0x1F, (uint8_t)m1, (uint8_t)m2, (uint8_t)m3, (uint8_t)m4};
-            int ret = i2c_write_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, 
-                                           buf, 5, false, 5000);
-            printf("OK RAW_PWM %d %d %d %d (ret=%d)\n", m1, m2, m3, m4, ret);
+            l298n_set_raw_pwm((int8_t)m1, (int8_t)m2);
+            safety_feed_watchdog();
+            printf("OK RAW_PWM %d %d %d %d (m3/m4 ignored on L298N)\n",
+                   m1, m2, m3, m4);
         } else {
             printf("ERR RAW_PWM usage: RAW_PWM <m1> <m2> <m3> <m4>\n");
         }
     }
 
-    /* === RAW PID INJECTION (M1, M2, M3, M4) === */
-    else if (strncmp(cmd, "RAW_PID ", 8) == 0) {
-        int m1, m2, m3, m4;
-        if (sscanf(cmd + 8, "%d %d %d %d", &m1, &m2, &m3, &m4) == 4) {
-            uint8_t buf[5] = {0x33, (uint8_t)m1, (uint8_t)m2, (uint8_t)m3, (uint8_t)m4};
-            int ret = i2c_write_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, 
-                                           buf, 5, false, 5000);
-            printf("OK RAW_PID %d %d %d %d (ret=%d)\n", m1, m2, m3, m4, ret);
-        } else {
-            printf("ERR RAW_PID usage: RAW_PID <m1> <m2> <m3> <m4>\n");
-        }
-    }
-
-    /* === I2C SCAN === */
-    else if (strcmp(cmd, "I2C_SCAN") == 0) {
-        printf("I2C scan on bus 0:\n");
-        for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-            uint8_t dummy;
-            int ret = i2c_read_timeout_us(I2C_PORT, addr,
-                                          &dummy, 1, false, 5000);
-            if (ret >= 0) {
-                printf("  Found device at 0x%02X\n", addr);
-            }
-        }
-        printf("Scan complete.\n");
-    }
-    /* === I2C RAW DEBUG === */
-    else if (strncmp(cmd, "I2C_WRITE ", 10) == 0) {
-        int reg, val;
-        if (sscanf(cmd + 10, "%d %d", &reg, &val) == 2) {
-            uint8_t buf[2] = {(uint8_t)reg, (uint8_t)val};
-            int ret = i2c_write_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, buf, 2, false, 5000);
-            printf("I2C_WRITE reg=%d val=%d ret=%d\n", reg, val, ret);
-        }
-    }
-    else if (strncmp(cmd, "I2C_READ ", 9) == 0) {
-        int reg, len;
-        if (sscanf(cmd + 9, "%d %d", &reg, &len) == 2) {
-            uint8_t reg_u8 = (uint8_t)reg;
-            i2c_write_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, &reg_u8, 1, true, 5000);
-            uint8_t buf[16] = {0};
-            if (len > 16) len = 16;
-            int ret = i2c_read_timeout_us(I2C_PORT, MOTOR_DRIVER_ADDR, buf, len, false, 5000);
-            printf("I2C_READ reg=%d len=%d ret=%d data=", reg, len, ret);
-            for(int i=0; i<len; i++) printf("%02X ", buf[i]);
-            printf("\n");
-        }
+    /* === RAW_PID and I2C debug verbs are not supported on L298N === */
+    else if (strncmp(cmd, "RAW_PID ", 8) == 0 ||
+             strcmp(cmd, "I2C_SCAN") == 0 ||
+             strncmp(cmd, "I2C_WRITE ", 10) == 0 ||
+             strncmp(cmd, "I2C_READ ", 9) == 0) {
+        printf("ERR not supported on L298N (use RAW_PWM for open-loop)\n");
     }
 
     /* === SAFETY === */
@@ -238,21 +242,21 @@ static void process_serial_command(const char *cmd)
 
     /* === HELP === */
     else if (strcmp(cmd, "HELP") == 0) {
-        printf("Commands:\n");
+        printf("Commands (L298N H-bridge build):\n");
         printf("  SERVO_PWM <us>       - Raw servo PWM (500-2500)\n");
         printf("  SERVO_ANGLE <rad>    - Servo angle (±0.52 rad = ±30 deg)\n");
         printf("  SERVO_CENTER         - Center steering\n");
-        printf("  SPEED <-30..30>      - Both motors (closed-loop, pulses/10ms)\n");
+        printf("  SERVO_SWEEP          - Sweep GP%d through 1000/1500/2000 us\n", SERVO_PIN);
+        printf("  SERVO_PIN_TEST       - Toggle GP%d high/low for electrical debug\n", SERVO_PIN);
+        printf("  SERVO_PIN_HOLD       - Hold GP%d high 10s, then low 10s\n", SERVO_PIN);
+        printf("  SPEED <-30..30>      - Both motors (open-loop PWM, scaled to 0..100%%)\n");
         printf("  SPEED_L <-30..30>    - Left motor speed\n");
         printf("  SPEED_R <-30..30>    - Right motor speed\n");
         printf("  STEER <rad>          - Steering angle\n");
         printf("  VEL <vx> <wz>        - Ackermann velocity cmd (m/s, rad/s)\n");
-        printf("  ENC_READ             - Read encoder counts\n");
-        printf("  RAW_PWM <m1..m4>     - Open-loop PWM bypass (reg 0x1F)\n");
-        printf("  RAW_PID <m1..m4>     - Closed-loop bypass (reg 0x33)\n");
-        printf("  I2C_SCAN             - Scan I2C bus\n");
-        printf("  I2C_WRITE <reg> <val> - Raw I2C write\n");
-        printf("  I2C_READ <reg> <len> - Raw I2C read\n");
+        printf("  ENC_READ             - (no-op: no encoders connected)\n");
+        printf("  RAW_PWM <m1..m4>     - Open-loop PWM duty %% (m1=L, m2=R, m3/m4 ignored)\n");
+        printf("  RAW_PID/I2C_*        - Not supported on L298N\n");
         printf("  ENABLE               - Enable motors\n");
         printf("  DISABLE              - Disable motors\n");
         printf("  STOP                 - Stop all + center\n");
@@ -308,9 +312,12 @@ static void print_telemetry(void)
 
 int main(void)
 {
-#ifndef USE_MICRO_ROS
     /* ── Init Pico stdlib (USB serial) ───────────────────────── */
+    /* Must be called early in both modes: serial CLI needs it for printf,
+     * micro-ROS needs USB CDC enumerated before the XRCE-DDS ping loop. */
     stdio_init_all();
+#ifdef USE_MICRO_ROS
+    sleep_ms(2000);  /* allow USB CDC to fully enumerate before first ping */
 #endif
 
     /* Pre-init Heartbeat LED to verify power and boot */
@@ -324,12 +331,12 @@ int main(void)
     }
 
 #ifndef USE_MICRO_ROS
-    sleep_ms(2000);  /* wait for USB serial */
+    sleep_ms(2000);  /* wait for USB serial (serial CLI only) */
 
     printf("\n");
     printf("╔═══════════════════════════════════════════╗\n");
-    printf("║  AUTONEXA Pico Firmware v2.0              ║\n");
-    printf("║  Hiwonder Ackermann Chassis               ║\n");
+    printf("║  AUTONEXA Pico Firmware v3.0              ║\n");
+    printf("║  Ackermann + L298N H-bridge               ║\n");
     printf("║  Phase 1 — Bench Test (Serial CLI)        ║\n");
     printf("║  Control freq: %d Hz                      ║\n", CONTROL_FREQ_HZ);
     printf("╚═══════════════════════════════════════════╝\n");
@@ -338,18 +345,26 @@ int main(void)
 
     /* ── Init subsystems ─────────────────────────────────────── */
     servo_init();
-    hiwonder_driver_init();
+    l298n_driver_init();
     safety_init();
     ackermann_odom_reset(&odom);
 
 #ifdef USE_MICRO_ROS
-    /* micro-ROS transport init — blocks until agent is found */
-    while (!uros_init()) {
-        /* Blink LED fast while waiting for agent */
+    /* Set up the custom serial transport exactly once. */
+    uros_transport_setup();
+
+    /* Wait for micro-ROS agent: ping with 1s timeout, retry indefinitely.
+     * The Pico LED blinks fast while waiting so you can tell it's alive. */
+    while (rmw_uros_ping_agent(1000, 1) != RMW_RET_OK) {
         gpio_put(HEARTBEAT_LED_PIN, 1);
         sleep_ms(50);
         gpio_put(HEARTBEAT_LED_PIN, 0);
         sleep_ms(50);
+    }
+
+    /* Agent found — initialize node, subscribers, publishers, executor. */
+    while (!uros_init()) {
+        sleep_ms(100);
     }
 #endif
 
@@ -371,28 +386,16 @@ int main(void)
 
         loop_count++;
 
-        /* 1) Read encoders from driver board */
-        hiwonder_read_encoders(&encoder_left, &encoder_right);
+        /* 1) No encoders on the L298N path — keep counts at zero. Odometry
+         *    therefore stays at the last reset state (0,0,0). When external
+         *    encoders are added back, restore the read+integrate calls. */
+        encoder_left  = 0;
+        encoder_right = 0;
+        (void)prev_enc_left;
+        (void)prev_enc_right;
 
-        /* 2) Compute odometry from encoder deltas */
-        int32_t delta_l = encoder_left  - prev_enc_left;
-        int32_t delta_r = encoder_right - prev_enc_right;
-        prev_enc_left  = encoder_left;
-        prev_enc_right = encoder_right;
-
-        /* Convert encoder ticks to wheel linear velocities each cycle.
-           Always run forward kinematics so odom.vx/odom.wz are refreshed
-           to zero when the robot is stationary. */
-        float dist_l = (float)delta_l / (float)ENCODER_EDGES_PER_REV
-                       * 2.0f * 3.14159f * WHEEL_RADIUS_M;
-        float dist_r = (float)delta_r / (float)ENCODER_EDGES_PER_REV
-                       * 2.0f * 3.14159f * WHEEL_RADIUS_M;
-
-        float v_l = dist_l / CONTROL_DT_S;
-        float v_r = dist_r / CONTROL_DT_S;
-
-        ackermann_forward(v_l, v_r, servo_get_angle(),
-                          CONTROL_DT_S, &odom);
+        float v_l = 0.0f;
+        float v_r = 0.0f;
 
         /* 3) Safety check */
         safety_update();

@@ -11,13 +11,22 @@ set(CMAKE_CXX_STANDARD 17)
 pico_sdk_init()
 
 # ── Build option ─────────────────────────────────────────────
-option(USE_MICRO_ROS "Build with micro-ROS support" OFF)
+# Auto-detect the micro-ROS static lib so a plain `cmake ..` on a fully
+# provisioned checkout produces the micro-ROS UF2 (autonexa_pico_uros.uf2),
+# which is what the RPi5 micro-ROS agent needs. Falls back to ASCII-serial
+# only when the SDK is missing so bench-test builds still work out of the box.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/micro_ros_sdk/libmicroros/libmicroros.a")
+    set(USE_MICRO_ROS_DEFAULT ON)
+else()
+    set(USE_MICRO_ROS_DEFAULT OFF)
+endif()
+option(USE_MICRO_ROS "Build with micro-ROS support" ${USE_MICRO_ROS_DEFAULT})
 
 # ── Common sources ───────────────────────────────────────────
 set(COMMON_SOURCES
     src/main.c
     src/servo.c
-    src/hiwonder_driver.c
+    src/l298n_driver.c
     src/safety.c
     src/ackermann.c
     src/motor_control.c
@@ -27,7 +36,6 @@ set(COMMON_LIBS
     pico_stdlib
     hardware_pwm
     hardware_gpio
-    hardware_i2c
     hardware_timer
 )
 
@@ -56,7 +64,10 @@ if(USE_MICRO_ROS)
     set(MICROROS_INCLUDE_DIR ${MICROROS_LIB_DIR}/include)
 
     if(NOT EXISTS ${MICROROS_LIB})
-        message(FATAL_ERROR "micro-ROS static library not found: ${MICROROS_LIB}")
+        message(FATAL_ERROR
+            "micro-ROS static library not found: ${MICROROS_LIB}\n"
+            "  Either install the micro-ROS SDK into micro_ros_sdk/libmicroros/\n"
+            "  or configure with -DUSE_MICRO_ROS=OFF to build the ASCII serial target only.")
     endif()
 
     add_executable(autonexa_pico_uros
@@ -96,11 +107,14 @@ if(USE_MICRO_ROS)
 endif()
 
 # Print build info
-message(STATUS "Autonexa Pico firmware v3.0 (Hiwonder Chassis)")
-message(STATUS "  Motor driver: I2C (Hiwonder 4-ch board)")
-message(STATUS "  Servo: LD-1501MG on GPIO 12")
+message(STATUS "Autonexa Pico firmware v3.0 (L298N Chassis)")
+message(STATUS "  Motor driver: L298N H-bridge (open-loop PWM, no encoders)")
+message(STATUS "  Servo: hobby servo on configured GPIO")
 message(STATUS "  Control frequency: 50 Hz")
-message(STATUS "  Targets: autonexa_pico (ASCII serial)")
+message(STATUS "  Targets: autonexa_pico (ASCII serial — bench testing)")
 if(USE_MICRO_ROS)
-    message(STATUS "           autonexa_pico_uros (micro-ROS)")
+    message(STATUS "           autonexa_pico_uros (micro-ROS — FLASH THIS FOR THE ROBOT)")
+else()
+    message(STATUS "  NOTE: micro-ROS target disabled. The robot needs autonexa_pico_uros.uf2")
+    message(STATUS "        to talk to the RPi5. Install micro_ros_sdk/libmicroros/ to enable.")
 endif()

@@ -20,7 +20,13 @@
  */
 
 /**
+ * Set up the custom serial transport (call once at startup, before any ping).
+ */
+void uros_transport_setup(void);
+
+/**
  * Initialize micro-ROS node, subscribers, publishers, service, and executor.
+ * Call only after a successful rmw_uros_ping_agent().
  * @return true if initialization succeeded, false otherwise.
  */
 bool uros_init(void);

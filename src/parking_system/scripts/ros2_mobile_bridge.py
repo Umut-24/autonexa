@@ -5,20 +5,38 @@ ROS2-Flask Bridge Node for AutoNexa Mobile App.
 Subscribes to ROS2 topics (/scan, /map, /amcl_pose, /odometry/filtered)
 and serves data via Flask HTTP endpoints for the Flutter mobile app.
 
-Endpoints:
-  /api/scan      - Latest LIDAR scan as (x,y) points in map frame (JSON)
-  /api/map       - Real SLAM occupancy grid (PNG)
-  /api/map_info  - Map metadata: resolution, origin, dimensions (JSON)
-  /api/pose      - Robot pose from AMCL/EKF (JSON)
-  /api/status    - Combined status (JSON)
-  /api/markers   - Currently visible ArUco markers (JSON)
-  /api/nav_goal  - POST a Nav2 goal (JSON {x, y, yaw})
-  /api/control   - POST joystick commands (JSON {x, y, e, speed_limit})
-  /api/telemetry - GET Pico telemetry (motors, encoders, odom)
-  /api/estop     - POST emergency stop
-  /video_feed    - Camera MJPEG stream
+REST Endpoints:
+  /api/scan        - Latest LIDAR scan as (x,y) points in map frame (JSON)
+  /api/map         - Real SLAM occupancy grid (PNG)
+  /api/map_info    - Map metadata: resolution, origin, dimensions (JSON)
+  /api/map_version - Bumps on each /map update; clients ETag the PNG
+  /api/plan        - Latest Nav2 planner output (JSON polyline)
+  /api/goal        - Active goal pose (JSON x/y/yaw/active/stamp)
+  /api/pose        - Robot pose from AMCL/EKF/odom (JSON)
+  /api/status      - Combined status (JSON)
+  /api/markers     - Currently visible ArUco markers (JSON)
+  /api/nav_goal    - POST a Nav2 goal (JSON {x, y, yaw})
+  /api/cancel_nav  - POST to cancel current Nav2 goal (stops autonomous motion)
+  /api/control     - POST joystick commands (JSON {x, y, e, speed_limit})
+  /api/telemetry   - GET Pico telemetry (motors, encoders, odom)
+  /api/estop       - POST emergency stop (cancels Nav2 + Pico latch)
+  /api/estop_clear - POST to clear the Pico E-STOP latch
+  /api/mode        - GET/POST AUTO/MANUAL/ESTOP control state machine
+  /api/nav_status  - Nav2 NavigateToPose action status string
+
+WebSocket Endpoints:
+  /ws/control      - Joystick stream (client -> bridge), JSON per message
+  /ws/telemetry    - Server-pushed snapshots at 10 Hz: pose + telemetry +
+                     mode + nav_status + goal
+
+  /video_feed      - Camera MJPEG stream
+
+Runtime Python deps (pip): flask, flask-sock, numpy, opencv-python.
 """
 
+import json
+import os
+import subprocess
 import threading
 import time
 import io
@@ -28,13 +46,67 @@ import numpy as np
 import cv2
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import LaserScan
-from nav_msgs.msg import OccupancyGrid, Odometry
+from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from sensor_msgs.msg import JointState
 from std_srvs.srv import SetBool
+from action_msgs.srv import CancelGoal
+from action_msgs.msg import GoalStatusArray
+from rcl_interfaces.srv import SetParameters, GetParameters, ListParameters
+from rcl_interfaces.msg import ParameterType
+from lifecycle_msgs.srv import ChangeState
+from lifecycle_msgs.msg import Transition
+
+try:
+    from nav2_msgs.srv import ClearEntireCostmap
+except ImportError:
+    ClearEntireCostmap = None
 from flask import Flask, Response, jsonify, request, send_file
+from flask_sock import Sock
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+try:
+    from parking_system import build_urdf as _build_urdf
+except Exception:  # pragma: no cover
+    _build_urdf = None
+
+# Persistent app data (waypoints + runtime overrides). Lives outside the ROS
+# workspace so it survives `colcon build --symlink-install` clobbering and is
+# trivial to back up / hand-edit.
+AUTONEXA_DATA_DIR = os.path.expanduser('~/.autonexa')
+RUNTIME_OVERRIDES_PATH = os.path.join(AUTONEXA_DATA_DIR, 'runtime_overrides.yaml')
+WAYPOINTS_PATH = os.path.join(AUTONEXA_DATA_DIR, 'waypoints.json')
+MAPS_DIR = os.path.join(AUTONEXA_DATA_DIR, 'maps')
+
+# Parameter-tuner whitelist — only these nodes can be reached from the app's
+# generic /api/params endpoint. Keeps the surface small and predictable.
+PARAM_TUNER_WHITELIST = (
+    '/nav2_pico_bridge',
+    '/controller_server',
+    '/planner_server',
+    '/velocity_smoother',
+    '/global_costmap/global_costmap',
+    '/local_costmap/local_costmap',
+)
+
+# Topics monitored by /api/health. Each tuple: (topic, expected_min_hz, label).
+# Rates are deliberately conservative — set the floor to "if we drop below
+# this, something is wrong", not the steady-state rate.
+HEALTH_TOPICS = (
+    ('/scan',                  5.0, 'LiDAR scan'),
+    ('/map',                   0.05, 'SLAM map'),
+    ('/odom',                  5.0, 'Wheel/scan odometry'),
+    ('/cmd_vel_safe',          0.5, 'Safety-gated cmd_vel'),
+    ('/pico/joint_feedback',   2.0, 'Pico joint feedback'),
+    ('/plan',                  0.2, 'Nav2 plan'),
+)
 
 # Optional: ArUco detection
 try:
@@ -76,9 +148,72 @@ class MobileBridgeNode(Node):
         self._control_watchdog_s = 0.5  # zero velocity if no command in 500ms
         self._estop_latched = False  # tracks whether Pico E-STOP was latched
 
+        # --- Control mode state machine: AUTO / MANUAL / ESTOP -------------
+        # AUTO   — Nav2 owns /cmd_vel; joystick input is ignored.
+        # MANUAL — joystick owns /cmd_vel; any active Nav2 goal is cancelled
+        #          on entry so the BT navigator stops publishing.
+        # ESTOP  — zero velocity + Pico hardware latch; both joystick and
+        #          Nav2 are blocked.
+        # The mode is the single source of truth — every cmd_vel publisher
+        # in this bridge consults it before publishing.
+        self._mode_lock = threading.Lock()
+        self._mode = 'MANUAL'         # safe default — no autonomous motion at boot
+        self._mode_stamp = time.time()
+
+        # --- Nav2 action goal status -----------------------------------------
+        # Latest status code from /navigate_to_pose/_action/status. Mapped to
+        # human-readable strings before serializing to clients.
+        self._nav_status_lock = threading.Lock()
+        self._nav_status = 'IDLE'      # IDLE/PLANNING/EXECUTING/SUCCEEDED/CANCELED/ABORTED
+        self._nav_status_stamp = 0.0
+
+        # --- WebSocket subscriber registry ----------------------------------
+        # Telemetry pusher fans out to every connected /ws/telemetry client.
+        # Adds/removes are handled inside the per-connection handler.
+        self._ws_lock = threading.Lock()
+        self._ws_telemetry_clients = set()
+
         # --- Telemetry from Pico ---
         self._telemetry_lock = threading.Lock()
         self._pico_telemetry = {}    # Latest telemetry dict
+
+        # --- Safety mode (Part A) ---
+        # 'soft' (default): joystick -> /cmd_vel -> velocity_smoother ->
+        #     collision_monitor -> /cmd_vel_safe -> Pico bridge. Walls block.
+        # 'off': joystick -> /cmd_vel_manual -> Pico bridge directly. The
+        #     user is in control. nav2_pico_bridge still applies its own
+        #     vx/wz clamps + watchdog so a runaway is still bounded.
+        # Only meaningful in MANUAL mode; AUTO always uses /cmd_vel_safe.
+        self._safety_lock = threading.Lock()
+        self._safety_mode = 'soft'
+
+        # --- Map fingerprint (Part D) ---
+        # Lets waypoints know if a new mapping session started. This stays
+        # stable while live SLAM expands/resizes the map, so saved spots do
+        # not become stale just because the robot drove away from them.
+        self._map_fingerprint = self._new_map_session_fingerprint()
+
+        # --- Waypoints (Part D) ---
+        self._waypoints_lock = threading.Lock()
+        self._waypoints = []   # list[dict]; persisted to WAYPOINTS_PATH
+
+        # --- Topic health stats (Part G3) ---
+        # EWMA rate per monitored topic so /api/health can report green /
+        # yellow / red without bringing in `ros2 topic hz` machinery.
+        self._health_lock = threading.Lock()
+        self._health_stats = {topic: {'last_t': 0.0, 'rate': 0.0}
+                              for topic, _, _ in HEALTH_TOPICS}
+
+        # --- Desktop screenshot stream (1 Hz) ---
+        # Captures GNOME desktop via gnome-screenshot every ~1 s, downsamples
+        # to ~720p, JPEG-encodes, caches bytes. Lets the app render a
+        # low-rate "Desktop" tab so the user can see RViz / dev windows
+        # without VNC. Wayland-friendly (gnome-screenshot uses portal API).
+        self._desktop_lock = threading.Lock()
+        self._desktop_jpeg = None     # JPEG bytes of latest shot
+        self._desktop_stamp = 0.0
+        self._desktop_version = 0
+        self._desktop_warned = False  # log only once if capture is failing
 
         # --- QoS for map (transient local, reliable) ---
         map_qos = QoSProfile(
@@ -96,16 +231,73 @@ class MobileBridgeNode(Node):
             OccupancyGrid, '/global_costmap/costmap', self._costmap_cb, 10)
         self.create_subscription(
             PoseWithCovarianceStamped, '/amcl_pose', self._amcl_cb, 10)
+        # Fuse either /odometry/filtered (EKF, when launched) or /odom
+        # (laser_scan_matcher output — active in live-SLAM mode). First
+        # callback to fire wins; AMCL takes priority when available.
         self.create_subscription(
             Odometry, '/odometry/filtered', self._odom_cb, 10)
+        self.create_subscription(
+            Odometry, '/odom', self._odom_cb, 10)
+
+        # Health-only subscription on /cmd_vel_safe so the diagnostics panel
+        # can detect a stalled safety chain (smoother / collision_monitor) even
+        # when the robot is idle. Cheap; a Twist is ~50 B.
+        self.create_subscription(
+            Twist, '/cmd_vel_safe', self._cmd_vel_safe_cb, 10)
+
+        # Nav2 planner output — visualized as a polyline in the
+        # mobile app. Depth 1; we replace fully on each new plan.
+        self.create_subscription(
+            Path, '/plan', self._plan_cb, 1)
+        # Track goals issued from RViz too (so the marker is correct regardless
+        # of who set the goal — app or RViz).
+        self.create_subscription(
+            PoseStamped, '/goal_pose', self._goal_pose_cb, 10)
+        # NavigateToPose action status — gives us PLANNING/EXECUTING/SUCCEEDED/
+        # ABORTED/CANCELED so the app can show what Nav2 is actually doing,
+        # not just "we sent a goal".
+        nav_status_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            depth=1,
+        )
+        self.create_subscription(
+            GoalStatusArray, '/navigate_to_pose/_action/status',
+            self._nav_status_cb, nav_status_qos)
 
         # --- Nav2 goal publisher ---
         self._goal_pub = self.create_publisher(PoseStamped, '/goal_pose', 10)
+
+        # --- Nav2 cancel service client ---
+        # The BT navigator exposes /navigate_to_pose/_action/cancel_goal.
+        # An empty CancelGoal.Request cancels *all* active goals — which
+        # is exactly the "stop autonomous motion" behavior the app wants.
+        self._nav_cancel_client = self.create_client(
+            CancelGoal, '/navigate_to_pose/_action/cancel_goal')
 
         # --- Joystick control: publish to /cmd_vel ---
         self._cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self._drive_estop_client = self.create_client(SetBool, '/drive/estop')
         self._pico_estop_client = self.create_client(SetBool, '/pico/estop')
+
+        # --- Costmap clear + SLAM restart clients (Part C) ---
+        if ClearEntireCostmap is not None:
+            self._global_costmap_clear = self.create_client(
+                ClearEntireCostmap, '/global_costmap/clear_entirely_global_costmap')
+            self._local_costmap_clear = self.create_client(
+                ClearEntireCostmap, '/local_costmap/clear_entirely_local_costmap')
+        else:
+            self._global_costmap_clear = None
+            self._local_costmap_clear = None
+            self.get_logger().warning(
+                'nav2_msgs missing — /api/clear_costmaps will be unavailable')
+        self._slam_change_state = self.create_client(
+            ChangeState, '/slam_toolbox/change_state')
+
+        # --- Generic remote SetParameters cache (Parts B / E / G2) ---
+        # Keyed by node name so we don't recreate clients on every call.
+        self._param_clients_lock = threading.Lock()
+        self._param_clients = {}   # node_name -> {set, get, list}
 
         # --- Pico telemetry subscriptions ---
         self.create_subscription(
@@ -122,11 +314,18 @@ class MobileBridgeNode(Node):
         self._camera_running = False
         self._start_camera()
 
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+        except OSError as exc:
+            self.get_logger().warning(f'cannot create {AUTONEXA_DATA_DIR}: {exc}')
+        self._load_waypoints()
+
         self.get_logger().info('MobileBridgeNode started')
 
     # ---- Callbacks ----
 
     def _scan_cb(self, msg: LaserScan):
+        self._mark_health('/scan')
         pose = self._get_pose()
         points = self._scan_to_points(msg, pose['x_m'], pose['y_m'], pose['yaw_rad'])
         with self._scan_lock:
@@ -134,6 +333,7 @@ class MobileBridgeNode(Node):
             self._scan_stamp = time.time()
 
     def _map_cb(self, msg: OccupancyGrid):
+        self._mark_health('/map')
         png_bytes = self._occupancy_grid_to_png(msg)
         info = {
             'width': msg.info.width,
@@ -145,6 +345,7 @@ class MobileBridgeNode(Node):
         with self._map_lock:
             self._map_png = png_bytes
             self._map_info = info
+            self._map_version += 1
 
     def _costmap_cb(self, msg: OccupancyGrid):
         with self._costmap_lock:
@@ -162,6 +363,7 @@ class MobileBridgeNode(Node):
             self._pose_source = 'amcl'
 
     def _odom_cb(self, msg: Odometry):
+        self._mark_health('/odom')
         # Only use odom if AMCL hasn't provided a pose recently
         with self._pose_lock:
             if self._pose_source == 'amcl' and (time.time() - self._pose['stamp']) < 2.0:
@@ -177,6 +379,7 @@ class MobileBridgeNode(Node):
             self._pose_source = 'odom'
 
     def _joint_feedback_cb(self, msg: JointState):
+        self._mark_health('/pico/joint_feedback')
         data = {}
         for i, name in enumerate(msg.name):
             if i < len(msg.velocity):
@@ -197,6 +400,76 @@ class MobileBridgeNode(Node):
             self._pico_telemetry['odom_wz'] = round(msg.twist.twist.angular.z, 4)
             self._pico_telemetry['odom_stamp'] = time.time()
 
+    def _cmd_vel_safe_cb(self, _msg: Twist):
+        """Health-only subscription so /api/health can show whether the
+        safety chain is alive even when no goal/joystick is active."""
+        self._mark_health('/cmd_vel_safe')
+
+    def _plan_cb(self, msg: Path):
+        """Cache the latest Nav2 plan as a downsampled list of [x, y]."""
+        self._mark_health('/plan')
+        # Cap at 100 waypoints to keep /api/plan responses ~1.5 KB even for
+        # long plans; for longer plans we stride.
+        max_pts = 100
+        n = len(msg.poses)
+        if n == 0:
+            pts = []
+        elif n <= max_pts:
+            pts = [[round(p.pose.position.x, 4), round(p.pose.position.y, 4)]
+                   for p in msg.poses]
+        else:
+            stride = max(1, n // max_pts)
+            pts = [[round(msg.poses[i].pose.position.x, 4),
+                    round(msg.poses[i].pose.position.y, 4)]
+                   for i in range(0, n, stride)][:max_pts]
+            # Always include the final pose so the polyline reaches the goal.
+            last = msg.poses[-1].pose.position
+            if pts and pts[-1] != [round(last.x, 4), round(last.y, 4)]:
+                pts.append([round(last.x, 4), round(last.y, 4)])
+        with self._plan_lock:
+            self._plan_points = pts
+            self._plan_stamp = time.time()
+
+    def _nav_status_cb(self, msg: GoalStatusArray):
+        """Track the latest /navigate_to_pose action status."""
+        if not msg.status_list:
+            return
+        # The action server appends new status entries; the most recent one
+        # reflects the current goal.
+        latest = msg.status_list[-1]
+        code_to_str = {
+            0: 'UNKNOWN',
+            1: 'PLANNING',     # ACCEPTED — server has the goal, planning
+            2: 'EXECUTING',
+            3: 'CANCELING',
+            4: 'SUCCEEDED',
+            5: 'CANCELED',
+            6: 'ABORTED',
+        }
+        label = code_to_str.get(latest.status, 'UNKNOWN')
+        with self._nav_status_lock:
+            self._nav_status = label
+            self._nav_status_stamp = time.time()
+        # Once a goal terminates, mark the cached goal inactive so the map
+        # overlay clears even if the user didn't explicitly cancel.
+        if label in ('SUCCEEDED', 'CANCELED', 'ABORTED'):
+            with self._goal_lock:
+                self._current_goal['active'] = False
+            with self._plan_lock:
+                self._plan_points = []
+
+    def _goal_pose_cb(self, msg: PoseStamped):
+        """Track goals published on /goal_pose (from RViz or this bridge)."""
+        yaw = self._quat_to_yaw(msg.pose.orientation)
+        with self._goal_lock:
+            self._current_goal = {
+                'x': float(msg.pose.position.x),
+                'y': float(msg.pose.position.y),
+                'yaw': float(yaw),
+                'active': True,
+                'stamp': time.time(),
+            }
+
     def _watchdog_cb(self):
         with self._control_lock:
             if self._last_control_time > 0 and \
@@ -211,6 +484,15 @@ class MobileBridgeNode(Node):
         max_wz = 0.8
         sl = max(0.1, min(1.0, speed_limit))
 
+        with self._mode_lock:
+            mode = self._mode
+
+        # Treat any joystick input from a non-MANUAL mode as a no-op. The
+        # 50 Hz watchdog will keep zeroing /cmd_vel on the bridge side, and
+        # Nav2 (in AUTO) continues unmolested.
+        if mode != 'MANUAL':
+            return
+
         twist = Twist()
         if e:
             self.estop()
@@ -220,11 +502,636 @@ class MobileBridgeNode(Node):
                 self.get_logger().warning('Ignoring joystick command while E-STOP is latched')
                 return
             twist.linear.x = y * max_vx * sl
+            # ROS convention: +angular.z = CCW = left turn. Joystick: +X =
+            # right push. Invert so push-right -> right turn, letting the
+            # same servo_polarity in nav2_pico_bridge serve both this
+            # manual path and Nav2's correctly-signed wz output.
             twist.angular.z = -x * max_wz * sl
 
-        self._cmd_vel_pub.publish(twist)
+        with self._safety_lock:
+            safety = self._safety_mode
+        if safety == 'off':
+            self._cmd_vel_manual_pub.publish(twist)
+        else:
+            self._cmd_vel_pub.publish(twist)
         with self._control_lock:
             self._last_control_time = time.time()
+
+    def get_safety_mode(self) -> str:
+        with self._safety_lock:
+            return self._safety_mode
+
+    def set_safety_mode(self, mode: str) -> bool:
+        mode = (mode or '').lower()
+        if mode not in ('soft', 'off'):
+            return False
+        with self._safety_lock:
+            if self._safety_mode == mode:
+                return True
+            self._safety_mode = mode
+        # On a soft -> off (or off -> soft) flip, push a zero on whichever
+        # topic is being abandoned so the Pico bridge sees a clean stop on
+        # that channel and doesn't latch the last value via its 200 ms
+        # freshest-wins logic.
+        zero = Twist()
+        if mode == 'off':
+            self._cmd_vel_pub.publish(zero)
+        else:
+            self._cmd_vel_manual_pub.publish(zero)
+        self.get_logger().warning(f'Safety mode -> {mode}')
+        return True
+
+    # --- Desktop screenshot ---
+
+    def capture_desktop_once(self) -> bool:
+        """Capture one frame of the GNOME desktop, downsample, JPEG-encode,
+        and cache. Returns True on success, False on any failure (and warns
+        once via the logger). Designed to be called at ~1 Hz from a worker
+        thread; safe to call concurrently with HTTP fetches via the lock.
+
+        Storage: gnome-screenshot writes to /dev/shm (RAM-backed tmpfs, not
+        the SD card). The temp PNG is deleted immediately after we've
+        decoded it into memory, so steady-state on-disk footprint is zero
+        and RAM usage is just the cached JPEG bytes (~100 KB).
+        """
+        tmp_path = '/dev/shm/autonexa_desktop.png'
+
+        # Inherit DISPLAY/XDG_RUNTIME_DIR from launch env; the bridge runs
+        # as the same user that owns the GNOME session, which is what
+        # gnome-screenshot needs to talk to the screenshot portal.
+        env = dict(os.environ)
+        env.setdefault('DISPLAY', ':0')
+        try:
+            uid = os.getuid()
+            env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{uid}')
+        except OSError:
+            pass
+
+        # Pre-clean any leftover from a previous failed cycle so we never
+        # accidentally serve a stale frame on a transient failure.
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+        try:
+            result = subprocess.run(
+                ['gnome-screenshot', '-f', tmp_path],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                env=env, timeout=2.0,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            if not self._desktop_warned:
+                self.get_logger().warning(
+                    f'desktop capture disabled: gnome-screenshot {exc}')
+                self._desktop_warned = True
+            return False
+
+        if result.returncode != 0 or not os.path.exists(tmp_path):
+            if not self._desktop_warned:
+                self.get_logger().warning(
+                    f'gnome-screenshot rc={result.returncode} '
+                    f'stderr={result.stderr.decode("utf-8", errors="replace")[:200]!r}')
+                self._desktop_warned = True
+            return False
+
+        try:
+            img = cv2.imread(tmp_path)
+        finally:
+            # Delete the temp PNG immediately — we have the bytes in `img`
+            # now, so the file has served its purpose. Keeps /dev/shm at
+            # zero between captures.
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        if img is None:
+            return False
+
+        # Downsample if wider than 1280 px so a 1080p source becomes ~720p.
+        # Keeps JPEG payload around 80–200 KB at q=60.
+        h, w = img.shape[:2]
+        if w > 1280:
+            new_w = 1280
+            new_h = int(h * (new_w / w))
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        ok, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        if not ok:
+            return False
+
+        with self._desktop_lock:
+            self._desktop_jpeg = buf.tobytes()
+            self._desktop_stamp = time.time()
+            self._desktop_version += 1
+            # Reset warning latch on success so a recovery is logged.
+            self._desktop_warned = False
+        return True
+
+    def get_desktop_jpeg(self):
+        with self._desktop_lock:
+            return self._desktop_jpeg, self._desktop_version, self._desktop_stamp
+
+    # --- Health stats ---
+
+    def _mark_health(self, topic: str) -> None:
+        now = time.time()
+        with self._health_lock:
+            stat = self._health_stats.get(topic)
+            if stat is None:
+                return
+            dt = now - stat['last_t'] if stat['last_t'] > 0 else 0.0
+            if dt > 0:
+                inst = 1.0 / dt
+                # EWMA, alpha=0.2 — smooths bursts without lagging too far.
+                stat['rate'] = 0.8 * stat['rate'] + 0.2 * inst if stat['rate'] > 0 else inst
+            stat['last_t'] = now
+
+    def get_health(self) -> list:
+        now = time.time()
+        out = []
+        with self._health_lock:
+            for topic, expected_hz, label in HEALTH_TOPICS:
+                stat = self._health_stats[topic]
+                age = now - stat['last_t'] if stat['last_t'] > 0 else None
+                rate = round(stat['rate'], 2)
+                # ok if we've seen anything in the last 3x expected period
+                # and the rolling rate is at least 50% of expected.
+                stale_window = max(1.0, 3.0 / expected_hz)
+                ok = (age is not None and age < stale_window
+                      and rate >= 0.5 * expected_hz)
+                out.append({
+                    'topic': topic,
+                    'label': label,
+                    'expected_hz': expected_hz,
+                    'rate_hz': rate,
+                    'last_age_s': round(age, 2) if age is not None else None,
+                    'ok': ok,
+                })
+        return out
+
+    # --- Waypoints ---
+
+    def _load_waypoints(self) -> None:
+        if not os.path.exists(WAYPOINTS_PATH):
+            return
+        try:
+            with open(WAYPOINTS_PATH, 'r', encoding='utf-8') as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as exc:
+            self.get_logger().warning(f'waypoints load failed: {exc}')
+            return
+        wps = doc.get('waypoints')
+        if isinstance(wps, list):
+            with self._waypoints_lock:
+                self._waypoints = wps
+            self.get_logger().info(f'loaded {len(wps)} waypoint(s) from {WAYPOINTS_PATH}')
+
+    def _save_waypoints(self) -> None:
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+        except OSError:
+            pass
+        with self._waypoints_lock:
+            doc = {'schema_version': 1, 'waypoints': list(self._waypoints)}
+        try:
+            tmp = WAYPOINTS_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(doc, fh, indent=2)
+            os.replace(tmp, WAYPOINTS_PATH)
+        except OSError as exc:
+            self.get_logger().error(f'waypoints save failed: {exc}')
+
+    def _current_fingerprint(self) -> str:
+        with self._map_lock:
+            return self._map_fingerprint
+
+    @staticmethod
+    def _new_map_session_fingerprint() -> str:
+        return f"session={int(time.time() * 1000)}"
+
+    def list_waypoints(self) -> list:
+        fp = self._current_fingerprint()
+        with self._waypoints_lock:
+            wps = list(self._waypoints)
+        out = []
+        for wp in wps:
+            entry = dict(wp)
+            entry['stale'] = bool(fp) and entry.get('map_fingerprint') != fp
+            out.append(entry)
+        return out
+
+    def upsert_waypoint(self, name: str, kind: str, pose: dict) -> dict:
+        name = (name or '').strip()
+        if not name:
+            raise ValueError('name required')
+        if kind not in ('park', 'summon', 'home', 'custom'):
+            kind = 'custom'
+        x = float(pose.get('x', 0.0))
+        y = float(pose.get('y', 0.0))
+        yaw = float(pose.get('yaw', 0.0))
+        entry = {
+            'name': name,
+            'kind': kind,
+            'pose': {'x': x, 'y': y, 'yaw': yaw},
+            'map_fingerprint': self._current_fingerprint(),
+            'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+        }
+        with self._waypoints_lock:
+            self._waypoints = [w for w in self._waypoints if w.get('name') != name]
+            self._waypoints.append(entry)
+        self._save_waypoints()
+        return entry
+
+    def delete_waypoint(self, name: str) -> bool:
+        with self._waypoints_lock:
+            before = len(self._waypoints)
+            self._waypoints = [w for w in self._waypoints if w.get('name') != name]
+            removed = len(self._waypoints) < before
+        if removed:
+            self._save_waypoints()
+        return removed
+
+    def navigate_to_waypoint(self, name: str) -> bool:
+        with self._waypoints_lock:
+            wp = next((w for w in self._waypoints if w.get('name') == name), None)
+        if wp is None:
+            return False
+        pose = wp.get('pose') or {}
+        return self.send_nav_goal(
+            pose.get('x', 0.0),
+            pose.get('y', 0.0),
+            pose.get('yaw', 0.0),
+        )
+
+    # --- Remote SetParameters / GetParameters / ListParameters ---
+
+    def _param_client(self, node: str, kind: str):
+        """Lazy-create and cache a service client for the named node.
+        kind in {'set', 'get', 'list'}."""
+        with self._param_clients_lock:
+            entry = self._param_clients.setdefault(node, {})
+            if kind in entry:
+                return entry[kind]
+            if kind == 'set':
+                cli = self.create_client(SetParameters, f'{node}/set_parameters')
+            elif kind == 'get':
+                cli = self.create_client(GetParameters, f'{node}/get_parameters')
+            elif kind == 'list':
+                cli = self.create_client(ListParameters, f'{node}/list_parameters')
+            else:
+                raise ValueError(f'unknown param client kind: {kind}')
+            entry[kind] = cli
+            return cli
+
+    @staticmethod
+    def _to_param_msg(name: str, value):
+        """Convert a Python value to an rcl_interfaces Parameter message via
+        rclpy's Parameter helper (handles type marshaling)."""
+        if isinstance(value, bool):
+            p = Parameter(name, Parameter.Type.BOOL, value)
+        elif isinstance(value, int):
+            p = Parameter(name, Parameter.Type.INTEGER, value)
+        elif isinstance(value, float):
+            p = Parameter(name, Parameter.Type.DOUBLE, value)
+        elif isinstance(value, str):
+            p = Parameter(name, Parameter.Type.STRING, value)
+        elif isinstance(value, list) and value and all(isinstance(v, float) for v in value):
+            p = Parameter(name, Parameter.Type.DOUBLE_ARRAY, [float(v) for v in value])
+        elif isinstance(value, list) and value and all(isinstance(v, int) for v in value):
+            p = Parameter(name, Parameter.Type.INTEGER_ARRAY, [int(v) for v in value])
+        else:
+            raise ValueError(f'unsupported param value type for {name}: {type(value).__name__}')
+        return p.to_parameter_msg()
+
+    def set_remote_params(self, node: str, items: dict, timeout: float = 1.5) -> dict:
+        """Synchronously call SetParameters on `node`. Returns
+        {name: {ok, reason}}; per-param results."""
+        cli = self._param_client(node, 'set')
+        if not cli.wait_for_service(timeout_sec=timeout):
+            return {k: {'ok': False, 'reason': f'{node}/set_parameters unavailable'}
+                    for k in items}
+        try:
+            params = [self._to_param_msg(k, v) for k, v in items.items()]
+        except ValueError as exc:
+            return {k: {'ok': False, 'reason': str(exc)} for k in items}
+        req = SetParameters.Request()
+        req.parameters = params
+        future = cli.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {k: {'ok': False, 'reason': 'timeout'} for k in items}
+        res = future.result()
+        out = {}
+        for name, r in zip(items.keys(), res.results):
+            out[name] = {'ok': bool(r.successful), 'reason': r.reason or ''}
+        return out
+
+    def list_remote_params(self, node: str, timeout: float = 1.5) -> list:
+        cli = self._param_client(node, 'list')
+        if not cli.wait_for_service(timeout_sec=timeout):
+            return []
+        req = ListParameters.Request()
+        future = cli.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return []
+        res = future.result()
+        return list(res.result.names)
+
+    def get_remote_params(self, node: str, names: list, timeout: float = 1.5) -> dict:
+        cli = self._param_client(node, 'get')
+        if not cli.wait_for_service(timeout_sec=timeout):
+            return {}
+        req = GetParameters.Request()
+        req.names = list(names)
+        future = cli.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {}
+        res = future.result()
+        out = {}
+        for name, pv in zip(names, res.values):
+            out[name] = self._param_value_to_python(pv)
+        return out
+
+    @staticmethod
+    def _param_value_to_python(pv):
+        t = pv.type
+        if t == ParameterType.PARAMETER_BOOL:
+            return bool(pv.bool_value)
+        if t == ParameterType.PARAMETER_INTEGER:
+            return int(pv.integer_value)
+        if t == ParameterType.PARAMETER_DOUBLE:
+            return float(pv.double_value)
+        if t == ParameterType.PARAMETER_STRING:
+            return str(pv.string_value)
+        if t == ParameterType.PARAMETER_INTEGER_ARRAY:
+            return list(pv.integer_array_value)
+        if t == ParameterType.PARAMETER_DOUBLE_ARRAY:
+            return list(pv.double_array_value)
+        if t == ParameterType.PARAMETER_BOOL_ARRAY:
+            return list(pv.bool_array_value)
+        if t == ParameterType.PARAMETER_STRING_ARRAY:
+            return list(pv.string_array_value)
+        return None
+
+    # --- Runtime overrides YAML (Parts B / E / G2) ---
+
+    def persist_runtime_overrides(self, node: str, items: dict) -> None:
+        """Merge `items` under `node` in runtime_overrides.yaml. Surviving
+        on-disk entries for that node are preserved if not overwritten."""
+        if yaml is None:
+            self.get_logger().warning(
+                'PyYAML missing — runtime overrides not persisted to disk')
+            return
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+        except OSError as exc:
+            self.get_logger().warning(f'cannot create {AUTONEXA_DATA_DIR}: {exc}')
+            return
+        doc = {}
+        if os.path.exists(RUNTIME_OVERRIDES_PATH):
+            try:
+                with open(RUNTIME_OVERRIDES_PATH, 'r', encoding='utf-8') as fh:
+                    doc = yaml.safe_load(fh) or {}
+            except (OSError, yaml.YAMLError) as exc:
+                self.get_logger().warning(
+                    f'overrides read failed (will overwrite): {exc}')
+                doc = {}
+        node_key = node.lstrip('/')
+        section = doc.get(node_key) or {}
+        section.update(items)
+        doc[node_key] = section
+        try:
+            tmp = RUNTIME_OVERRIDES_PATH + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                yaml.safe_dump(doc, fh, default_flow_style=False)
+            os.replace(tmp, RUNTIME_OVERRIDES_PATH)
+        except OSError as exc:
+            self.get_logger().error(f'overrides write failed: {exc}')
+
+    # --- Costmap clear + SLAM restart (Part C) ---
+
+    def _call_clear_costmap(self, client, timeout: float = 1.0) -> dict:
+        if client is None:
+            return {'ok': False, 'reason': 'nav2_msgs not installed'}
+        if not client.wait_for_service(timeout_sec=timeout):
+            return {'ok': False, 'reason': f'{client.srv_name} unavailable'}
+        req = ClearEntireCostmap.Request()
+        future = client.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {'ok': False, 'reason': 'timeout'}
+        return {'ok': True}
+
+    def clear_costmaps(self) -> dict:
+        global_res = self._call_clear_costmap(self._global_costmap_clear)
+        local_res = self._call_clear_costmap(self._local_costmap_clear)
+        return {'global': global_res, 'local': local_res}
+
+    def _slam_change(self, transition_id: int, timeout: float = 2.0) -> dict:
+        if not self._slam_change_state.wait_for_service(timeout_sec=timeout):
+            return {'ok': False, 'reason': '/slam_toolbox/change_state unavailable'}
+        req = ChangeState.Request()
+        req.transition.id = transition_id
+        future = self._slam_change_state.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {'ok': False, 'reason': 'timeout'}
+        res = future.result()
+        return {'ok': bool(res.success)}
+
+    def restart_mapping(self) -> dict:
+        """Cycle SLAM Toolbox through deactivate -> cleanup -> configure ->
+        activate. Drops the current map and starts fresh. Costmaps cleared
+        as well so the planner doesn't carry stale obstacles into the new
+        map frame."""
+        steps = []
+        for tid, label in (
+            (Transition.TRANSITION_DEACTIVATE, 'deactivate'),
+            (Transition.TRANSITION_CLEANUP, 'cleanup'),
+            (Transition.TRANSITION_CONFIGURE, 'configure'),
+            (Transition.TRANSITION_ACTIVATE, 'activate'),
+        ):
+            r = self._slam_change(tid)
+            steps.append({'step': label, **r})
+            if not r.get('ok'):
+                break
+        # Drop costmap obstacles; their map frame is about to change anyway.
+        cm = self.clear_costmaps()
+        # Bump map_version so the app refetches a blank PNG immediately.
+        with self._map_lock:
+            self._map_version += 1
+            self._map_png = None
+            self._map_fingerprint = self._new_map_session_fingerprint()
+        return {'steps': steps, 'costmaps': cm}
+
+    # --- Robot dimension live-edit + goal inflation escape ---
+
+    def get_robot_dimensions(self) -> dict:
+        """Effective dimensions = defaults + persisted YAML. Always full dict."""
+        if _build_urdf is None:
+            return {}
+        return _build_urdf.merge_dimensions(_build_urdf.load_persisted_dimensions())
+
+    def apply_robot_dimensions(self, overrides: dict) -> dict:
+        """Render URDF with the requested overrides, push it to
+        robot_state_publisher, sync both costmap footprints, and persist
+        the merged result to ~/.autonexa/robot_dimensions.yaml.
+
+        Returns {'dims': effective, 'urdf_ok': bool, 'costmaps': {...},
+        'errors': [...]}.
+        """
+        if _build_urdf is None:
+            return {'ok': False, 'reason': 'build_urdf module unavailable'}
+        try:
+            urdf_xml, footprint_str, dims = _build_urdf.render(overrides)
+        except Exception as exc:
+            return {'ok': False, 'reason': f'render failed: {exc}'}
+
+        results = {'ok': True, 'dims': dims, 'errors': []}
+
+        rsp = self.set_remote_params(
+            '/robot_state_publisher', {'robot_description': urdf_xml})
+        results['robot_state_publisher'] = rsp
+        if not rsp.get('robot_description', {}).get('ok'):
+            results['errors'].append(
+                f"robot_state_publisher: {rsp.get('robot_description', {}).get('reason')}")
+
+        cm_payload = {
+            'footprint': footprint_str,
+            'footprint_padding': float(dims['footprint_padding']),
+        }
+        gc = self.set_remote_params('/global_costmap/global_costmap', cm_payload)
+        lc = self.set_remote_params('/local_costmap/local_costmap', cm_payload)
+        results['global_costmap'] = gc
+        results['local_costmap'] = lc
+        for label, batch in (('global_costmap', gc), ('local_costmap', lc)):
+            for k, r in batch.items():
+                if not r.get('ok'):
+                    results['errors'].append(f'{label}.{k}: {r.get("reason")}')
+
+        # Persist the full merged dims so a relaunch picks up the values.
+        try:
+            _build_urdf.save_persisted_dimensions(dims)
+        except Exception as exc:
+            results['errors'].append(f'persist failed: {exc}')
+
+        return results
+
+    def _escape_inflation_for_goal(self) -> None:
+        """Pre-goal inflation relax so SMAC Hybrid-A* can plan from a
+        start pose currently inside wall inflation (the wall-parked case).
+
+        Sequence:
+          1. Signal any in-flight restorer thread to exit, join it.
+          2. Capture current inflation_radius on both costmaps.
+          3. ClearEntireCostmap on both (force a fresh obstacle pass).
+          4. Temporarily set inflation_radius -> 0.02 m on both. (1 cm was
+             too aggressive — sensor noise + SLAM drift made the planner
+             emit wall-grazing paths the controller couldn't follow.)
+          5. After 6 s OR on first non-empty /plan, restore inflation.
+        """
+        global_key = '/global_costmap/global_costmap'
+        local_key = '/local_costmap/local_costmap'
+        ir_name = 'inflation_layer.inflation_radius'
+
+        # Cancel any restorer still running from a prior goal and wait for
+        # it to release the lock. Without this, a quick second goal can
+        # land while the old thread is still mid-flight; when the old
+        # thread eventually restores the saved inflation, it clobbers the
+        # relax that the new goal just applied — planner sees inflated
+        # walls again and the second goal fails.
+        with self._inflation_escape_lock:
+            prev = self._inflation_escape_thread
+        if prev is not None and prev.is_alive():
+            self._inflation_escape_cancel.set()
+            prev.join(timeout=1.0)
+        self._inflation_escape_cancel.clear()
+
+        saved_g = self.get_remote_params(global_key, [ir_name]).get(ir_name)
+        saved_l = self.get_remote_params(local_key, [ir_name]).get(ir_name)
+        # Fall back to the YAML default if read failed.
+        if saved_g is None:
+            saved_g = 0.05
+        if saved_l is None:
+            saved_l = 0.05
+
+        self.clear_costmaps()
+        self.set_remote_params(global_key, {ir_name: 0.02})
+        self.set_remote_params(local_key, {ir_name: 0.02})
+        self.get_logger().info(
+            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.02 '
+            f'(global/local), will restore in <=6 s or on first plan')
+
+        relaxed_at = time.time()
+        cancel_event = self._inflation_escape_cancel
+
+        def _restorer():
+            deadline = relaxed_at + 6.0
+            # Watch /plan_stamp; restore as soon as a fresh plan arrives.
+            # Honour the cancel signal so a follow-up goal does not race
+            # with the restore we are about to publish.
+            while time.time() < deadline:
+                if cancel_event.is_set():
+                    self.get_logger().info(
+                        'goal escape: superseded by new goal, restorer exiting')
+                    return
+                with self._plan_lock:
+                    if self._plan_stamp >= relaxed_at and self._plan_points:
+                        break
+                time.sleep(0.1)
+            try:
+                self.set_remote_params(global_key, {ir_name: float(saved_g)})
+                self.set_remote_params(local_key, {ir_name: float(saved_l)})
+                self.get_logger().info(
+                    f'goal escape: inflation restored '
+                    f'({saved_g:.3f}/{saved_l:.3f})')
+            except Exception as exc:
+                self.get_logger().warning(
+                    f'inflation restore failed: {exc}')
+
+        t = threading.Thread(target=_restorer, daemon=True,
+                             name='inflation-restore')
+        with self._inflation_escape_lock:
+            self._inflation_escape_thread = t
+        t.start()
+
+    # --- Pose reset / relocalize (Part G1) ---
+
+    def publish_initial_pose(self, x: float, y: float, yaw: float) -> None:
+        msg = PoseWithCovarianceStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.pose.position.x = float(x)
+        msg.pose.pose.position.y = float(y)
+        from math import cos as mcos, sin as msin
+        msg.pose.pose.orientation.z = msin(float(yaw) / 2.0)
+        msg.pose.pose.orientation.w = mcos(float(yaw) / 2.0)
+        # Loose covariance — don't fight whatever localizer is listening.
+        # x, y: 0.25 m^2; yaw: ~0.07 rad^2 (~15 deg). Order is row-major 6x6.
+        cov = [0.0] * 36
+        cov[0] = 0.25
+        cov[7] = 0.25
+        cov[35] = 0.0685
+        msg.pose.covariance = cov
+        self._initialpose_pub.publish(msg)
+        self.get_logger().info(
+            f'initialpose published: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
 
     # ---- Helpers ----
 
@@ -237,18 +1144,27 @@ class MobileBridgeNode(Node):
 
     @staticmethod
     def _scan_to_points(scan_msg, robot_x, robot_y, robot_yaw):
-        """Convert LaserScan to list of (x, y) points in map frame."""
+        """Convert LaserScan to list of (x, y) points in map frame.
+
+        The scan rays are emitted in the laser_link frame. Since 2026-05-07
+        laser_link is yaw-rotated by π relative to base_link (LiDAR mounted
+        rearward). To get points in the map frame we rotate by the composed
+        yaw (laser→base→map) before translating by the robot pose.
+        Without this composition, app scan dots end up mirrored across the
+        robot vs. the SLAM walls.
+        """
         points = []
         angle = scan_msg.angle_min
-        cos_y = cos(robot_yaw)
-        sin_y = sin(robot_yaw)
+        yaw_eff = robot_yaw + LASER_LINK_YAW_OFFSET
+        cos_y = cos(yaw_eff)
+        sin_y = sin(yaw_eff)
         for r in scan_msg.ranges:
             if (not isinf(r) and not isnan(r)
                     and scan_msg.range_min < r < scan_msg.range_max):
-                # Point in robot frame
+                # Point in laser_link frame
                 px = r * cos(angle)
                 py = r * sin(angle)
-                # Transform to map frame
+                # Rotate by yaw_eff (laser→base→map) and translate to robot pose
                 mx = robot_x + px * cos_y - py * sin_y
                 my = robot_y + px * sin_y + py * cos_y
                 points.append([round(mx, 4), round(my, 4)])
@@ -436,6 +1352,84 @@ class MobileBridgeNode(Node):
         with self._map_lock:
             return dict(self._map_info) if self._map_info else None
 
+    def get_map_version(self):
+        with self._map_lock:
+            return self._map_version
+
+    def get_plan(self):
+        with self._plan_lock:
+            return list(self._plan_points), self._plan_stamp
+
+    def get_goal(self):
+        with self._goal_lock:
+            return dict(self._current_goal)
+
+    def get_mode(self):
+        with self._mode_lock:
+            return self._mode
+
+    def set_mode(self, new_mode: str) -> bool:
+        """Transition the control mode. Returns True on a valid transition.
+
+        Side effects on entry:
+          MANUAL  — cancel any active Nav2 goal so the BT navigator stops
+                    publishing /cmd_vel; clear the Pico E-STOP latch.
+          AUTO    — clear the Pico E-STOP latch; silence manual velocity
+                    streams so Nav2 gets exclusive control.
+          ESTOP   — full estop() — cancel Nav2, zero /cmd_vel, latch Pico.
+        """
+        new_mode = (new_mode or '').upper()
+        if new_mode not in ('AUTO', 'MANUAL', 'ESTOP'):
+            return False
+        with self._mode_lock:
+            if self._mode == new_mode:
+                return True
+            self._mode = new_mode
+            self._mode_stamp = time.time()
+        self.get_logger().warning(f'Control mode -> {new_mode}')
+
+        if new_mode == 'MANUAL':
+            try:
+                self.cancel_nav_goal()
+            except Exception as exc:  # pragma: no cover
+                self.get_logger().error(f'cancel_nav on mode change: {exc}')
+            if self._estop_latched:
+                self._clear_pico_estop()
+        elif new_mode == 'AUTO':
+            if self._estop_latched:
+                self._clear_pico_estop()
+            zero = Twist()
+            self._cmd_vel_pub.publish(zero)
+            self._cmd_vel_manual_pub.publish(zero)
+            with self._control_lock:
+                self._last_control_time = 0.0
+        elif new_mode == 'ESTOP':
+            self.estop()
+        return True
+
+    def get_nav_status(self):
+        with self._nav_status_lock:
+            return self._nav_status, self._nav_status_stamp
+
+    def build_telemetry_snapshot(self) -> dict:
+        """Single-shot snapshot bundling everything WS clients want at high
+        rate: pose, telemetry, mode, nav status, current goal. Map / scan /
+        plan stay on REST since they're either large (PNG) or change slowly."""
+        pose, source = self.get_pose()
+        nav_status, nav_stamp = self.get_nav_status()
+        return {
+            'pose': {**pose, 'source': source},
+            'telemetry': self.get_telemetry(),
+            'mode': self.get_mode(),
+            'safety_mode': self.get_safety_mode(),
+            'nav_status': nav_status,
+            'nav_status_stamp': nav_stamp,
+            'goal': self.get_goal(),
+            'estop_latched': self._estop_latched,
+            'map_fingerprint': self._current_fingerprint(),
+            'stamp': time.time(),
+        }
+
     def get_pose(self):
         with self._pose_lock:
             return dict(self._pose), self._pose_source
@@ -453,7 +1447,21 @@ class MobileBridgeNode(Node):
             return dict(self._pico_telemetry)
 
     def estop(self):
-        """Publish zero velocity and request latched Pico E-STOP."""
+        """Publish zero velocity, cancel Nav2, and latch the Pico E-STOP.
+
+        E-STOP must abort the active Nav2 goal at every instant — otherwise
+        the BT navigator keeps re-publishing /cmd_vel after the latch clears
+        and the robot resumes its plan unexpectedly. Cancel first, then zero
+        velocity, then latch hardware.
+        """
+        # 1. Cancel any in-flight Nav2 goal (non-blocking; safe if none).
+        try:
+            self.cancel_nav_goal()
+        except Exception as exc:  # pragma: no cover — defensive
+            self.get_logger().error(f'cancel_nav_goal during estop failed: {exc}')
+
+        # 2. Zero velocity (cancel_nav_goal already does this, but repeat in
+        #    case the cancel path failed).
         zero = Twist()
         self._cmd_vel_pub.publish(zero)
         with self._control_lock:
@@ -503,7 +1511,29 @@ class MobileBridgeNode(Node):
             self._estop_latched = False
 
     def send_nav_goal(self, x, y, yaw):
-        """Publish a Nav2 goal."""
+        """Publish a Nav2 goal and hand command authority to Nav2.
+
+        The mobile app streams joystick frames continuously. If a goal is
+        accepted while the bridge is still in MANUAL, those frames keep
+        publishing zero/manual Twist messages and can fight the Nav2
+        controller. Treat every nav goal as an AUTO transition first so the
+        goal, plan, and vehicle command stream are one coherent operation.
+        """
+        with self._mode_lock:
+            mode = self._mode
+        if mode != 'AUTO':
+            if not self.set_mode('AUTO'):
+                return False
+        else:
+            if self._estop_latched:
+                self._clear_pico_estop()
+
+        zero = Twist()
+        self._cmd_vel_pub.publish(zero)
+        self._cmd_vel_manual_pub.publish(zero)
+        with self._control_lock:
+            self._last_control_time = 0.0
+
         msg = PoseStamped()
         msg.header.frame_id = 'map'
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -512,6 +1542,23 @@ class MobileBridgeNode(Node):
         from math import cos as mcos, sin as msin
         msg.pose.orientation.z = msin(float(yaw) / 2.0)
         msg.pose.orientation.w = mcos(float(yaw) / 2.0)
+        with self._goal_lock:
+            self._current_goal = {
+                'x': float(x),
+                'y': float(y),
+                'yaw': float(yaw),
+                'active': True,
+                'stamp': time.time(),
+            }
+
+        # Wall-parked escape: clear costmaps + temporarily relax inflation so
+        # SMAC Hybrid-A* can plan from a start pose inside wall inflation.
+        # Inflation snaps back as soon as a plan arrives (<=4 s deadline).
+        try:
+            self._escape_inflation_for_goal()
+        except Exception as exc:
+            self.get_logger().warning(f'goal escape sequence failed: {exc}')
+
         self._goal_pub.publish(msg)
         self.get_logger().info(f'Published nav goal: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
         return {
@@ -526,6 +1573,7 @@ class MobileBridgeNode(Node):
 # =============================================================================
 
 flask_app = Flask(__name__)
+sock = Sock(flask_app)
 bridge_node: MobileBridgeNode = None  # Set after node init
 
 
@@ -552,7 +1600,32 @@ def api_map_info():
     info = bridge_node.get_map_info()
     if info is None:
         return jsonify({'error': 'No map available yet'}), 503
+    info = dict(info)
+    info['fingerprint'] = bridge_node._current_fingerprint()
     return jsonify(info)
+
+
+@flask_app.route('/api/map_version')
+def api_map_version():
+    """Lightweight (~30 B) version counter — clients only refetch /api/map
+    when this value changes. Lets the app poll cheaply at 0.5–1 Hz without
+    burning bandwidth on the (slow-changing) PNG."""
+    return jsonify({'v': bridge_node.get_map_version()})
+
+
+@flask_app.route('/api/plan')
+def api_plan():
+    points, stamp = bridge_node.get_plan()
+    return jsonify({
+        'points': points,
+        'stamp': stamp,
+        'count': len(points),
+    })
+
+
+@flask_app.route('/api/goal')
+def api_goal():
+    return jsonify(bridge_node.get_goal())
 
 
 @flask_app.route('/api/pose')
@@ -645,6 +1718,272 @@ def api_nav_goal():
     })
 
 
+@flask_app.route('/api/lock_map', methods=['POST'])
+def api_lock_map():
+    """Persist the current SLAM map with nav2_map_server's map_saver_cli."""
+    os.makedirs(MAPS_DIR, exist_ok=True)
+    prefix = os.path.join(MAPS_DIR, f"garage_{time.strftime('%Y%m%d_%H%M%S')}")
+    cmd = ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', prefix]
+    try:
+        proc = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return jsonify({'error': str(exc), 'command': cmd}), 500
+    if proc.returncode != 0:
+        return jsonify({
+            'error': 'map_saver_cli failed',
+            'returncode': proc.returncode,
+            'stdout': proc.stdout[-2000:],
+            'stderr': proc.stderr[-2000:],
+            'command': cmd,
+        }), 500
+    return jsonify({
+        'status': 'ok',
+        'map_prefix': prefix,
+        'yaml': prefix + '.yaml',
+        'pgm': prefix + '.pgm',
+        'stdout': proc.stdout[-2000:],
+    })
+
+
+# ---------------------------------------------------------------------------
+#  Part E — Nav2 max linear speed
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/nav2_speed', methods=['GET', 'POST'])
+def api_nav2_speed():
+    """Live-tune Nav2's linear speed cap. Sets RPP
+    FollowPath.desired_linear_vel and velocity_smoother max_velocity[0] in
+    lockstep so the smoother doesn't override the controller. Persists to
+    runtime_overrides.yaml under the respective node sections."""
+    if request.method == 'GET':
+        ctrl = bridge_node.get_remote_params(
+            '/controller_server', ['FollowPath.desired_linear_vel'])
+        sm = bridge_node.get_remote_params(
+            '/velocity_smoother', ['max_velocity'])
+        desired = ctrl.get('FollowPath.desired_linear_vel')
+        return jsonify({
+            'controller_desired_linear_vel': desired,
+            # Backward-compatible field name for the current Flutter client.
+            'controller_max_vel_x': desired,
+            'smoother_max_velocity': sm.get('max_velocity'),
+        })
+    data = request.get_json(silent=True) or {}
+    if 'max_vel_x' not in data:
+        return jsonify({'error': 'max_vel_x required'}), 400
+    try:
+        target = float(data['max_vel_x'])
+    except (TypeError, ValueError):
+        return jsonify({'error': 'max_vel_x must be a number'}), 400
+    if not 0.05 <= target <= 0.50:
+        return jsonify({'error': 'max_vel_x must be in [0.05, 0.50]'}), 400
+    ctrl = bridge_node.set_remote_params(
+        '/controller_server', {'FollowPath.desired_linear_vel': target})
+    # velocity_smoother expects a 3-vector [vx, vy, wz]; preserve current vy/wz.
+    cur = bridge_node.get_remote_params('/velocity_smoother', ['max_velocity'])
+    vec = list(cur.get('max_velocity') or [target, 0.0, 0.5])
+    vec[0] = target
+    sm = bridge_node.set_remote_params(
+        '/velocity_smoother', {'max_velocity': [float(v) for v in vec]})
+    bridge_node.persist_runtime_overrides(
+        'controller_server', {'FollowPath.desired_linear_vel': target})
+    bridge_node.persist_runtime_overrides(
+        'velocity_smoother', {'max_velocity': [float(v) for v in vec]})
+    return jsonify({'controller': ctrl, 'smoother': sm,
+                    'controller_desired_linear_vel': target,
+                    'controller_max_vel_x': target,
+                    'smoother_max_velocity': vec})
+
+
+# ---------------------------------------------------------------------------
+#  Part G1 — Pose reset / relocalize
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/relocalize', methods=['POST'])
+def api_relocalize():
+    data = request.get_json(silent=True) or {}
+    if 'x' not in data or 'y' not in data:
+        return jsonify({'error': 'x, y required'}), 400
+    yaw = data.get('yaw', 0.0)
+    bridge_node.publish_initial_pose(data['x'], data['y'], yaw)
+    return jsonify({'status': 'ok'})
+
+
+# ---------------------------------------------------------------------------
+#  Part G2 — Live param tuner
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/params', methods=['GET', 'POST'])
+def api_params():
+    if request.method == 'GET':
+        node = request.args.get('node', '').strip()
+        if node not in PARAM_TUNER_WHITELIST:
+            return jsonify({'error': 'node not in whitelist',
+                            'whitelist': list(PARAM_TUNER_WHITELIST)}), 400
+        names = bridge_node.list_remote_params(node)
+        if not names:
+            return jsonify({'node': node, 'params': {}, 'names': []})
+        # Cap at 200 names for the GetParameters round trip — bigger nodes
+        # still report the full list under 'names' for client-side filtering.
+        sample = names[:200]
+        values = bridge_node.get_remote_params(node, sample)
+        return jsonify({'node': node, 'names': names, 'params': values})
+    data = request.get_json(silent=True) or {}
+    node = data.get('node', '').strip()
+    if node not in PARAM_TUNER_WHITELIST:
+        return jsonify({'error': 'node not in whitelist',
+                        'whitelist': list(PARAM_TUNER_WHITELIST)}), 400
+    items = data.get('params') or {}
+    if not isinstance(items, dict) or not items:
+        return jsonify({'error': 'params object required'}), 400
+    results = bridge_node.set_remote_params(node, items)
+    bridge_node.persist_runtime_overrides(
+        node.lstrip('/'),
+        {k: v for k, v in items.items() if results.get(k, {}).get('ok')})
+    return jsonify({'node': node, 'results': results})
+
+
+# ---------------------------------------------------------------------------
+#  Part G3 — Topic / node health
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/health')
+def api_health():
+    return jsonify({'topics': bridge_node.get_health()})
+
+
+# ---------------------------------------------------------------------------
+#  Desktop screenshot stream (1 Hz)
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/desktop_version')
+def api_desktop_version():
+    """Cheap version probe for ETag-style polling. Bumps every time
+    capture_desktop_once() succeeds (~1 Hz). Clients only refetch the
+    JPEG when v changes."""
+    _, v, stamp = bridge_node.get_desktop_jpeg()
+    return jsonify({'v': v, 'stamp': stamp})
+
+
+@flask_app.route('/api/desktop_shot')
+def api_desktop_shot():
+    """Latest desktop screenshot as JPEG bytes (~80–200 KB at 720p q=60)."""
+    jpeg, _, _ = bridge_node.get_desktop_jpeg()
+    if jpeg is None:
+        return jsonify({'error': 'No desktop capture available yet'}), 503
+    return Response(jpeg, mimetype='image/jpeg')
+
+
+# =============================================================================
+#  WebSocket endpoints — joystick (high-rate) + telemetry push
+# =============================================================================
+
+@sock.route('/ws/control')
+def ws_control(ws):
+    """Bidirectional joystick stream. Each inbound JSON message
+    {x, y, e, speed_limit} is fed straight into publish_control. We don't
+    push anything back on this socket — it's input-only — but we keep the
+    connection open as long as the client wants.
+
+    The 50 Hz Pico watchdog and bridge-side 200 ms timeout mean that if
+    the WebSocket dies mid-drive, motors zero on their own."""
+    bridge_node.get_logger().info('WS /ws/control connected')
+    try:
+        while True:
+            raw = ws.receive(timeout=5)
+            if raw is None:
+                # Idle keepalive — do nothing.
+                continue
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            x = float(data.get('x', 0))
+            y = float(data.get('y', 0))
+            e = int(data.get('e', 0))
+            sl = float(data.get('speed_limit', 1.0))
+            bridge_node.publish_control(x, y, e, sl)
+    except Exception as exc:
+        bridge_node.get_logger().info(f'WS /ws/control closed: {exc}')
+
+
+@sock.route('/ws/telemetry')
+def ws_telemetry(ws):
+    """Server-push telemetry stream. We register the connection in the
+    bridge node's pusher set; a background thread fans out snapshots at
+    10 Hz to every connected client. When the client disconnects (any send
+    raises), the thread evicts it from the set."""
+    with bridge_node._ws_lock:
+        bridge_node._ws_telemetry_clients.add(ws)
+    bridge_node.get_logger().info(
+        f'WS /ws/telemetry connected ({len(bridge_node._ws_telemetry_clients)} total)')
+    # Send an immediate snapshot so the client doesn't have to wait for the
+    # next push tick to populate its UI.
+    try:
+        ws.send(json.dumps(bridge_node.build_telemetry_snapshot()))
+    except Exception:
+        pass
+    try:
+        while True:
+            # Block on receive so flask-sock keeps the socket alive. We
+            # don't expect any inbound traffic, but this also lets us
+            # detect client-initiated disconnects promptly.
+            msg = ws.receive(timeout=10)
+            if msg is None:
+                continue
+    except Exception:
+        pass
+    finally:
+        with bridge_node._ws_lock:
+            bridge_node._ws_telemetry_clients.discard(ws)
+        bridge_node.get_logger().info('WS /ws/telemetry disconnected')
+
+
+def _desktop_capture_loop():
+    """Background thread: capture the GNOME desktop once per second and
+    cache the JPEG. Failures are logged once via capture_desktop_once and
+    silently retried on the next tick (the Pi's screenshot portal can
+    blip during heavy load)."""
+    period = 1.0
+    while True:
+        time.sleep(period)
+        if bridge_node is None:
+            continue
+        try:
+            bridge_node.capture_desktop_once()
+        except Exception:
+            # Last-resort safety net — never let this loop crash the bridge.
+            pass
+
+
+def _telemetry_pusher_loop():
+    """Background thread: push a telemetry snapshot to every connected WS
+    client at 10 Hz. Clients that fail to send are evicted on the next pass."""
+    period = 0.1  # 10 Hz
+    while True:
+        time.sleep(period)
+        if bridge_node is None:
+            continue
+        with bridge_node._ws_lock:
+            clients = list(bridge_node._ws_telemetry_clients)
+        if not clients:
+            continue
+        try:
+            payload = json.dumps(bridge_node.build_telemetry_snapshot())
+        except Exception:
+            continue
+        dead = []
+        for ws in clients:
+            try:
+                ws.send(payload)
+            except Exception:
+                dead.append(ws)
+        if dead:
+            with bridge_node._ws_lock:
+                for ws in dead:
+                    bridge_node._ws_telemetry_clients.discard(ws)
+
+
 @flask_app.route('/video_feed')
 def video_feed():
     def generate():
@@ -675,6 +2014,26 @@ def index():
 <li>POST /api/control — joystick control (JSON: x, y, e, speed_limit)</li>
 <li>POST /api/estop — emergency stop (latching)</li>
 <li>POST /api/estop_clear — clear emergency stop</li>
+<li>POST /api/nav_goal — send Nav2 goal (JSON: x, y, yaw)</li>
+<li>POST /api/cancel_nav — cancel active Nav2 goal</li>
+<li>GET/POST /api/mode — read or set AUTO/MANUAL/ESTOP</li>
+<li>GET/POST /api/safety_mode — soft (default) | off (manual bypass)</li>
+<li><a href="/api/nav_status">/api/nav_status</a> — Nav2 action status</li>
+<li>GET/POST /api/calibrate_direction — vx_polarity / servo_polarity</li>
+<li>POST /api/clear_costmaps · POST /api/restart_mapping</li>
+<li>GET/POST/DELETE /api/waypoints — manual park/summon spots</li>
+<li>POST /api/waypoints/&lt;name&gt;/navigate</li>
+<li>GET/POST /api/spots · DELETE /api/spots/&lt;id&gt; — parking-plan static spots</li>
+<li>POST /api/save_spot · POST /api/park_at · POST /api/summon</li>
+<li>POST /api/lock_map — save current SLAM map under ~/.autonexa/maps</li>
+<li>GET/POST /api/nav2_speed — live Nav2 target-speed slider</li>
+<li>POST /api/relocalize — set robot pose (x,y,yaw)</li>
+<li>GET/POST /api/params?node=&lt;name&gt; — live param tuner (whitelist only)</li>
+<li><a href="/api/health">/api/health</a> — topic rates / staleness</li>
+<li><a href="/api/desktop_shot">/api/desktop_shot</a> — 1 Hz GNOME desktop JPEG (Wayland-friendly)</li>
+<li><a href="/api/desktop_version">/api/desktop_version</a> — ETag counter for desktop_shot</li>
+<li>WS /ws/control — joystick stream (input-only)</li>
+<li>WS /ws/telemetry — server-pushed telemetry snapshots @ 10 Hz</li>
 <li><a href="/video_feed">/video_feed</a> — camera MJPEG</li>
 </ul>
 </body></html>'''
@@ -693,6 +2052,15 @@ def main():
     # Spin ROS2 in a background thread
     spin_thread = threading.Thread(target=rclpy.spin, args=(bridge_node,), daemon=True)
     spin_thread.start()
+
+    # 10 Hz telemetry fan-out for /ws/telemetry subscribers
+    pusher_thread = threading.Thread(target=_telemetry_pusher_loop, daemon=True)
+    pusher_thread.start()
+
+    # 1 Hz desktop capture for the Desktop tab. Cheap on the Pi and stays
+    # silent if gnome-screenshot is missing (capture_desktop_once warns once).
+    desktop_thread = threading.Thread(target=_desktop_capture_loop, daemon=True)
+    desktop_thread.start()
 
     bridge_node.get_logger().info('Starting Flask server on http://0.0.0.0:5000')
     flask_app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

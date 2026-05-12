@@ -106,6 +106,20 @@ static void estop_service_callback(const void *reqin, void *resin)
     }
 }
 
+/* ── Transport setup (call once) ────────────────────────────── */
+
+void uros_transport_setup(void)
+{
+    rmw_uros_set_custom_transport(
+        true,
+        NULL,
+        pico_serial_transport_open,
+        pico_serial_transport_close,
+        pico_serial_transport_write,
+        pico_serial_transport_read
+    );
+}
+
 /* ── Init ───────────────────────────────────────────────────── */
 
 static void init_joint_msg(void)
@@ -142,19 +156,6 @@ static void init_joint_msg(void)
 bool uros_init(void)
 {
     allocator = rcl_get_default_allocator();
-
-    /* Use custom serial transport backed by Pico stdio USB CDC. */
-    RCCHECK(rmw_uros_set_custom_transport(
-        true,
-        NULL,
-        pico_serial_transport_open,
-        pico_serial_transport_close,
-        pico_serial_transport_write,
-        pico_serial_transport_read
-    ));
-
-    /* Wait for agent connection */
-    RCCHECK(rmw_uros_ping_agent(1000, 10));
 
     /* Create support and node */
     RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));

@@ -2,7 +2,7 @@
 #include "config.h"
 #include "ackermann.h"
 #include "servo.h"
-#include "hiwonder_driver.h"
+#include "l298n_driver.h"
 #include "safety.h"
 
 #include <math.h>
@@ -14,12 +14,16 @@ static int8_t  speed_right      = 0;
 static bool    motors_enabled   = false;
 
 /* ── Velocity-to-speed scale factor ─────────────────────────── */
-/* Closed-loop speed register (0x33) uses pulses per 10ms.
- * Wheel circumference = 2π × 0.033m = 0.2073m
- * At 0.3 m/s: 0.3/0.2073 = 1.447 rev/s × 1320 edges = 1910 pulses/s
- *           = ~19.1 pulses per 10ms
- * Scale: 19.1 / 0.3 ≈ 63.7 */
-#define VEL_TO_SPEED_SCALE  (63.7f)
+/* Open-loop on the L298N — without encoder feedback we can't tie a
+ * commanded m/s to an actual rev/s. The scale is a heuristic so that
+ * `vx = 0.30 m/s → SPEED 30 → 100% PWM duty`. Refine empirically once
+ * encoders are connected. Battery voltage and load both affect actual
+ * speed at any given duty.
+ *
+ *   speed_cli = round(vx_mps * VEL_TO_SPEED_SCALE)        (this file)
+ *   pwm_pct   = (speed_cli * 100) / MOTOR_SPEED_MAX       (l298n_driver.c)
+ */
+#define VEL_TO_SPEED_SCALE  (100.0f)
 
 /* ── API ────────────────────────────────────────────────────── */
 
@@ -34,9 +38,12 @@ void motor_control_set_velocity(float vx, float wz)
     float steer, v_l, v_r;
     ackermann_inverse(vx, wz, &steer, &v_l, &v_r);
 
-    /* Convert m/s to driver board speed units */
-    int8_t sl = (int8_t)(v_l * VEL_TO_SPEED_SCALE);
-    int8_t sr = (int8_t)(v_r * VEL_TO_SPEED_SCALE);
+    /* Convert m/s to driver board speed units (closed-loop pulses/10ms).
+     * Round to the nearest integer rather than truncating, so that small
+     * velocities (e.g. final parking approach at 0.03 m/s ~ 1.9 units)
+     * actually produce a non-zero command instead of collapsing to 0. */
+    int8_t sl = (int8_t)roundf(v_l * VEL_TO_SPEED_SCALE);
+    int8_t sr = (int8_t)roundf(v_r * VEL_TO_SPEED_SCALE);
 
     if (sl >  MOTOR_SPEED_MAX) sl =  MOTOR_SPEED_MAX;
     if (sl <  MOTOR_SPEED_MIN) sl =  MOTOR_SPEED_MIN;
@@ -48,6 +55,29 @@ void motor_control_set_velocity(float vx, float wz)
     target_steer_rad = steer;
 
     servo_set_angle(steer);
+}
+
+static int8_t clamp_speed(int8_t s)
+{
+    if (s > MOTOR_SPEED_MAX) return MOTOR_SPEED_MAX;
+    if (s < MOTOR_SPEED_MIN) return MOTOR_SPEED_MIN;
+    return s;
+}
+
+void motor_control_set_speeds(int8_t left, int8_t right)
+{
+    speed_left  = clamp_speed(left);
+    speed_right = clamp_speed(right);
+}
+
+void motor_control_set_speed_left(int8_t left)
+{
+    speed_left = clamp_speed(left);
+}
+
+void motor_control_set_speed_right(int8_t right)
+{
+    speed_right = clamp_speed(right);
 }
 
 void motor_control_enable(bool enable)
@@ -67,7 +97,7 @@ void motor_control_enable(bool enable)
     } else {
         speed_left  = 0;
         speed_right = 0;
-        hiwonder_stop_all();
+        l298n_stop_all();
     }
 }
 

@@ -20,6 +20,10 @@
   <depend>visualization_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>lifecycle_msgs</depend>
+  <depend>action_msgs</depend>
 
   <exec_depend>rviz2</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>

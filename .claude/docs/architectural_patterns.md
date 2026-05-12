@@ -24,12 +24,11 @@ Safety is enforced at multiple levels to prevent single-point failures:
 
 | Layer | Implementation | Mechanism |
 |-------|---------------|-----------|
-| Bridge (RPi5) | `cmd_vel_to_pico_bridge.py:96-104` | 200ms command timeout → ramp to zero via acceleration limiter |
-| Bridge (RPi5) | `cmd_vel_to_pico_bridge.py:44-48` | Velocity and acceleration clamping |
-| Transceiver | `pico_serial_transceiver.py:107-115` | ENABLE/DISABLE/ESTOP state transitions |
-| Pico watchdog | `pico_firmware/src/safety.c:30-46` | Independent 200ms timeout → hard motor stop |
-| Pico E-STOP | `pico_firmware/src/safety.c:69-74` | Highest priority, overrides all commands |
-| Heartbeat LED | `pico_firmware/src/safety.c:54-61` | Visual state indicator (5Hz = ESTOP, 1Hz = normal) |
+| Bridge (RPi5) | `cmd_vel_to_pico_bridge.py` | 200 ms command timeout → ramp to zero + `enable=false` |
+| Bridge (RPi5) | Same | Velocity and acceleration clamping |
+| Pico command watchdog | `pico_firmware/src/safety.c` | Independent 200 ms timeout → motor stop |
+| Pico E-STOP | `pico_firmware/src/safety.c` | Highest priority, overrides all commands; latching |
+| Heartbeat LED | `pico_firmware/src/main.c` | Visual state indicator (5 Hz = ESTOP, 1 Hz = normal) |
 
 ## 4. Configuration-Driven Behavior
 
@@ -52,7 +51,7 @@ All Python nodes follow the same structure:
 3. Callbacks for subscriptions and timers
 4. `main()`: `rclpy.init()` → instantiate → `rclpy.spin()` → cleanup in `finally`
 
-Examples: `cmd_vel_to_pico_bridge.py:30-78`, `pico_serial_transceiver.py:30-69`, `pico_joint_feedback_to_odom.py:25-64`
+Examples: `cmd_vel_to_pico_bridge.py`, `ros2_mobile_bridge.py`.
 
 ## 6. Odometry Pipeline (Encoder → TF)
 
@@ -69,7 +68,7 @@ Inverse and forward kinematics are implemented in `pico_firmware/src/ackermann.c
 - **Inverse** (`ackermann_inverse`): `(vx, wz)` → `(steering_angle, v_left, v_right)`
 - **Forward** (`ackermann_forward`): `(v_left, v_right, steering_angle, dt)` → odometry update
 
-The same kinematic model is mirrored in Python for odom integration (`pico_joint_feedback_to_odom.py:103-110`): `vx = avg(v_left, v_right)`, `wz = vx * tan(steer) / wheelbase`.
+Model: `vx = avg(v_left, v_right)`, `wz = vx * tan(steer) / wheelbase`.
 
 ## 8. Launch Composition
 
