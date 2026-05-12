@@ -381,14 +381,17 @@ planner_server:
       # reverse instead of forward-reverse-forward). 1.2 is barely a
       # nudge, just enough to bias toward forward when both options fit.
       reverse_penalty: 1.2
-      # Cusps (direction switches) cheaper. With this AND lower reverse
-      # penalty AND lower R_min, the planner can finally emit true
-      # 3-point park sequences.
-      change_penalty: 0.2
-      # No straight-line bias now that R_min is 0.85 m. The planner is
-      # free to curve as much as it wants — it just shouldn't curve when
-      # straight is genuinely shorter.
-      non_straight_penalty: 1.0
+      # 0.4 (was briefly 0.2 in V2, was 0.5 in V1). 0.2 turned out to
+      # explode the search — combined with the lowered R_min and reverse
+      # penalty it made cusps too cheap, so SMAC explored huge cusp-heavy
+      # subtrees and ran out of planning time on many goals. 0.4 still
+      # lets 3-point park solutions through but keeps the search guided.
+      change_penalty: 0.4
+      # 1.05 (was briefly 1.0 in V2). A small straight-line bias gives
+      # the A* heuristic a clearer "prefer straight when straight fits"
+      # signal, which translates to faster planning and fewer empty
+      # /plan emissions. Tight enough that real curve solutions still win.
+      non_straight_penalty: 1.05
       cost_penalty: 1.5
       retrospective_penalty: 0.015
       lookup_table_size: 20.0

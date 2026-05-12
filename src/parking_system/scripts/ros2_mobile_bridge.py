@@ -1079,17 +1079,17 @@ class MobileBridgeNode(Node):
           1. Signal any in-flight restorer thread to exit, join it.
           2. Capture current inflation_radius on both costmaps.
           3. ClearEntireCostmap on both (force a fresh obstacle pass).
-          4. Temporarily set inflation_radius -> 0.0 m on both (fully
-             disable wall inflation during the escape window). The
-             DirectionalStop polygon in collision_monitor is now the
-             only physical-collision safety; that polygon is direction-
-             aware so it never blocks legitimate "drive away from the
-             wall" motion.
-          5. Restore inflation strictly on the deadline (10 s). We
-             deliberately do NOT restore on first /plan arrival — the
-             previous early-restore caused a race where the costmap
-             re-inflated under the wheels mid-execution and the path
-             went invalid before the chassis cleared the wall.
+          4. Temporarily set inflation_radius -> 0.015 m on both (a thin
+             1.5 cm halo — enough for SMAC's A* heuristic to keep guiding
+             expansion toward open space, but tight enough that the planner
+             can still start from inside the normal 5 cm inflation cell).
+             0.0 m turned out to *break* planning: without any gradient
+             A* loses its directional bias and the search space explodes,
+             especially with our lowered reverse/change penalties.
+          5. Restore inflation on first /plan arrival OR on the 6 s
+             deadline, whichever comes second after a 2 s minimum hold.
+             The minimum-hold gate stops the early-restore race that
+             previously re-inflated under the wheels mid-execution.
         """
         global_key = '/global_costmap/global_costmap'
         local_key = '/local_costmap/local_costmap'
@@ -1117,29 +1117,34 @@ class MobileBridgeNode(Node):
             saved_l = 0.05
 
         self.clear_costmaps()
-        self.set_remote_params(global_key, {ir_name: 0.0})
-        self.set_remote_params(local_key, {ir_name: 0.0})
+        self.set_remote_params(global_key, {ir_name: 0.015})
+        self.set_remote_params(local_key, {ir_name: 0.015})
         self.get_logger().info(
-            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.00 '
-            f'(global/local), will restore in 10 s '
-            f'(DirectionalStop is the only collision safety until then)')
+            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.015 '
+            f'(global/local), will restore on first /plan + min 2 s, '
+            f'or hard deadline at 6 s')
 
         relaxed_at = time.time()
         cancel_event = self._inflation_escape_cancel
 
         def _restorer():
-            deadline = relaxed_at + 10.0
-            # Hold the relax until the deadline OR a cancel from a newer
-            # goal. NOTE: plan-arrival early-restore was REMOVED because
-            # it created a race — costmap re-inflated under the wheels
-            # mid-execution and the path went invalid before the chassis
-            # cleared the wall.
+            min_hold_until = relaxed_at + 2.0  # never restore before this
+            deadline = relaxed_at + 6.0
+            # Watch /plan_stamp; restore once a fresh plan has arrived AND
+            # the minimum-hold has elapsed (so the chassis has actually had
+            # 2 s to start moving away from the wall before inflation
+            # snaps back). Honour the cancel signal so a follow-up goal
+            # does not race with the restore we are about to publish.
             while time.time() < deadline:
                 if cancel_event.is_set():
                     self.get_logger().info(
                         'goal escape: superseded by new goal, restorer exiting')
                     return
-                time.sleep(0.2)
+                if time.time() >= min_hold_until:
+                    with self._plan_lock:
+                        if self._plan_stamp >= relaxed_at and self._plan_points:
+                            break
+                time.sleep(0.1)
             try:
                 self.set_remote_params(global_key, {ir_name: float(saved_g)})
                 self.set_remote_params(local_key, {ir_name: float(saved_l)})
