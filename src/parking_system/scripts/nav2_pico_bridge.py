@@ -104,12 +104,12 @@ class Nav2PicoBridge(Node):
 
         self.declare_parameter('max_vx_mps', 0.30)
         self.declare_parameter('max_wz_radps', 0.8)
-        # Tightened acceleration caps (was 0.8 / 1.2) so the bridge stops
-        # injecting micro-jitter when the controller's commanded velocity
-        # ticks change abruptly. With the velocity_smoother now at
-        # 0.20/0.45 ramps these caps just provide a final clamp.
-        self.declare_parameter('max_ax_mps2', 0.5)
-        self.declare_parameter('max_aw_radps2', 0.7)
+        # Acceleration caps tightened again (was 0.5 / 0.7) to match the
+        # smoother's new 0.15 / 0.35 ramps. The bridge layer is just the
+        # final clamp; mismatch between layers was adding micro-jitter
+        # that contributed to the perceived "P-gain too high" snake.
+        self.declare_parameter('max_ax_mps2', 0.30)
+        self.declare_parameter('max_aw_radps2', 0.50)
 
         # Deadband gate: the L298N firmware uses a kick-start to break
         # static friction, then sustains at MOTOR_MIN_RUN_PCT (~30%).
@@ -146,14 +146,12 @@ class Nav2PicoBridge(Node):
         # LiDAR-defined map frame is yaw-flipped). Calibration wizard in the
         # mobile app toggles this live; persists via runtime_overrides.yaml.
         self.declare_parameter('vx_polarity', 1)
-        # Servo slew-rate cap (rad/s). Lowered from 3.0 to 2.0 because
-        # MG995 is slower than the LD-1501MG this used to be tuned for,
-        # and at 3.0 rad/s the bridge could request steering faster than
-        # the servo could physically chase. Result was a noticeable
-        # servo "thunk" + a momentary stale-steering window during fast
-        # Nav2 wz changes. 2.0 rad/s sits inside MG995's nominal
-        # ~2.7 rad/s loaded slew rate with margin for voltage sag.
-        self.declare_parameter('max_steer_rate_radps', 2.0)
+        # Servo slew-rate cap (rad/s). Lowered again 2.0 → 1.5 because
+        # snake on straight paths still showed steering spikes faster
+        # than the chassis could usefully respond. MG995's loaded slew
+        # is ~2.7 rad/s; capping at 1.5 leaves headroom for voltage sag
+        # and physically smooths short-wavelength steering commands.
+        self.declare_parameter('max_steer_rate_radps', 1.5)
 
         self.declare_parameter('auto_enable', True)
         self.declare_parameter('bridge_lock_file', '/tmp/nav2_pico_bridge.lock')
@@ -472,16 +470,18 @@ class Nav2PicoBridge(Node):
         gated_vx = 0.0 if abs(self.output.vx) < self.min_vx_creep else self.output.vx
 
         # Cusp detection: when vx changes sign (forward↔reverse), hold speed
-        # at zero for 150 ms so the servo can swing to the new steering angle
-        # before the wheels drive.  Without this, RPP's REEDS_SHEPP cusps
-        # cause the robot to drive several centimeters with stale steering.
+        # at zero for 500 ms so the servo can swing to the new steering angle
+        # before the wheels drive. Was 250 ms; bumped to 500 ms because at
+        # the lower max_steer_rate_radps (1.5 rad/s) a full ±15° wheel swing
+        # takes ~350 ms — 250 ms didn't leave any margin, so the chassis
+        # rolled a few centimeters with stale steering at every cusp.
         cur_sign = (1 if gated_vx > 0 else (-1 if gated_vx < 0 else 0))
         if (self._last_vx_sign != 0 and cur_sign != 0
                 and cur_sign != self._last_vx_sign):
-            self._cusp_cooldown_end = now + Duration(seconds=0.25)
+            self._cusp_cooldown_end = now + Duration(seconds=0.50)
             self.get_logger().info(
                 f"Cusp detected ({self._last_vx_sign:+d}→{cur_sign:+d}), "
-                f"holding speed=0 for 250 ms")
+                f"holding speed=0 for 500 ms")
         if cur_sign != 0:
             self._last_vx_sign = cur_sign
         if (self._cusp_cooldown_end is not None

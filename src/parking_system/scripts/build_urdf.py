@@ -23,11 +23,11 @@ except ImportError:  # pragma: no cover
 
 
 DEFAULT_DIMENSIONS: Dict[str, float] = {
-    "chassis_length": 0.30,   # x extent (m)
-    "chassis_width":  0.20,   # y extent (m)
+    "chassis_length": 0.27,   # x extent (m) — measured 27 cm bumper-to-bumper
+    "chassis_width":  0.20,   # y extent (m) — measured 20 cm side-to-side
     "chassis_height": 0.10,   # z extent (m)
     "wheelbase":      0.25,   # informational; not yet driving IK in this renderer
-    "lidar_x":        0.015,  # FIX: was 0.15 — LiDAR is in chassis middle, ~1.5 cm forward
+    "lidar_x":        0.015,  # LiDAR puck axis is ~1.5 cm forward of chassis center
     "lidar_y":        0.00,
     "lidar_z":        0.07,
     "camera_x":       0.10,

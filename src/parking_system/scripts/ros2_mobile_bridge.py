@@ -1079,10 +1079,17 @@ class MobileBridgeNode(Node):
           1. Signal any in-flight restorer thread to exit, join it.
           2. Capture current inflation_radius on both costmaps.
           3. ClearEntireCostmap on both (force a fresh obstacle pass).
-          4. Temporarily set inflation_radius -> 0.02 m on both. (1 cm was
-             too aggressive — sensor noise + SLAM drift made the planner
-             emit wall-grazing paths the controller couldn't follow.)
-          5. After 6 s OR on first non-empty /plan, restore inflation.
+          4. Temporarily set inflation_radius -> 0.0 m on both (fully
+             disable wall inflation during the escape window). The
+             DirectionalStop polygon in collision_monitor is now the
+             only physical-collision safety; that polygon is direction-
+             aware so it never blocks legitimate "drive away from the
+             wall" motion.
+          5. Restore inflation strictly on the deadline (10 s). We
+             deliberately do NOT restore on first /plan arrival — the
+             previous early-restore caused a race where the costmap
+             re-inflated under the wheels mid-execution and the path
+             went invalid before the chassis cleared the wall.
         """
         global_key = '/global_costmap/global_costmap'
         local_key = '/local_costmap/local_costmap'
@@ -1110,29 +1117,29 @@ class MobileBridgeNode(Node):
             saved_l = 0.05
 
         self.clear_costmaps()
-        self.set_remote_params(global_key, {ir_name: 0.02})
-        self.set_remote_params(local_key, {ir_name: 0.02})
+        self.set_remote_params(global_key, {ir_name: 0.0})
+        self.set_remote_params(local_key, {ir_name: 0.0})
         self.get_logger().info(
-            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.02 '
-            f'(global/local), will restore in <=6 s or on first plan')
+            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.00 '
+            f'(global/local), will restore in 10 s '
+            f'(DirectionalStop is the only collision safety until then)')
 
         relaxed_at = time.time()
         cancel_event = self._inflation_escape_cancel
 
         def _restorer():
-            deadline = relaxed_at + 6.0
-            # Watch /plan_stamp; restore as soon as a fresh plan arrives.
-            # Honour the cancel signal so a follow-up goal does not race
-            # with the restore we are about to publish.
+            deadline = relaxed_at + 10.0
+            # Hold the relax until the deadline OR a cancel from a newer
+            # goal. NOTE: plan-arrival early-restore was REMOVED because
+            # it created a race — costmap re-inflated under the wheels
+            # mid-execution and the path went invalid before the chassis
+            # cleared the wall.
             while time.time() < deadline:
                 if cancel_event.is_set():
                     self.get_logger().info(
                         'goal escape: superseded by new goal, restorer exiting')
                     return
-                with self._plan_lock:
-                    if self._plan_stamp >= relaxed_at and self._plan_points:
-                        break
-                time.sleep(0.1)
+                time.sleep(0.2)
             try:
                 self.set_remote_params(global_key, {ir_name: float(saved_g)})
                 self.set_remote_params(local_key, {ir_name: float(saved_l)})

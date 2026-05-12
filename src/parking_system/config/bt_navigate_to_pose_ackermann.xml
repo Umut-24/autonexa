@@ -13,7 +13,13 @@
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+    <!--
+      Outer retry budget pulled from 6 → 4. Six retries on a 2x2 m
+      testbed produced very long stuck-then-recovering sequences; 4
+      gives the BT enough chances to clear stale obstacles and back
+      up without leaving the operator staring at a frozen chassis.
+    -->
+    <RecoveryNode number_of_retries="4" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithReplanning">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
@@ -53,8 +59,14 @@
               <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
               <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
             </Sequence>
-            <Wait wait_duration="5.0"/>
-            <BackUp backup_dist="0.20" backup_speed="0.15" error_code_id="{backup_error_code}"/>
+            <!-- 2 s (was 5 s) — long enough for a moving obstacle to
+                 clear, short enough that the operator doesn't perceive
+                 a frozen chassis. -->
+            <Wait wait_duration="2.0"/>
+            <!-- 0.15 m / 0.10 m/s (was 0.20 / 0.15). Smaller, slower
+                 retreat — in a 2x2 m testbed the 0.20 m back-up often
+                 carried us into the OPPOSITE wall. -->
+            <BackUp backup_dist="0.15" backup_speed="0.10" error_code_id="{backup_error_code}"/>
           </RoundRobin>
         </ReactiveFallback>
       </Sequence>
