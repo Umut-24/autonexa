@@ -113,49 +113,79 @@ controller_server:
       # 15 cm: mildly stricter than the earlier 20 cm stop window, but still
       # loose enough to avoid hunting in the small testbed.
       xy_goal_tolerance: 0.15
-      yaw_goal_tolerance: 0.1  # ~6 degrees
+      # 0.12 rad (~7°): loosened from 0.10 to give the Ackermann chassis a
+      # realistic chance of settling without a cusp-correct cusp-correct
+      # loop. With the new 1.00 m R_min the wheels need every degree of
+      # tolerance they can get on a goal yaw.
+      yaw_goal_tolerance: 0.12
     
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
-      # 0.20 m/s default — testbed-friendly. At 0.30 the robot crossed a
-      # 2x2 m testbed in ~5 s (felt rushed); 0.20 takes ~10 s and gives the
-      # regulator + collision_monitor headroom to react. User can live-tune
-      # via Settings -> Nav2 Max Speed slider; that rewrites this in
-      # runtime_overrides.yaml.
-      desired_linear_vel: 0.20
+      # 0.12 m/s default — precision-first for the 2x2 m testbed. The
+      # previous 0.20 m/s amplified every steering imperfection (MG995
+      # rotor mismatch, asymmetric linkage) into visible snake; halving
+      # the speed gives the regulator more time per tick to react. User
+      # can live-tune via Settings -> Nav2 Max Speed slider; that
+      # rewrites this in runtime_overrides.yaml.
+      desired_linear_vel: 0.12
 
-      # Lookahead shortened further for tight parking maneuvers — at 0.40 m
-      # default the carrot was overshooting REEDS_SHEPP cusps on close
-      # perpendicular goals, causing RPP to drive past the cusp and loop.
-      # Mildly tightened for the small testbed: smaller carrot keeps the car
-      # closer to the orange plan without going so low that it oscillates.
-      lookahead_dist: 0.25
-      # Tightened from 0.16 -> 0.14 so the RPP carrot can sit closer to the
-      # robot during tight perpendicular parking maneuvers without falling
-      # below the min_speed deadband.
-      min_lookahead_dist: 0.14
-      max_lookahead_dist: 0.38
+      # Lookahead set so the carrot always sits *outside* the chassis
+      # footprint (front edge at +0.15 m). With min_lookahead_dist=0.14
+      # the carrot fell inside the footprint at low speed and RPP read it
+      # as "we're already there" → bang-bang yaw → snake.
+      lookahead_dist: 0.22
+      min_lookahead_dist: 0.20
+      max_lookahead_dist: 0.35
       use_velocity_scaled_lookahead_dist: true
+      # Cap the velocity-scaled carrot lookahead time so it does not run
+      # the carrot far ahead of the chassis. Was implicitly 1.0 s (Nav2
+      # default), which at the old 0.20 m/s let the carrot drift 0.20 m
+      # past the geometric clamp — RPP then over-corrected curvature.
+      lookahead_time: 0.5
+      # Curvature carrot used for steering command (separate from the
+      # main lookahead). Match the steady-state lookahead so steering
+      # commands stay smooth on long straights.
+      curvature_lookahead_dist: 0.20
       transform_tolerance: 0.2
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 1.2
+      # Tightened from 1.2 s to 0.6 s so RPP only zeros velocity when an
+      # imminent collision is actually predicted, not whenever the carrot
+      # passes within 1.2 s of nearby (but legal-to-skirt) wall inflation.
+      # This is the "plan-shown-but-robot-frozen" symptom near walls.
+      max_allowed_time_to_collision_up_to_carrot: 0.6
       use_regulated_linear_velocity_scaling: true
       use_cost_regulated_linear_velocity_scaling: true
-      cost_scaling_dist: 0.6
-      cost_scaling_gain: 1.0
-      # Start slowing at 0.50 m curvature radius — above the planner's
-      # R_min (0.45 m, restored after a brief detour to 0.40) so the
-      # regulator decelerates before the chassis hits its physical
-      # turning limit at ~0.43 m.
-      regulated_linear_scaling_min_radius: 0.50
+      # Lower scaling gain + slightly shorter cost-decay distance so RPP
+      # stops oscillating speed in response to costmap noise while still
+      # slowing for genuinely high-cost zones.
+      cost_scaling_dist: 0.45
+      cost_scaling_gain: 0.7
+      # Start slowing at 1.40 m curvature radius — keeps roughly the same
+      # ~1.4× margin above the planner's R_min that we used before (R_min
+      # is now 1.00 m, see planner_server below). Update this in lockstep
+      # whenever minimum_turning_radius moves.
+      regulated_linear_scaling_min_radius: 1.40
 
-      # Aligned with the chassis's actual minimum movable speed: the L298N
-      # kick-start sustains at ~30% PWM which corresponds to ~0.18 m/s.
-      # Below this the bridge's min_vx_creep gates output to SPEED 0.
-
-      regulated_linear_scaling_min_speed: 0.18
+      # Curve-floor speed lowered from 0.18 to 0.06 m/s so the regulator
+      # is allowed to crawl through tight curves and final-approach
+      # cusps. The bridge's min_vx_creep (0.02 m/s) still gates anything
+      # below the chassis's L298N deadband, so we don't get stalled
+      # commands — we just expose the slower band that the bridge can
+      # actually drive.
+      regulated_linear_scaling_min_speed: 0.06
+      # Begin slowing 0.6 m before the goal (was Nav2 default 0.6 m, but
+      # not explicitly set — pin it so future Nav2 changes don't silently
+      # drift the value). Combined with min_approach_linear_velocity
+      # below this gives a smooth final-approach taper that lets a
+      # parking maneuver settle without one last over-shoot.
+      approach_velocity_scaling_dist: 0.60
+      # Floor the approach speed at 0.04 m/s (was implicit 0.05). With
+      # the chassis's L298N kick-start the wheels still move at this
+      # level, but only just — which is what we want during the last
+      # few centimeters of a parking approach.
+      min_approach_linear_velocity: 0.04
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
       # DUBIN's forward-only paths produced contorted loops that satisfied
@@ -213,9 +243,13 @@ local_costmap:
       
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 8.0
-        # Precision-testbed default: 5 cm scan/wall halo. Keep the high cost
-        # scaling so the small remaining inflation falls off quickly.
+        # Lowered from 8.0 to 6.0: the steep gradient was causing RPP's
+        # cost-regulated linear velocity scaling to chop the speed
+        # response into pulses near walls, which presented as straight-
+        # path snake. 6.0 still decays in ~3-4 cells past the 5 cm
+        # halo — enough margin without the abrupt cliff.
+        cost_scaling_factor: 6.0
+        # Precision-testbed default: 5 cm scan/wall halo.
         inflation_radius: 0.05
 
       always_send_full_costmap: true
@@ -307,21 +341,33 @@ planner_server:
       # still biases the planner toward forward solutions when both fit.
       motion_model_for_search: "REEDS_SHEPP"
       angle_quantization_bins: 72
-      analytic_expansion_ratio: 3.5
+      # Pull the analytic-expansion ratio down so the planner attempts
+      # an exact Reeds-Shepp closing earlier in the search. Helps the
+      # final park segment stay short and clean instead of one long
+      # arc that the controller needs many ticks to track.
+      analytic_expansion_ratio: 2.5
       analytic_expansion_max_length: 3.0
-      # Restored to 0.45 m (above the chassis's physical R_min =
-      # L / tan(30°) ≈ 0.43 m) so every planner primitive is something
-      # the steering linkage can actually trace. Dropping to 0.40 below
-      # the physical limit produced plans the controller couldn't follow,
-      # which appears to have cascaded into bt_navigator failures and an
-      # empty /plan topic. Keep margin above 0.43 here.
-      minimum_turning_radius: 0.45
-      # Lower reverse penalty (2.0 -> 1.5) encourages the planner to emit
-      # 3-point parallel-park solutions when the geometry needs them
-      # instead of looping a too-tight forward arc.
-      reverse_penalty: 1.5
+      # MG995 + Hiwonder Ackermann linkage delivers a much wider effective
+      # R_min than the firmware's design intent (which assumed a 240°+ rotor
+      # smart servo). The previous 0.45 m value was based on an idealized
+      # L/tan(30°) ≈ 0.43 m calculation that does not survive the rotor-range
+      # mismatch — empirically the chassis can't follow tighter-than-~0.9 m
+      # arcs, which made every planner primitive un-trackable and produced
+      # the snake/overshoot/yaw-oscillation pattern. Conservative starting
+      # value: 1.00 m. Reduce iteratively in 0.05 m steps (down to ~0.80 m)
+      # as long as the controller keeps following the path without snake.
+      minimum_turning_radius: 1.00
+      # Raise reverse penalty to 1.8 — still permits 3-point parallel-park
+      # solutions, but discourages the planner from emitting gratuitous
+      # reverse cusps on simple goals where a wider forward arc fits the
+      # 2x2 m testbed just fine. Reduces the in-place oscillation we saw
+      # when the planner inserted a reverse segment to nail the goal yaw.
+      reverse_penalty: 1.8
       change_penalty: 0.5
-      non_straight_penalty: 1.20
+      # Soften the straight-line bias slightly now that R_min is 1.00 m;
+      # with the wider radius the planner needs to be willing to curve
+      # more freely or the path snakes around obstacles.
+      non_straight_penalty: 1.05
       cost_penalty: 1.5
       retrospective_penalty: 0.015
       lookup_table_size: 20.0
@@ -383,11 +429,19 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
 
-    max_velocity: [0.2, 0.0, 0.5]
-
+    # vx cap dropped 0.20 -> 0.15 m/s in lockstep with the controller's
+    # new 0.12 m/s desired_linear_vel — leaves a small headroom for the
+    # cost-based scaling to add speed but doesn't let runaway commands
+    # slip past the smoother. wz cap unchanged (0.5 rad/s).
+    max_velocity: [0.15, 0.0, 0.5]
     min_velocity: [-0.3, 0.0, -0.5]
-    max_accel: [1.5, 0.0, 2.0]
-    max_decel: [-1.5, 0.0, -2.0]
+    # Acceleration caps tightened (was 1.5/2.0) so the smoother doesn't
+    # paper over the bridge's own 0.5/0.7 caps with much faster ramps.
+    # Snake/overshoot fell out of the smoother spiking commands the
+    # bridge then had to undo. Decel cap left aggressive (1.5 m/s^2,
+    # 1.5 rad/s^2) so safety stops still happen quickly.
+    max_accel: [0.20, 0.0, 0.45]
+    max_decel: [-1.5, 0.0, -1.5]
     odom_topic: "odom"
     odom_duration: 0.1
     # Smoother deadband removed — let small velocities through. The
@@ -411,13 +465,18 @@ collision_monitor:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "/local_costmap/published_footprint"
-      # Lowered from 1.2 -> 0.9 s so the monitor stops eager-braking when the
-      # robot is merely PASSING CLOSE to an obstacle along a legitimate path.
-      # 0.9 s at 0.20 m/s is still ~18 cm of forward projection, enough to
-      # decelerate before contact given the bridge's 1.5 m/s^2 decel cap.
-      time_before_collision: 0.9
+      # 0.7 s outer-layer brake — keeps collision_monitor slightly more
+      # permissive than RPP's own 0.6 s collision lookahead so the outer
+      # layer never triggers before the inner layer has had a chance to
+      # react. At the new 0.12 m/s cruise that's ~8 cm forward projection,
+      # plenty given the 1.5 m/s^2 decel cap.
+      time_before_collision: 0.7
       simulation_time_step: 0.1
-      min_points: 6
+      # Require 8 laser points inside the projected footprint before
+      # acting (was 6). At 2 cm costmap resolution with the LiDAR's
+      # angular density, isolated noise hits could clear the old 6-point
+      # threshold and slam the brakes for nothing.
+      min_points: 8
       visualize: false
       enabled: true
     observation_sources: ["scan"]

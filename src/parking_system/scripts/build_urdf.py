@@ -27,7 +27,7 @@ DEFAULT_DIMENSIONS: Dict[str, float] = {
     "chassis_width":  0.20,   # y extent (m)
     "chassis_height": 0.10,   # z extent (m)
     "wheelbase":      0.25,   # informational; not yet driving IK in this renderer
-    "lidar_x":        0.01,   # FIX: was 0.15 — LiDAR is in chassis middle, 1 cm forward
+    "lidar_x":        0.015,  # FIX: was 0.15 — LiDAR is in chassis middle, ~1.5 cm forward
     "lidar_y":        0.00,
     "lidar_z":        0.07,
     "camera_x":       0.10,

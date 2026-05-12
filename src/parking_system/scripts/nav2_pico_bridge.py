@@ -104,8 +104,12 @@ class Nav2PicoBridge(Node):
 
         self.declare_parameter('max_vx_mps', 0.30)
         self.declare_parameter('max_wz_radps', 0.8)
-        self.declare_parameter('max_ax_mps2', 0.8)
-        self.declare_parameter('max_aw_radps2', 1.2)
+        # Tightened acceleration caps (was 0.8 / 1.2) so the bridge stops
+        # injecting micro-jitter when the controller's commanded velocity
+        # ticks change abruptly. With the velocity_smoother now at
+        # 0.20/0.45 ramps these caps just provide a final clamp.
+        self.declare_parameter('max_ax_mps2', 0.5)
+        self.declare_parameter('max_aw_radps2', 0.7)
 
         # Deadband gate: the L298N firmware uses a kick-start to break
         # static friction, then sustains at MOTOR_MIN_RUN_PCT (~30%).
@@ -120,8 +124,13 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('max_speed_pulses', 30)
 
         self.declare_parameter('servo_center_us', 1650)
-        self.declare_parameter('servo_us_min', 1150)
-        self.declare_parameter('servo_us_max', 2150)
+        # ±525 µs from the calibrated 1650 µs mechanical-zero (was ±500). MG995
+        # rotor moves ~0.090°/µs, so this opens an extra ±2.25° of rotor swing
+        # (~±0.75° wheel via the Hiwonder Ackermann linkage) — modest enough
+        # to keep the servo well inside its mechanical envelope while giving
+        # the planner a tighter min turning radius to work with.
+        self.declare_parameter('servo_us_min', 1125)
+        self.declare_parameter('servo_us_max', 2175)
         self.declare_parameter('servo_max_steer_rad', 0.5236)
         # Default -1 on this chassis: empirically the linkage geometry inverts
         # the firmware's intended sign so that ROS-positive wz (left turn)
@@ -137,10 +146,14 @@ class Nav2PicoBridge(Node):
         # LiDAR-defined map frame is yaw-flipped). Calibration wizard in the
         # mobile app toggles this live; persists via runtime_overrides.yaml.
         self.declare_parameter('vx_polarity', 1)
-        # Servo slew-rate cap (rad/s). LD-1501MG datasheet ~3.0 rad/s @ no
-        # load; lower values smooth aggressive Nav2 wz step changes that
-        # otherwise make the steering "thunk".
-        self.declare_parameter('max_steer_rate_radps', 3.0)
+        # Servo slew-rate cap (rad/s). Lowered from 3.0 to 2.0 because
+        # MG995 is slower than the LD-1501MG this used to be tuned for,
+        # and at 3.0 rad/s the bridge could request steering faster than
+        # the servo could physically chase. Result was a noticeable
+        # servo "thunk" + a momentary stale-steering window during fast
+        # Nav2 wz changes. 2.0 rad/s sits inside MG995's nominal
+        # ~2.7 rad/s loaded slew rate with margin for voltage sag.
+        self.declare_parameter('max_steer_rate_radps', 2.0)
 
         self.declare_parameter('auto_enable', True)
         self.declare_parameter('bridge_lock_file', '/tmp/nav2_pico_bridge.lock')

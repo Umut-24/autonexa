@@ -150,6 +150,13 @@ class MobileBridgeNode(Node):
         self._plan_points = []       # Downsampled [[x, y], ...] in map frame
         self._plan_stamp = 0.0
 
+        # --- Inflation-escape coordination ---
+        # New goals cancel any in-flight inflation-restore thread so we never
+        # flip-flop the costmap inflation while the user is rapidly retrying.
+        self._inflation_escape_lock = threading.Lock()
+        self._inflation_escape_cancel = threading.Event()
+        self._inflation_escape_thread = None  # type: threading.Thread | None
+
         self._goal_lock = threading.Lock()
         self._current_goal = {       # Last goal sent (active until cancel)
             'x': 0.0, 'y': 0.0, 'yaw': 0.0,
@@ -1069,14 +1076,30 @@ class MobileBridgeNode(Node):
         start pose currently inside wall inflation (the wall-parked case).
 
         Sequence:
-          1. Capture current inflation_radius on both costmaps.
-          2. ClearEntireCostmap on both (force a fresh obstacle pass).
-          3. Temporarily set inflation_radius -> 0.01 m on both.
-          4. After 4 s OR on first non-empty /plan, restore inflation.
+          1. Signal any in-flight restorer thread to exit, join it.
+          2. Capture current inflation_radius on both costmaps.
+          3. ClearEntireCostmap on both (force a fresh obstacle pass).
+          4. Temporarily set inflation_radius -> 0.02 m on both. (1 cm was
+             too aggressive — sensor noise + SLAM drift made the planner
+             emit wall-grazing paths the controller couldn't follow.)
+          5. After 6 s OR on first non-empty /plan, restore inflation.
         """
         global_key = '/global_costmap/global_costmap'
         local_key = '/local_costmap/local_costmap'
         ir_name = 'inflation_layer.inflation_radius'
+
+        # Cancel any restorer still running from a prior goal and wait for
+        # it to release the lock. Without this, a quick second goal can
+        # land while the old thread is still mid-flight; when the old
+        # thread eventually restores the saved inflation, it clobbers the
+        # relax that the new goal just applied — planner sees inflated
+        # walls again and the second goal fails.
+        with self._inflation_escape_lock:
+            prev = self._inflation_escape_thread
+        if prev is not None and prev.is_alive():
+            self._inflation_escape_cancel.set()
+            prev.join(timeout=1.0)
+        self._inflation_escape_cancel.clear()
 
         saved_g = self.get_remote_params(global_key, [ir_name]).get(ir_name)
         saved_l = self.get_remote_params(local_key, [ir_name]).get(ir_name)
@@ -1087,18 +1110,25 @@ class MobileBridgeNode(Node):
             saved_l = 0.05
 
         self.clear_costmaps()
-        self.set_remote_params(global_key, {ir_name: 0.01})
-        self.set_remote_params(local_key, {ir_name: 0.01})
+        self.set_remote_params(global_key, {ir_name: 0.02})
+        self.set_remote_params(local_key, {ir_name: 0.02})
         self.get_logger().info(
-            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.01 '
-            f'(global/local), will restore in <=4 s or on first plan')
+            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.02 '
+            f'(global/local), will restore in <=6 s or on first plan')
 
         relaxed_at = time.time()
+        cancel_event = self._inflation_escape_cancel
 
         def _restorer():
-            deadline = relaxed_at + 4.0
+            deadline = relaxed_at + 6.0
             # Watch /plan_stamp; restore as soon as a fresh plan arrives.
+            # Honour the cancel signal so a follow-up goal does not race
+            # with the restore we are about to publish.
             while time.time() < deadline:
+                if cancel_event.is_set():
+                    self.get_logger().info(
+                        'goal escape: superseded by new goal, restorer exiting')
+                    return
                 with self._plan_lock:
                     if self._plan_stamp >= relaxed_at and self._plan_points:
                         break
@@ -1115,6 +1145,8 @@ class MobileBridgeNode(Node):
 
         t = threading.Thread(target=_restorer, daemon=True,
                              name='inflation-restore')
+        with self._inflation_escape_lock:
+            self._inflation_escape_thread = t
         t.start()
 
     # --- Pose reset / relocalize (Part G1) ---
