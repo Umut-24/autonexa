@@ -137,10 +137,14 @@ class Nav2PicoBridge(Node):
         # needs us > center, not us < center. Override to +1 if the hardware
         # is rewired the other way.
         self.declare_parameter('servo_polarity', -1)
-        # Flip steering only while reversing. This preserves the calibrated
-        # forward left/right behavior while matching reverse maneuvers to the
-        # same driver intuition and REEDS_SHEPP path curvature.
-        self.declare_parameter('reverse_steer_polarity', -1)
+        # +1 is the mathematically correct value for ROS body-frame wz:
+        # delta = atan(L * wz / vx) already produces the right Ackermann
+        # steer for both forward and reverse, so the post-multiply is
+        # identity. Manual-joystick wheel-direction-consistency under
+        # reverse is handled upstream in ros2_mobile_bridge.publish_control
+        # (the joystick wz is pre-flipped on reverse), NOT here. Override
+        # to -1 only if a linkage rebuild later inverts the reverse path.
+        self.declare_parameter('reverse_steer_polarity', 1)
         # +1 = ROS-positive vx drives the chassis forward (standard).
         # -1 = forward/back swapped (use when motor wiring is reversed or the
         # LiDAR-defined map frame is yaw-flipped). Calibration wizard in the
@@ -408,7 +412,16 @@ class Nav2PicoBridge(Node):
         return clamp(s, -self.max_speed, +self.max_speed)
 
     def _vx_wz_to_steer(self, vx: float, wz: float) -> float:
-        """Standard Ackermann inverse. Mirrors firmware ackermann.c:23."""
+        """Standard Ackermann inverse. Mirrors firmware ackermann.c:23.
+
+        delta = atan(L * wz / vx) is correct for ROS body-frame wz in both
+        directions: when vx<0 and wz>0 (body rotating left while reversing)
+        the atan denominator goes negative and delta comes out negative —
+        wheels physically point right, which is exactly what's needed to
+        pivot the body left in reverse. So reverse_steer_polarity defaults
+        to +1 (identity); manual-joystick driver-intuition fixes live in
+        ros2_mobile_bridge.publish_control, not here.
+        """
         if abs(vx) < 0.01:
             if abs(wz) < 0.01:
                 return 0.0

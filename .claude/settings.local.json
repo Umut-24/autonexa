@@ -34,7 +34,9 @@
       "Bash(cmake:*)",
       "Bash(pkill:*)",
       "Bash(python generate_cdrr_pdf.py)",
-      "Bash(python \"C:\\\\GitHub\\\\autonexa\\\\docs\\\\generate_cdrr_pdf.py\")"
+      "Bash(python \"C:\\\\GitHub\\\\autonexa\\\\docs\\\\generate_cdrr_pdf.py\")",
+      "Bash(cat /home/autonexa/.autonexa/runtime_overrides.yaml 2>/dev/null || echo \"File not found\")",
+      "Read(//home/autonexa/.autonexa/**)"
     ]
   }
 }

@@ -1,0 +1,8 @@
+# Map-frame parking spot schema used by parking_plan.md Phase 2.
+#
+# Runtime saves currently live in ~/.autonexa/waypoints.json so they survive
+# workspace rebuilds and are shared with the existing Parking > Manual Spots UI.
+# This file documents the static YAML shape for locked-map deployments and can
+# be copied into ~/.autonexa when the mission node starts consuming YAML slots.
+map_file: ""
+spots: []

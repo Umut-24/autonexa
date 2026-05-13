@@ -41,7 +41,7 @@ import threading
 import time
 import io
 from collections import deque
-from math import cos, sin, isinf, isnan, pi as MATH_PI
+from math import cos, sin, isinf, isnan, hypot, ceil, pi as MATH_PI
 
 # Static yaw rotation from base_link to laser_link, in radians.
 # Mirrors the static TF in nav2_live_slam.launch.py — kept as a constant
@@ -144,6 +144,10 @@ class MobileBridgeNode(Node):
         self._map_info = {}          # {width, height, resolution, origin_x, origin_y}
         self._map_version = 0        # Increments on each /map update; clients poll
                                      # /api/map_version to skip redundant PNG fetches.
+        # Raw occupancy grid as a (H, W) int8 numpy array (-1/0..100 per cell).
+        # Used by _nudge_goal_from_walls to pre-shift goals away from static-map
+        # walls. Kept under the same _map_lock as the PNG so updates are atomic.
+        self._map_grid = None
 
         # --- Nav2 plan + current goal ---
         self._plan_lock = threading.Lock()
@@ -194,6 +198,17 @@ class MobileBridgeNode(Node):
         self._nav_status_lock = threading.Lock()
         self._nav_status = 'IDLE'      # IDLE/PLANNING/EXECUTING/SUCCEEDED/CANCELED/ABORTED
         self._nav_status_stamp = 0.0
+
+        # --- Planner-failure auto-retry ------------------------------------
+        # If NavigateToPose ABORTs within `_retry_window_s` of send_nav_goal,
+        # automatically re-run the inflation-escape sequence and re-publish
+        # the same goal. Capped at `_retry_max` attempts per user-issued goal
+        # so a genuinely impossible goal doesn't loop forever.
+        self._retry_lock = threading.Lock()
+        self._last_goal_send = None   # {'x','y','yaw','stamp'} or None
+        self._retry_count = 0
+        self._retry_max = 2
+        self._retry_window_s = 6.0
 
         # --- WebSocket subscriber registry ----------------------------------
         # Telemetry pusher fans out to every connected /ws/telemetry client.
@@ -374,9 +389,12 @@ class MobileBridgeNode(Node):
             'origin_x': msg.info.origin.position.x,
             'origin_y': msg.info.origin.position.y,
         }
+        grid = np.array(msg.data, dtype=np.int8).reshape(
+            (msg.info.height, msg.info.width))
         with self._map_lock:
             self._map_png = png_bytes
             self._map_info = info
+            self._map_grid = grid
             self._map_version += 1
 
     def _amcl_cb(self, msg: PoseWithCovarianceStamped):
@@ -478,6 +496,13 @@ class MobileBridgeNode(Node):
         with self._nav_status_lock:
             self._nav_status = label
             self._nav_status_stamp = time.time()
+        # ABORTED soon after send usually means SMAC couldn't plan from
+        # a costly start pose (typical wall-parked case). Fire one auto-
+        # retry: clear costmaps, relax inflation, re-publish the *same*
+        # goal. Capped so a genuinely impossible goal doesn't loop.
+        if label == 'ABORTED':
+            self._maybe_auto_retry_goal()
+
         # Once a goal terminates, mark the cached goal inactive so the map
         # overlay clears even if the user didn't explicitly cancel.
         if label in ('SUCCEEDED', 'CANCELED', 'ABORTED'):
@@ -485,6 +510,65 @@ class MobileBridgeNode(Node):
                 self._current_goal['active'] = False
             with self._plan_lock:
                 self._plan_points = []
+
+    def _maybe_auto_retry_goal(self) -> None:
+        """Re-escape + re-publish the last goal once, if we just aborted
+        within the retry window. Runs on a background thread so the
+        nav_status callback itself never blocks."""
+        with self._retry_lock:
+            last = self._last_goal_send
+            if last is None:
+                return
+            age = time.time() - last.get('stamp', 0.0)
+            if age > self._retry_window_s:
+                return
+            if self._retry_count >= self._retry_max:
+                self.get_logger().warning(
+                    f'auto-retry: cap reached ({self._retry_count}/'
+                    f'{self._retry_max}), giving up on '
+                    f'({last["x"]:.2f},{last["y"]:.2f})')
+                return
+            self._retry_count += 1
+            attempt = self._retry_count
+            goal = dict(last)
+
+        def _retry():
+            try:
+                self.get_logger().info(
+                    f'auto-retry {attempt}/{self._retry_max}: re-escaping '
+                    f'and re-publishing ({goal["x"]:.2f},{goal["y"]:.2f})')
+                try:
+                    self._escape_inflation_for_goal()
+                except Exception as exc:
+                    self.get_logger().warning(
+                        f'auto-retry escape failed: {exc}')
+                time.sleep(0.3)  # let cleared costmaps refresh
+
+                from math import cos as mcos, sin as msin
+                msg = PoseStamped()
+                msg.header.frame_id = 'map'
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.pose.position.x = float(goal['x'])
+                msg.pose.position.y = float(goal['y'])
+                msg.pose.orientation.z = msin(float(goal['yaw']) / 2.0)
+                msg.pose.orientation.w = mcos(float(goal['yaw']) / 2.0)
+                with self._goal_lock:
+                    self._current_goal = {
+                        'x': float(goal['x']), 'y': float(goal['y']),
+                        'yaw': float(goal['yaw']),
+                        'active': True, 'stamp': time.time(),
+                    }
+                # Refresh send-stamp so a later abort still falls inside
+                # the retry window for any subsequent attempts.
+                with self._retry_lock:
+                    if self._last_goal_send is not None:
+                        self._last_goal_send['stamp'] = time.time()
+                self._goal_pub.publish(msg)
+            except Exception as exc:
+                self.get_logger().warning(f'auto-retry publish failed: {exc}')
+
+        threading.Thread(target=_retry, daemon=True,
+                         name='nav-auto-retry').start()
 
     def _goal_pose_cb(self, msg: PoseStamped):
         """Track goals published on /goal_pose (from RViz or this bridge)."""
@@ -540,11 +624,23 @@ class MobileBridgeNode(Node):
             if self._estop_latched:
                 self._clear_pico_estop()
             twist.linear.x = y * max_vx * sl
-            # ROS convention: +angular.z = CCW = left turn. Joystick: +X =
-            # right push. Invert so push-right -> right turn, letting the
-            # same servo_polarity in nav2_pico_bridge serve both this
-            # manual path and Nav2's correctly-signed wz output.
-            twist.angular.z = -x * max_wz * sl
+            # Wheel-direction-consistent joystick: push-right always = front
+            # wheels physically right, regardless of forward/reverse.
+            #
+            # ROS convention: +angular.z = CCW = body rotates left. Joystick:
+            # +X = right push. So wz_cmd = -x maps push-right to body-right
+            # while going forward. The bridge's Ackermann IK is
+            # delta = atan(L * wz / vx); when vx<0 the denominator flips
+            # sign and so does delta — physically correct for body-frame wz
+            # but the *opposite* of what a driver pushing the stick right
+            # expects (RC-car convention: stick right = wheels right). We
+            # pre-flip wz here on reverse so the resulting wheel direction
+            # stays aligned with the joystick. Nav2's /cmd_vel is unaffected
+            # because Nav2 publishes through controller_server, not this path.
+            wz_cmd = -x * max_wz * sl
+            if y < 0:
+                wz_cmd = -wz_cmd
+            twist.angular.z = wz_cmd
 
         with self._safety_lock:
             safety = self._safety_mode
@@ -1071,6 +1167,133 @@ class MobileBridgeNode(Node):
 
         return results
 
+    def _nudge_goal_from_walls(self, x: float, y: float, yaw: float,
+                               min_clearance_m: float = 0.08) -> tuple:
+        """Push goal away from static-map walls so the chassis ends up
+        with enough breathing room to leave again.
+
+        Reads the latest cached /map OccupancyGrid; computes the distance
+        transform (cells away from any non-free cell); if the goal cell
+        has less clearance than the robot's diagonal half-extent plus
+        min_clearance_m, scans outward (Chebyshev ring) for the nearest
+        cell that does. Unknown cells (-1) count as obstacle for nudging
+        — we never push the goal into unmapped space.
+
+        Returns (x, y, yaw); falls back to the input on any error so a
+        bad nudge never blocks a goal from being sent.
+        """
+        try:
+            with self._map_lock:
+                grid = None if self._map_grid is None else self._map_grid
+                info = dict(self._map_info)
+                if grid is not None:
+                    grid = grid.copy()
+            if grid is None or not info:
+                return (x, y, yaw)
+            res = float(info.get('resolution', 0.0))
+            ox = float(info.get('origin_x', 0.0))
+            oy = float(info.get('origin_y', 0.0))
+            h, w = grid.shape
+            if res <= 0.0 or h == 0 or w == 0:
+                return (x, y, yaw)
+
+            # Robot half-extents from persisted URDF dims; fall back to
+            # the values baked into nav2_navigation_params.yaml footprint.
+            hx, hy = 0.135, 0.10
+            try:
+                if _build_urdf is not None and \
+                   hasattr(_build_urdf, 'load_persisted_dimensions'):
+                    dims = _build_urdf.load_persisted_dimensions() or {}
+                    hx = float(dims.get('chassis_length', 2 * hx)) / 2.0
+                    hy = float(dims.get('chassis_width', 2 * hy)) / 2.0
+            except Exception:
+                pass
+
+            required_m = hypot(hx, hy) + max(0.0, min_clearance_m)
+            required_cells = max(1, int(ceil(required_m / res)))
+
+            obstacle = (grid != 0)  # unknown(-1) + occupied(>0) both block
+            try:
+                from scipy.ndimage import distance_transform_edt
+                dist = distance_transform_edt(~obstacle)
+            except Exception:
+                # Cheap fallback: bounded multi-source BFS. Distances above
+                # required_cells+1 are clipped — that's fine, we only need
+                # to know "is this cell at least required_cells away?".
+                dist = self._bounded_distance(obstacle, required_cells + 2)
+
+            gx = int(round((x - ox) / res))
+            gy = int(round((y - oy) / res))
+            if not (0 <= gx < w and 0 <= gy < h):
+                return (x, y, yaw)
+            if dist[gy, gx] >= required_cells:
+                return (x, y, yaw)
+
+            # Chebyshev-ring search outward for the nearest clear cell.
+            max_search = max(required_cells * 6, 30)
+            best = None  # (sq_dist, cx, cy)
+            for r in range(1, max_search + 1):
+                ring_hit = False
+                for dgy in range(-r, r + 1):
+                    for dgx in range(-r, r + 1):
+                        if max(abs(dgx), abs(dgy)) != r:
+                            continue
+                        cx, cy = gx + dgx, gy + dgy
+                        if not (0 <= cx < w and 0 <= cy < h):
+                            continue
+                        if dist[cy, cx] >= required_cells:
+                            d2 = dgx * dgx + dgy * dgy
+                            if best is None or d2 < best[0]:
+                                best = (d2, cx, cy)
+                                ring_hit = True
+                if ring_hit:
+                    break
+
+            if best is None:
+                self.get_logger().warning(
+                    f'goal nudge: no clear cell within '
+                    f'{max_search * res:.2f} m of ({x:.2f},{y:.2f}); '
+                    f'passing original goal through')
+                return (x, y, yaw)
+
+            _, cx, cy = best
+            nx = cx * res + ox
+            ny = cy * res + oy
+            self.get_logger().info(
+                f'goal nudge: ({x:.2f},{y:.2f}) -> ({nx:.2f},{ny:.2f}) '
+                f'(target clearance {required_m * 100:.0f} cm)')
+            return (nx, ny, yaw)
+        except Exception as exc:
+            self.get_logger().warning(f'goal nudge failed: {exc}')
+            return (x, y, yaw)
+
+    @staticmethod
+    def _bounded_distance(obstacle, max_d: int):
+        """Multi-source BFS clipped at max_d cells. 4-neighbor. Returns
+        a float array shaped like `obstacle` (True = source = distance 0).
+        Used as a no-scipy fallback for _nudge_goal_from_walls."""
+        h, w = obstacle.shape
+        dist = np.full((h, w), float(max_d + 1), dtype=np.float32)
+        ys, xs = np.where(obstacle)
+        if ys.size == 0:
+            return dist
+        from collections import deque as _dq
+        q = _dq()
+        for y0, x0 in zip(ys.tolist(), xs.tolist()):
+            dist[y0, x0] = 0.0
+            q.append((y0, x0))
+        while q:
+            cy, cx = q.popleft()
+            d = dist[cy, cx]
+            if d >= max_d:
+                continue
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                ny_, nx_ = cy + dy, cx + dx
+                if 0 <= ny_ < h and 0 <= nx_ < w and dist[ny_, nx_] > d + 1:
+                    dist[ny_, nx_] = d + 1
+                    q.append((ny_, nx_))
+        return dist
+
     def _escape_inflation_for_goal(self) -> None:
         """Pre-goal inflation relax so SMAC Hybrid-A* can plan from a
         start pose currently inside wall inflation (the wall-parked case).
@@ -1514,22 +1737,37 @@ class MobileBridgeNode(Node):
         with self._control_lock:
             self._last_control_time = 0.0
 
+        # Pre-nudge goal off walls so the robot doesn't park itself into
+        # an inflation halo that makes the *next* goal unplannable.
+        nx, ny, nyaw = self._nudge_goal_from_walls(
+            float(x), float(y), float(yaw))
+
         msg = PoseStamped()
         msg.header.frame_id = 'map'
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.pose.position.x = float(x)
-        msg.pose.position.y = float(y)
+        msg.pose.position.x = float(nx)
+        msg.pose.position.y = float(ny)
         from math import cos as mcos, sin as msin
-        msg.pose.orientation.z = msin(float(yaw) / 2.0)
-        msg.pose.orientation.w = mcos(float(yaw) / 2.0)
+        msg.pose.orientation.z = msin(float(nyaw) / 2.0)
+        msg.pose.orientation.w = mcos(float(nyaw) / 2.0)
+        send_stamp = time.time()
         with self._goal_lock:
             self._current_goal = {
-                'x': float(x),
-                'y': float(y),
-                'yaw': float(yaw),
+                'x': float(nx),
+                'y': float(ny),
+                'yaw': float(nyaw),
                 'active': True,
-                'stamp': time.time(),
+                'stamp': send_stamp,
             }
+
+        # Track the goal for the auto-retry path; reset retry counter
+        # whenever a brand-new goal is sent.
+        with self._retry_lock:
+            self._last_goal_send = {
+                'x': float(nx), 'y': float(ny), 'yaw': float(nyaw),
+                'stamp': send_stamp,
+            }
+            self._retry_count = 0
 
         # Wall-parked escape: clear costmaps + temporarily relax inflation so
         # SMAC Hybrid-A* can plan from a start pose inside wall inflation.
@@ -1540,7 +1778,8 @@ class MobileBridgeNode(Node):
             self.get_logger().warning(f'goal escape sequence failed: {exc}')
 
         self._goal_pub.publish(msg)
-        self.get_logger().info(f'Published nav goal: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
+        self.get_logger().info(
+            f'Published nav goal: ({nx:.2f}, {ny:.2f}, yaw={nyaw:.2f})')
         return True
 
     def cancel_nav_goal(self):
@@ -1570,6 +1809,11 @@ class MobileBridgeNode(Node):
         with self._plan_lock:
             self._plan_points = []
             self._plan_stamp = time.time()
+        # User-initiated cancel must clear the auto-retry state so the
+        # ABORT that the cancel triggers does NOT re-publish the goal.
+        with self._retry_lock:
+            self._last_goal_send = None
+            self._retry_count = 0
 
         # Graceful cancel via action cancel service (non-blocking).
         if not self._nav_cancel_client.wait_for_service(timeout_sec=0.1):
