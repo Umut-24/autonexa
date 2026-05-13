@@ -25,13 +25,22 @@ laser_scan_matcher:
     use_odom: false  # No wheel odometry available
     use_imu: false  # No IMU available
     
-    # Scan matching thresholds
-    kf_dist_linear: 0.1  # Keyframe distance (10cm) - create keyframe every 10cm
-    kf_dist_angular: 0.1745  # Keyframe angular distance (10 degrees)
-    
+    # Scan matching thresholds. Tightened 0.10 m / 10° → 0.04 m / 5° on
+    # 2026-05-13 to fight the progressive scan-vs-static-map drift the
+    # operator was seeing over multi-minute sessions. The 2 m testbed only
+    # gave the matcher a few keyframes per loop at 10 cm spacing, so ICP
+    # could drift several cm between corrections; SLAM Toolbox could only
+    # refine the bad odometry it was given. 4 cm / 5° gives a denser
+    # constraint graph at modest extra Pi 5 CPU.
+    kf_dist_linear: 0.04   # Keyframe distance (4cm)
+    kf_dist_angular: 0.0873 # Keyframe angular distance (~5 degrees)
+
     # ICP parameters
     max_iterations: 30  # Maximum ICP iterations
-    max_correspondence_distance: 0.3  # Maximum correspondence distance (30cm)
+    # Tightened 0.30 → 0.18 m: stricter correspondence rejects outlier
+    # matches that were letting ICP drift on noisy walls. 18 cm still
+    # comfortably covers the per-keyframe motion (4 cm linear + slop).
+    max_correspondence_distance: 0.18
     max_angular_correction_deg: 45.0  # Maximum angular correction (degrees)
     max_linear_correction: 0.5  # Maximum linear correction (50cm)
     

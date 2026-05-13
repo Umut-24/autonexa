@@ -2352,10 +2352,22 @@ def api_params():
     if not isinstance(items, dict) or not items:
         return jsonify({'error': 'params object required'}), 400
     results = bridge_node.set_remote_params(node, items)
-    bridge_node.persist_runtime_overrides(
-        node.lstrip('/'),
-        {k: v for k, v in items.items() if results.get(k, {}).get('ok')})
-    return jsonify({'node': node, 'results': results})
+    # Persist *all* attempted items, not just the ones the live node
+    # accepted. Some Nav2 plugins (notably SmacPlannerHybrid on
+    # /planner_server) reject SetParameters at runtime even for params
+    # that *are* settable at configure time — saving them to the YAML
+    # means a launch restart picks them up. The response below tells the
+    # app whether a restart is needed so the user knows to relaunch.
+    bridge_node.persist_runtime_overrides(node.lstrip('/'), items)
+    rejected = [k for k, r in results.items() if not r.get('ok')]
+    restart_required = bool(rejected)
+    return jsonify({
+        'node': node,
+        'results': results,
+        'persisted': list(items.keys()),
+        'rejected': rejected,
+        'restart_required': restart_required,
+    })
 
 
 # ---------------------------------------------------------------------------

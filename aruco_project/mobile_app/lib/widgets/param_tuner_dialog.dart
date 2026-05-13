@@ -181,7 +181,8 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
     final conn = context.read<ConnectionService>();
     final res = await conn.setParams(_node, {name: value});
     if (!mounted) return;
-    if (res[name] == true) {
+    final r = res[name];
+    if (r != null && r.ok) {
       setState(() => _values[name] = value);
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         backgroundColor: Colors.green.shade700,
@@ -189,9 +190,16 @@ class _ParamTunerDialogState extends State<ParamTunerDialog> {
         content: Text('$name = $value uygulandı'),
       ));
     } else {
+      // Show the bridge's actual rejection reason instead of a generic
+      // failure message — typical reasons: "parameter not declared",
+      // "Modifying parameter is not allowed", "out of range".
+      final reason = (r?.reason.isNotEmpty ?? false)
+          ? r!.reason
+          : '(no reason returned)';
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         backgroundColor: Colors.red.shade700,
-        content: Text('Uygulanamadı: $name (validation reddetmiş olabilir)'),
+        duration: const Duration(seconds: 4),
+        content: Text('Uygulanamadı: $name → $reason'),
       ));
     }
   }

@@ -261,11 +261,16 @@ local_costmap:
         # Lowered from 8.0 to 6.0: the steep gradient was causing RPP's
         # cost-regulated linear velocity scaling to chop the speed
         # response into pulses near walls, which presented as straight-
-        # path snake. 6.0 still decays in ~3-4 cells past the 5 cm
-        # halo — enough margin without the abrupt cliff.
+        # path snake. RPP no longer reads cost (use_cost_regulated…
+        # disabled), so this only shapes how the planner_server's local
+        # view inflates — kept at 6.0 for symmetry with global.
         cost_scaling_factor: 6.0
-        # Precision-testbed default: 5 cm scan/wall halo.
-        inflation_radius: 0.05
+        # Bumped 0.05 → 0.08 m. Field reports of clip-the-corner crashes
+        # showed the old 5 cm halo wasn't enough margin given the 27×20 cm
+        # rectangular footprint and 2 cm grid quantization. 8 cm gives the
+        # controller a clearer "stay back" signal while still letting it
+        # squeeze through real gaps the planner agreed to.
+        inflation_radius: 0.08
 
       always_send_full_costmap: true
 
@@ -304,9 +309,16 @@ global_costmap:
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 5.0
-        inflation_radius: 0.05
-      
+        # Steeper than before (5.0 → 6.0) to push the planner further
+        # away from inflated cells. The planner reads global cost; bigger
+        # gradient = stronger "go around" bias.
+        cost_scaling_factor: 6.0
+        # Bumped 0.05 → 0.10 m for the planner. Global > local on
+        # purpose: planner must route safely (10 cm halo), controller
+        # only needs enough margin to execute the safe route (8 cm halo).
+        # This widened gap is what stopped the corner-clip crashes.
+        inflation_radius: 0.10
+
       always_send_full_costmap: true
 
 # Keepout filter configuration (optional - use if you have a road mask)
@@ -489,7 +501,11 @@ collision_monitor:
     DirectionalStop:
       type: "velocity_polygon"
       action_type: "stop"
-      min_points: 4
+      # Raised 4 → 8: at the new 4 cm bumper depth and 2 cm grid /
+      # ~10 Hz LiDAR density, 4 points was easy to trip on a single
+      # noisy scan and was the second contributor to the "frozen at
+      # parking goal" symptom. 8 points needs a real wall, not noise.
+      min_points: 8
       visualize: true
       enabled: true
       holonomic: false
@@ -497,18 +513,22 @@ collision_monitor:
       # Chassis: 27 cm long × 20 cm wide, centered on base_link.
       # Front edge at x=+0.135, rear edge at x=-0.135, sides at y=±0.10.
       forward:
-        # 10 cm bumper just in front of the chassis (x: 0.135 → 0.235),
-        # with 1 cm lateral safety margin (half-width 0.11). At cruise
-        # 0.10 m/s and 1.0 m/s² decel the stop distance is ~5 mm, so
-        # 10 cm is plenty even at the bridge's max_vx 0.30 m/s.
-        points: "[[0.235, 0.11], [0.235, -0.11], [0.135, -0.11], [0.135, 0.11]]"
+        # Shrunk 10 cm → 4 cm (x: 0.135 → 0.175). User parks at walls
+        # by intent — the old 10 cm bumper hard-stopped the chassis
+        # well before goal completion even when the planner had a
+        # legal path. 4 cm still bounds the stop distance (cruise
+        # 0.10 m/s × 1.0 m/s² decel ≈ 5 mm) and the 8-point threshold
+        # above prevents single-noise-hit triggering. Lateral half-width
+        # 0.11 m unchanged (1 cm safety margin past the 0.10 m chassis
+        # half-width).
+        points: "[[0.175, 0.11], [0.175, -0.11], [0.135, -0.11], [0.135, 0.11]]"
         linear_min: 0.01
         linear_max: 1.0
         theta_min: -1.0
         theta_max: 1.0
       reverse:
-        # Symmetric 10 cm bumper behind the chassis (x: -0.135 → -0.235).
-        points: "[[-0.135, 0.11], [-0.135, -0.11], [-0.235, -0.11], [-0.235, 0.11]]"
+        # Symmetric 4 cm bumper behind the chassis (x: -0.135 → -0.175).
+        points: "[[-0.135, 0.11], [-0.135, -0.11], [-0.175, -0.11], [-0.175, 0.11]]"
         linear_min: -1.0
         linear_max: -0.01
         theta_min: -1.0

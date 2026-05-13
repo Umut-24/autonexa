@@ -20,6 +20,16 @@ enum ControlMode { auto, manual, estop }
 /// off  = bypasses safety chain — joystick reaches the wheels directly.
 enum SafetyMode { soft, off }
 
+/// One per-param result from /api/params POST. Carries both the boolean
+/// success and the bridge's `reason` string so the UI can show *why* a
+/// SetParameters call was rejected (e.g. "parameter not declared",
+/// "read-only", "out of range") instead of a generic failure message.
+class ParamSetResult {
+  final bool ok;
+  final String reason;
+  const ParamSetResult({required this.ok, this.reason = ''});
+}
+
 ControlMode _modeFromString(String? s) {
   switch ((s ?? '').toUpperCase()) {
     case 'AUTO':
@@ -1146,24 +1156,44 @@ class ConnectionService extends ChangeNotifier {
     } catch (_) { return {}; }
   }
 
-  Future<Map<String, bool>> setParams(
+  Future<Map<String, ParamSetResult>> setParams(
       String node, Map<String, dynamic> items) async {
-    if (_baseUrl == null) return {};
+    if (_baseUrl == null) {
+      return {
+        for (final k in items.keys)
+          k: const ParamSetResult(ok: false, reason: 'no bridge connection'),
+      };
+    }
     try {
       final resp = await http.post(
         Uri.parse('$_baseUrl/api/params'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'node': node, 'params': items}),
       ).timeout(const Duration(seconds: 3));
-      if (resp.statusCode != 200) return {};
+      if (resp.statusCode != 200) {
+        return {
+          for (final k in items.keys)
+            k: ParamSetResult(
+                ok: false, reason: 'HTTP ${resp.statusCode}'),
+        };
+      }
       final json = jsonDecode(resp.body) as Map<String, dynamic>;
       final results = (json['results'] as Map?) ?? {};
-      final out = <String, bool>{};
+      final out = <String, ParamSetResult>{};
       results.forEach((k, v) {
-        out[k.toString()] = (v as Map?)?['ok'] == true;
+        final m = (v as Map?) ?? const {};
+        out[k.toString()] = ParamSetResult(
+          ok: m['ok'] == true,
+          reason: (m['reason'] ?? '').toString(),
+        );
       });
       return out;
-    } catch (_) { return {}; }
+    } catch (e) {
+      return {
+        for (final k in items.keys)
+          k: ParamSetResult(ok: false, reason: e.toString()),
+      };
+    }
   }
 
   // --- Health (Part G3) ---

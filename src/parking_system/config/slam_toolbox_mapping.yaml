@@ -26,15 +26,22 @@ slam_toolbox:
     # ============================================
     # HIGH RESPONSIVENESS SETTINGS
     # ============================================
-    # Lower thresholds = more frequent map updates
-    minimum_travel_distance: 0.05  # Update every 5cm
-    minimum_travel_heading: 0.05   # Update every tiny rotation (~3 degrees)
+    # Lower thresholds = more frequent map updates. Tightened 0.05 → 0.03
+    # on 2026-05-13 in lockstep with the laser_scan_matcher kf_dist drop —
+    # SLAM only refines as often as the upstream odom emits keyframes, so
+    # both layers need to stay in step.
+    minimum_travel_distance: 0.03  # Update every 3 cm
+    minimum_travel_heading: 0.03   # Update every ~1.7°
     map_update_interval: 1.0       # Try to update map every second
-    
+
     # ============================================
     # TF TOLERANCE SETTINGS (prevent extrapolation errors)
     # ============================================
-    transform_timeout: 0.5         # Wait up to 0.5s for transforms
+    # 0.5 → 0.2 s: extrapolation tolerance shouldn't outrun one scan period
+    # (~100 ms at 10 Hz LiDAR). The old 0.5 s was masking real TF lag as
+    # silently-extrapolated "good" transforms, which presented as the green
+    # scan dots gradually walking off the static black map.
+    transform_timeout: 0.2
     tf_buffer_duration: 30.0       # Keep 30s of transform history
     scan_buffer_size: 20           # Buffer 20 scans for matching
     
@@ -68,7 +75,19 @@ slam_toolbox:
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
     loop_search_maximum_distance: 3.0
-    
+    # Match-strictness thresholds (added 2026-05-13). Without explicit
+    # values these defaulted to permissive values that let weak loop
+    # closures fire and warp the map — once a bad closure landed the
+    # green scan slid off the static black map for the rest of the
+    # session. These four force coarse + fine ICP responses to clear
+    # 0.40 / 0.45, and link the chain to ≥10 nodes before fusing.
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.40
+    loop_match_minimum_response_fine: 0.45
+    # Same fine-match floor for the per-link scan matcher.
+    link_match_minimum_response_fine: 0.45
+
     # ============================================
     # MAP PUBLISHING
     # ============================================

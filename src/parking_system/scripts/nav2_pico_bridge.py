@@ -73,6 +73,7 @@ RUNTIME_OVERRIDABLE = (
     'servo_center_us',
     'servo_us_min',
     'servo_us_max',
+    'manual_priority_window_s',
 )
 
 
@@ -99,6 +100,12 @@ class Nav2PicoBridge(Node):
         # existing 200 ms watchdog. Routing decision is made by the publisher
         # (mobile bridge), not here.
         self.declare_parameter('manual_cmd_vel_topic', '/cmd_vel_manual')
+        # When a /cmd_vel_manual message arrived within this window, prefer
+        # it over /cmd_vel_safe (zero-frames from collision_monitor would
+        # otherwise clobber the joystick at 20 Hz). 0.30 s gives the 50 Hz
+        # joystick stream comfortable margin without permanently locking
+        # out auto control after a stale manual frame.
+        self.declare_parameter('manual_priority_window_s', 0.30)
         self.declare_parameter('publish_rate_hz', 30.0)
         self.declare_parameter('command_timeout_s', 0.20)
 
@@ -164,6 +171,8 @@ class Nav2PicoBridge(Node):
         self.serial_port = str(self.get_parameter('serial_port').value)
         self.serial_baud = int(self.get_parameter('serial_baud').value)
         self.cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
+        self.manual_priority_window = float(
+            self.get_parameter('manual_priority_window_s').value)
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
         self.command_timeout = float(self.get_parameter('command_timeout_s').value)
 
@@ -202,9 +211,21 @@ class Nav2PicoBridge(Node):
         if self.vx_polarity not in (-1, 1):
             raise RuntimeError(f"vx_polarity must be +1 or -1, got {self.vx_polarity}")
 
+        # Per-topic targets + timestamps. The auto path (/cmd_vel_safe via
+        # the Nav2 safety chain) and the manual path (/cmd_vel_manual from
+        # the mobile app's OFF safety mode) maintain independent slots so
+        # auto-zero-frames can't clobber a recent manual joystick command.
+        # Selection happens in on_timer(): manual wins inside the priority
+        # window, auto otherwise. `self.target` is the *selected* target
+        # for the current tick (used by tests / dry-run logging).
+        self._auto_target = MotionState()
+        self._manual_target = MotionState()
         self.target = MotionState()
         self.output = MotionState()
-        self.last_cmd_time = self.get_clock().now()
+        self._auto_cmd_time = self.get_clock().now()
+        self._manual_cmd_time = self.get_clock().now() - Duration(seconds=10.0)
+        self.last_cmd_time = self._auto_cmd_time
+        self._last_active_source = 'auto'  # 'auto' | 'manual'
         self._last_us_sent = None
         self._last_speed_sent = None
         self._last_steer_sent_rad = 0.0
@@ -229,11 +250,11 @@ class Nav2PicoBridge(Node):
                 self._send("ENABLE")
 
         self.cmd_sub = self.create_subscription(
-            Twist, self.cmd_vel_topic, self.on_cmd_vel, 20)
+            Twist, self.cmd_vel_topic, self.on_auto_cmd_vel, 20)
         manual_topic = str(self.get_parameter('manual_cmd_vel_topic').value)
         if manual_topic and manual_topic != self.cmd_vel_topic:
             self.manual_sub = self.create_subscription(
-                Twist, manual_topic, self.on_cmd_vel, 20)
+                Twist, manual_topic, self.on_manual_cmd_vel, 20)
         dt = 1.0 / max(1.0, self.publish_rate_hz)
         self.timer = self.create_timer(dt, self.on_timer)
 
@@ -404,6 +425,12 @@ class Nav2PicoBridge(Node):
                         successful=False,
                         reason='servo_us_max must be in [servo_center_us, 2200]')
                 self.servo_us_max = int(p.value)
+            elif p.name == 'manual_priority_window_s':
+                if not 0.0 <= float(p.value) <= 5.0:
+                    return SetParametersResult(
+                        successful=False,
+                        reason='manual_priority_window_s out of range [0, 5]')
+                self.manual_priority_window = float(p.value)
         return SetParametersResult(successful=True)
 
     # ── Mapping math ──────────────────────────────────────────────
@@ -452,10 +479,21 @@ class Nav2PicoBridge(Node):
         return clamp(int(round(us)), self.servo_us_min, self.servo_us_max)
 
     # ── ROS callbacks ─────────────────────────────────────────────
-    def on_cmd_vel(self, msg: Twist) -> None:
-        self.target.vx = clamp(msg.linear.x, -self.max_vx, self.max_vx)
-        self.target.wz = clamp(msg.angular.z, -self.max_wz, self.max_wz)
-        self.last_cmd_time = self.get_clock().now()
+    def on_auto_cmd_vel(self, msg: Twist) -> None:
+        """Nav2 / safety-chain command on /cmd_vel_safe. Updates the auto
+        slot only — the on_timer arbiter decides whether this slot or the
+        manual slot drives the chassis this tick."""
+        self._auto_target.vx = clamp(msg.linear.x, -self.max_vx, self.max_vx)
+        self._auto_target.wz = clamp(msg.angular.z, -self.max_wz, self.max_wz)
+        self._auto_cmd_time = self.get_clock().now()
+
+    def on_manual_cmd_vel(self, msg: Twist) -> None:
+        """App-bypass command on /cmd_vel_manual (OFF safety mode). Updates
+        the manual slot. While the manual timestamp stays inside
+        `manual_priority_window_s`, the arbiter ignores the auto slot."""
+        self._manual_target.vx = clamp(msg.linear.x, -self.max_vx, self.max_vx)
+        self._manual_target.wz = clamp(msg.angular.z, -self.max_wz, self.max_wz)
+        self._manual_cmd_time = self.get_clock().now()
 
     def _apply_rate_limit(self, current: float, target: float, max_delta: float) -> float:
         delta = target - current
@@ -470,6 +508,24 @@ class Nav2PicoBridge(Node):
             return
         now = self.get_clock().now()
         dt = 1.0 / max(1.0, self.publish_rate_hz)
+
+        # Pick the active source: manual wins inside the priority window
+        # so /cmd_vel_safe zero-frames from collision_monitor can't clobber
+        # a recent joystick command. Outside the window auto takes over.
+        manual_age = (now - self._manual_cmd_time).nanoseconds * 1e-9
+        if manual_age <= self.manual_priority_window:
+            source = 'manual'
+            self.target = self._manual_target
+            self.last_cmd_time = self._manual_cmd_time
+        else:
+            source = 'auto'
+            self.target = self._auto_target
+            self.last_cmd_time = self._auto_cmd_time
+        if source != self._last_active_source:
+            self.get_logger().info(
+                f"cmd_vel source -> {source} (manual_age={manual_age:.2f}s, "
+                f"window={self.manual_priority_window:.2f}s)")
+            self._last_active_source = source
 
         command_stale = (now - self.last_cmd_time) > Duration(seconds=self.command_timeout)
         desired = MotionState(0.0, 0.0) if command_stale else self.target
