@@ -1,4 +1,4 @@
-#include "ackermann.h"
+  #include "ackermann.h"
 #include "config.h"
 
 #include <math.h>
@@ -77,6 +77,39 @@ void ackermann_forward(float v_left, float v_right, float steer,
     if (fabsf(steer) > 0.001f) {
         wz = v_avg * tanf(steer) / WHEELBASE_M;
     }
+
+    odom->yaw += wz * dt;
+
+    /* Normalise yaw to [-π, π] */
+    while (odom->yaw >  (float)M_PI) odom->yaw -= 2.0f * (float)M_PI;
+    while (odom->yaw < -(float)M_PI) odom->yaw += 2.0f * (float)M_PI;
+
+    odom->x += v_avg * cosf(odom->yaw) * dt;
+    odom->y += v_avg * sinf(odom->yaw) * dt;
+
+    odom->vx = v_avg;
+    odom->wz = wz;
+}
+
+void ackermann_odom_diff(float v_left, float v_right,
+                         float dt, odom_state_t *odom)
+{
+    /*
+     * Differential-drive odometry from measured rear-wheel speeds.
+     *
+     *   v_avg = (v_left + v_right) / 2
+     *   wz    = (v_right - v_left) / TRACK_WIDTH_M
+     *
+     * The rear wheels do not steer — they roll. Through a curve the outer
+     * wheel covers more ground than the inner, and that difference IS the
+     * heading change. So (v_right - v_left) / track gives a *measured*
+     * yaw rate, with no dependence on the open-loop servo command. This
+     * is the accuracy win over ackermann_forward().
+     *
+     * Integration (midpoint on yaw) then mirrors ackermann_forward().
+     */
+    float v_avg = (v_left + v_right) / 2.0f;
+    float wz    = (v_right - v_left) / TRACK_WIDTH_M;
 
     odom->yaw += wz * dt;
 

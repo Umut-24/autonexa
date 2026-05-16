@@ -40,6 +40,25 @@ void ackermann_inverse(float vx, float wz,
 void ackermann_forward(float v_left, float v_right, float steer,
                        float dt, odom_state_t *odom);
 
+/**
+ * Differential-drive odometry from the two rear-wheel encoders.
+ *
+ * Unlike ackermann_forward(), which derives yaw rate from the commanded
+ * (open-loop) servo angle, this derives it from the measured wheel
+ * differential — wz = (v_right - v_left) / TRACK_WIDTH_M. For the fixed
+ * rear axle of an Ackermann chassis that is exact and feedback-based,
+ * so it does not inherit the servo-nonlinearity drift noted in
+ * ackermann_forward(). This is the preferred odometry source once real
+ * encoders are wired.
+ *
+ * @param v_left   Left wheel speed [m/s]  (from encoder delta).
+ * @param v_right  Right wheel speed [m/s] (from encoder delta).
+ * @param dt       Time step [s].
+ * @param odom     Odometry state to update in-place.
+ */
+void ackermann_odom_diff(float v_left, float v_right,
+                         float dt, odom_state_t *odom);
+
 /** Reset odometry to origin. */
 void ackermann_odom_reset(odom_state_t *odom);
 

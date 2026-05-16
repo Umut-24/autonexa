@@ -16,11 +16,23 @@
 
 /* ---------- Motor Info ---------- */
 /* JGB37-520R30-12: 12V DC, 1:30 gear ratio                                */
-/* Encoder constants kept for future use; no encoders connected currently. */
 #define MOTOR_GEAR_RATIO     30
 #define ENCODER_CPR          11      /* encoder disk slots (per motor rev)  */
 #define ENCODER_EDGES_PER_REV (ENCODER_CPR * 4 * MOTOR_GEAR_RATIO)
                                      /* 11 * 4 * 30 = 1320 edges/wheel rev */
+
+/* ---------- Quadrature encoders ---------- */
+/* Hiwonder Hall encoders on both rear-drive motors. A/B must be on
+ * consecutive GPIOs (the PIO quadrature program reads A as base, B = A+1).
+ * VCC -> Pico 3V3(OUT), GND -> Pico GND.                                  */
+#define ENCODER_LEFT_A_PIN   10      /* left  B = GPIO 11                   */
+#define ENCODER_RIGHT_A_PIN  12      /* right B = GPIO 13                   */
+/* Forward-motion sign correction. The two encoders are mirror-mounted
+ * (left/right motors face opposite ways), so forward motion spins them
+ * in opposite electrical directions. Verified 2026-05-16 by a forward
+ * hand-push: left read negative, right positive → left is inverted. */
+#define ENCODER_LEFT_SIGN    (-1)
+#define ENCODER_RIGHT_SIGN   (+1)
 
 /* ---------- L298N H-bridge motor driver ---------- */
 /* Switched from Hiwonder I2C smart driver on 2026-05-06 — Hiwonder MCU

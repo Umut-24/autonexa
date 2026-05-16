@@ -188,13 +188,17 @@ If you see `Motor driver board NOT detected`, check I2C wiring and power.
 The firmware prints telemetry every 100ms while running:
 
 ```
-TEL <ms>,<speed_L>,<speed_R>,<steer_rad>,<enc_L>,<enc_R>,<odom_x>,<odom_y>,<odom_yaw>,<estop>,<timeout>
+TEL <ms>,<speed_L>,<speed_R>,<steer_rad>,<enc_L>,<enc_R>,<odom_x>,<odom_y>,<odom_yaw>,<odom_vx>,<odom_wz>,<estop>,<timeout>
 ```
 
 Example:
 ```
-TEL 12340,10,10,0.000,4521,4530,0.142,0.001,0.01,0,0
+TEL 12340,10,10,0.000,4521,4530,0.142,0.001,0.01,0.105,0.002,0,0
 ```
+
+`odom_vx` [m/s] and `odom_wz` [rad/s] were added 2026-05-16 — 13 CSV fields
+total. `enc_L`/`enc_R` are signed 4x-quadrature counts; `odom_*` is the
+differential-drive odometry integrated from the two wheel encoders.
 
 ## 5. Test Procedures
 

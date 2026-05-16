@@ -30,6 +30,7 @@
 #include "safety.h"
 #include "ackermann.h"
 #include "motor_control.h"
+#include "encoder.h"
 
 #ifdef USE_MICRO_ROS
 #include "uros_transport.h"
@@ -292,7 +293,12 @@ static void print_telemetry(void)
     /* Print every 5th loop (10 Hz at 50 Hz loop) */
     if (loop_count % 5 != 0) return;
 
-    printf("TEL %lu,%d,%d,%.3f,%ld,%ld,%.3f,%.3f,%.2f,%d,%d\n",
+    /* TEL <ms>,<spdL>,<spdR>,<steer>,<encL>,<encR>,
+     *     <x>,<y>,<yaw>,<vx>,<wz>,<estop>,<timeout>
+     * vx/wz added 2026-05-16 so the RPi5 bridge can publish a full
+     * Odometry twist. Keep test/pico_gui.py + docs in sync with the
+     * field count. */
+    printf("TEL %lu,%d,%d,%.3f,%ld,%ld,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d\n",
            (unsigned long)to_ms_since_boot(get_absolute_time()),
            motor_control_get_speed_left(),
            motor_control_get_speed_right(),
@@ -300,6 +306,7 @@ static void print_telemetry(void)
            (long)encoder_left,
            (long)encoder_right,
            odom.x, odom.y, odom.yaw,
+           odom.vx, odom.wz,
            safety_is_estopped(),
            safety_is_timed_out());
 }
@@ -347,6 +354,7 @@ int main(void)
     servo_init();
     l298n_driver_init();
     safety_init();
+    encoder_init();
     ackermann_odom_reset(&odom);
 
 #ifdef USE_MICRO_ROS
@@ -386,16 +394,25 @@ int main(void)
 
         loop_count++;
 
-        /* 1) No encoders on the L298N path — keep counts at zero. Odometry
-         *    therefore stays at the last reset state (0,0,0). When external
-         *    encoders are added back, restore the read+integrate calls. */
-        encoder_left  = 0;
-        encoder_right = 0;
-        (void)prev_enc_left;
-        (void)prev_enc_right;
+        /* 1) Read the two quadrature encoders and integrate odometry.
+         *    Counts → per-tick wheel distance → wheel linear speed. */
+        encoder_left  = encoder_get_left();
+        encoder_right = encoder_get_right();
+        int32_t d_l = encoder_left  - prev_enc_left;
+        int32_t d_r = encoder_right - prev_enc_right;
+        prev_enc_left  = encoder_left;
+        prev_enc_right = encoder_right;
 
-        float v_l = 0.0f;
-        float v_r = 0.0f;
+        /* Metres travelled per quadrature edge: wheel circumference
+         * divided by edges-per-wheel-rev. */
+        const float m_per_edge =
+            (2.0f * (float)M_PI * WHEEL_RADIUS_M) / (float)ENCODER_EDGES_PER_REV;
+        float v_l = ((float)d_l * m_per_edge) / CONTROL_DT_S;
+        float v_r = ((float)d_r * m_per_edge) / CONTROL_DT_S;
+
+        /* 2) Differential-drive odometry — measured yaw rate from the
+         *    rear-wheel differential (see ackermann_odom_diff). */
+        ackermann_odom_diff(v_l, v_r, CONTROL_DT_S, &odom);
 
         /* 3) Safety check */
         safety_update();

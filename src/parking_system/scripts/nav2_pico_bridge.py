@@ -41,6 +41,7 @@ from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException
 from rcl_interfaces.msg import SetParametersResult
 from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
 
 try:
     import serial
@@ -121,6 +122,14 @@ class Nav2PicoBridge(Node):
         # off; never persisted to runtime_overrides.yaml on purpose.
         self.declare_parameter('smoothed_cmd_vel_topic', '/cmd_vel_smoothed')
         self.declare_parameter('nav_bypass_active', False)
+        # Wheel-odometry readback: the Pico's CLI firmware emits a `TEL`
+        # line carrying encoder-integrated odometry. The bridge parses it
+        # and republishes as nav_msgs/Odometry. Topic name /pico/odom
+        # matches what ros2_mobile_bridge + the EKF config already expect.
+        self.declare_parameter('publish_wheel_odom', True)
+        self.declare_parameter('wheel_odom_topic', '/pico/odom')
+        self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('publish_rate_hz', 30.0)
         self.declare_parameter('command_timeout_s', 0.20)
 
@@ -265,6 +274,7 @@ class Nav2PicoBridge(Node):
         self._serial = None
         self._write_lock = threading.Lock()
         self._shutting_down = False
+        self._rx_thread = None          # serial RX / TEL-parse thread
 
         self._acquire_lock()
         # Register the validation callback first so any overrides we replay
@@ -288,6 +298,17 @@ class Nav2PicoBridge(Node):
         if smoothed_topic and smoothed_topic != self.cmd_vel_topic:
             self.smoothed_sub = self.create_subscription(
                 Twist, smoothed_topic, self.on_smoothed_cmd_vel, 20)
+
+        # Wheel-odometry publisher — fed by the serial RX thread (_rx_loop)
+        # parsing the Pico's TEL telemetry line.
+        self.publish_wheel_odom = bool(self.get_parameter('publish_wheel_odom').value)
+        self.odom_frame = str(self.get_parameter('odom_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
+        self._wheel_odom_pub = None
+        if self.publish_wheel_odom:
+            self._wheel_odom_pub = self.create_publisher(
+                Odometry, str(self.get_parameter('wheel_odom_topic').value), 10)
+
         dt = 1.0 / max(1.0, self.publish_rate_hz)
         self.timer = self.create_timer(dt, self.on_timer)
 
@@ -336,6 +357,13 @@ class Nav2PicoBridge(Node):
         except (serial.SerialException, OSError) as exc:
             raise RuntimeError(f"open {self.serial_port} failed: {exc}") from exc
         time.sleep(0.2)  # let Pico flush boot banner
+        # Start the RX thread that parses the Pico's TEL telemetry and
+        # republishes wheel odometry. pyserial tolerates read on this
+        # thread while _send() writes on the timer thread.
+        if self.publish_wheel_odom:
+            self._rx_thread = threading.Thread(
+                target=self._rx_loop, name='pico_tel_rx', daemon=True)
+            self._rx_thread.start()
 
     def _send(self, line: str) -> bool:
         if self.dry_run:
@@ -352,6 +380,78 @@ class Nav2PicoBridge(Node):
         except (serial.SerialException, OSError) as exc:
             self.get_logger().error(f"serial write failed ({line!r}): {exc}")
             return False
+
+    # ── Serial RX: parse TEL telemetry → publish wheel odometry ──
+    def _rx_loop(self) -> None:
+        """Background thread: read serial lines, publish odometry from any
+        `TEL` line. Exits when the bridge shuts down or the port dies."""
+        while not self._shutting_down:
+            if self._serial is None:
+                time.sleep(0.1)
+                continue
+            try:
+                raw = self._serial.readline()   # honours the 0.1 s timeout
+            except (serial.SerialException, OSError) as exc:
+                if not self._shutting_down:
+                    self.get_logger().error(f"serial read failed: {exc}")
+                return
+            if not raw:
+                continue                        # timeout, no full line
+            line = raw.decode('ascii', errors='ignore').strip()
+            if line.startswith('TEL '):
+                self._publish_tel_odom(line[4:])
+
+    def _publish_tel_odom(self, payload: str) -> None:
+        """Parse the CSV body of a TEL line and publish nav_msgs/Odometry.
+
+        TEL body (13 fields):
+          ms,spdL,spdR,steer,encL,encR,x,y,yaw,vx,wz,estop,timeout
+        """
+        if self._wheel_odom_pub is None:
+            return
+        parts = payload.split(',')
+        if len(parts) != 13:
+            return
+        try:
+            x = float(parts[6])
+            y = float(parts[7])
+            yaw = float(parts[8])
+            vx = float(parts[9])
+            wz = float(parts[10])
+        except (ValueError, IndexError):
+            return
+
+        msg = Odometry()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.odom_frame
+        msg.child_frame_id = self.base_frame
+        msg.pose.pose.position.x = x
+        msg.pose.pose.position.y = y
+        # 2D yaw → quaternion (roll = pitch = 0).
+        msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
+        msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
+        msg.twist.twist.linear.x = vx
+        msg.twist.twist.angular.z = wz
+        # Diagonal covariances. Pose: wheel dead-reckoning drifts, so
+        # x/y/yaw are loose; unused 3D dims pinned huge. Twist: encoders
+        # measure vx well, yaw-rate moderately (wheel slip).
+        pose_cov = [0.0] * 36
+        pose_cov[0] = 0.02      # x
+        pose_cov[7] = 0.02      # y
+        pose_cov[14] = 1.0e6    # z
+        pose_cov[21] = 1.0e6    # roll
+        pose_cov[28] = 1.0e6    # pitch
+        pose_cov[35] = 0.05     # yaw
+        twist_cov = [0.0] * 36
+        twist_cov[0] = 0.01     # vx
+        twist_cov[7] = 1.0e6    # vy
+        twist_cov[14] = 1.0e6   # vz
+        twist_cov[21] = 1.0e6   # vroll
+        twist_cov[28] = 1.0e6   # vpitch
+        twist_cov[35] = 0.02    # vyaw
+        msg.pose.covariance = pose_cov
+        msg.twist.covariance = twist_cov
+        self._wheel_odom_pub.publish(msg)
 
     # ── Runtime override + parameter callback ────────────────────
     def _apply_runtime_overrides(self) -> None:
@@ -654,7 +754,10 @@ class Nav2PicoBridge(Node):
             pass
 
     def cleanup(self) -> None:
-        self.shutdown_safe_state()
+        self.shutdown_safe_state()   # sets _shutting_down → RX loop exits
+        if self._rx_thread is not None:
+            self._rx_thread.join(timeout=0.5)
+            self._rx_thread = None
         if self._serial is not None:
             try:
                 self._serial.close()

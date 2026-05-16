@@ -396,7 +396,7 @@ class App:
             k: tk.StringVar(value="—") for k in
             ("speed_L", "speed_R", "steer", "steer_deg",
              "enc_L", "enc_R", "enc_L_rate", "enc_R_rate",
-             "odom_x", "odom_y", "odom_yaw",
+             "odom_x", "odom_y", "odom_yaw", "odom_vx", "odom_wz",
              "estop", "timeout", "age")
         }
 
@@ -412,6 +412,8 @@ class App:
             ("odom_x",     "odom x (m)"),
             ("odom_y",     "odom y (m)"),
             ("odom_yaw",   "odom yaw (rad)"),
+            ("odom_vx",    "odom vx (m/s)"),
+            ("odom_wz",    "odom wz (rad/s)"),
             ("estop",      "estop"),
             ("timeout",    "timeout"),
             ("age",        "TEL age (ms)"),
@@ -653,15 +655,17 @@ class App:
 
     def _handle_tel(self, payload: str) -> None:
         parts = payload.split(",")
-        if len(parts) != 11:
+        # 13 fields since 2026-05-16: vx/wz added after odom_yaw.
+        if len(parts) != 13:
             return
         try:
             sL, sR = int(parts[1]), int(parts[2])
             steer = float(parts[3])
             eL, eR = int(parts[4]), int(parts[5])
             x, y, yaw = float(parts[6]), float(parts[7]), float(parts[8])
-            estop = int(parts[9])
-            timeout = int(parts[10])
+            vx, wz = float(parts[9]), float(parts[10])
+            estop = int(parts[11])
+            timeout = int(parts[12])
         except ValueError:
             return
 
@@ -686,6 +690,8 @@ class App:
         v["odom_x"].set(f"{x:+.3f}")
         v["odom_y"].set(f"{y:+.3f}")
         v["odom_yaw"].set(f"{yaw:+.2f}")
+        v["odom_vx"].set(f"{vx:+.3f}")
+        v["odom_wz"].set(f"{wz:+.3f}")
         v["estop"].set("YES" if estop else "no")
         v["timeout"].set("YES" if timeout else "no")
         self.tel_value_labels["estop"].configure(foreground="#cc2222" if estop else "")

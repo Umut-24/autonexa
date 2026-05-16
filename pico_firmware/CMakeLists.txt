@@ -30,6 +30,7 @@ set(COMMON_SOURCES
     src/safety.c
     src/ackermann.c
     src/motor_control.c
+    src/encoder.c
 )
 
 set(COMMON_LIBS
@@ -54,6 +55,22 @@ pico_enable_stdio_uart(autonexa_pico 0)
 
 # Generate UF2 file for drag-and-drop flashing
 pico_add_extra_outputs(autonexa_pico)
+
+# ── Encoder bench-test target (standalone, optional) ─────────
+# Self-contained: does not drive motors or use micro-ROS/CLI. Build it
+# explicitly with `make encoder_test`; flash encoder_test.uf2 to verify
+# the two quadrature encoders before integrating them into the firmware.
+add_executable(encoder_test test/encoder_test.c)
+target_include_directories(encoder_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(encoder_test
+    pico_stdlib
+    hardware_gpio
+)
+pico_enable_stdio_usb(encoder_test 1)
+pico_enable_stdio_uart(encoder_test 0)
+pico_add_extra_outputs(encoder_test)
 
 # ── micro-ROS target (optional) ─────────────────────────────
 if(USE_MICRO_ROS)
