@@ -44,12 +44,24 @@ slam_toolbox:
     transform_timeout: 0.2
     tf_buffer_duration: 30.0       # Keep 30s of transform history
     scan_buffer_size: 20           # Buffer 20 scans for matching
-    
+    # Cap how far back the buffer's scans can reach. Older drifted poses
+    # produce stale match candidates that drag the current estimate;
+    # 6.0 m is the C1's useful range, so we discard far-history scans
+    # without losing the local neighborhood. Helps prevent the
+    # progressive wall-thickening symptom.
+    scan_buffer_maximum_scan_distance: 6.0
+
     # ============================================
     # SCAN MATCHING (trust the scan matcher)
     # ============================================
     use_scan_matching: true
-    use_scan_barycenter: true
+    # Flipped true → false on 2026-05-13. Scan-barycenter mode matches
+    # against the centroid of points, which biases on asymmetric
+    # environments (testbeds where one wall is closer than another).
+    # Raw-point matching usually wins in feature-rich indoor spaces.
+    # Flip back to true ONLY if the wall-thickening worsens — barycenter
+    # helps in low-feature scenes (long corridors, blank walls).
+    use_scan_barycenter: false
     minimum_time_interval: 0.0     # Process every scan immediately
     
     # ============================================
@@ -75,18 +87,18 @@ slam_toolbox:
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
     loop_search_maximum_distance: 3.0
-    # Match-strictness thresholds (added 2026-05-13). Without explicit
-    # values these defaulted to permissive values that let weak loop
-    # closures fire and warp the map — once a bad closure landed the
-    # green scan slid off the static black map for the rest of the
-    # session. These four force coarse + fine ICP responses to clear
-    # 0.40 / 0.45, and link the chain to ≥10 nodes before fusing.
+    # Match-strictness thresholds. The first iteration (0.40/0.45) was
+    # over-tightened — drift accumulated faster than loop closures could
+    # fire to correct it. Loosened a notch (0.35/0.40) on 2026-05-13:
+    # still well above SLAM Toolbox's permissive defaults that originally
+    # let map-warping closures land, but accepts enough good closures
+    # to actually correct drift. Chain size + max variance stay the same.
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.40
-    loop_match_minimum_response_fine: 0.45
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.40
     # Same fine-match floor for the per-link scan matcher.
-    link_match_minimum_response_fine: 0.45
+    link_match_minimum_response_fine: 0.40
 
     # ============================================
     # MAP PUBLISHING

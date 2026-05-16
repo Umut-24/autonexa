@@ -199,6 +199,17 @@ class MobileBridgeNode(Node):
         self._nav_status = 'IDLE'      # IDLE/PLANNING/EXECUTING/SUCCEEDED/CANCELED/ABORTED
         self._nav_status_stamp = 0.0
 
+        # --- nav2_pico_bridge nav-bypass mirror ------------------------------
+        # When Nav2 enters EXECUTING we flip /nav2_pico_bridge:nav_bypass_active
+        # = True so the chassis follows /cmd_vel_smoothed (pre-collision_monitor)
+        # and only an operator E-STOP halts it. Cleared on goal terminal
+        # transitions. Mirror kept here purely for /api/status reporting; the
+        # source of truth is the bridge parameter we set via SetParameters.
+        self._nav_bypass_active = False
+        # Track the previous status so _nav_status_cb fires SetParameters
+        # only on actual EXECUTING entry / exit transitions, not every tick.
+        self._prev_nav_status_for_bypass = 'IDLE'
+
         # --- Planner-failure auto-retry ------------------------------------
         # If NavigateToPose ABORTs within `_retry_window_s` of send_nav_goal,
         # automatically re-run the inflation-escape sequence and re-publish
@@ -494,8 +505,21 @@ class MobileBridgeNode(Node):
         }
         label = code_to_str.get(latest.status, 'UNKNOWN')
         with self._nav_status_lock:
+            prev = self._prev_nav_status_for_bypass
             self._nav_status = label
             self._nav_status_stamp = time.time()
+            self._prev_nav_status_for_bypass = label
+        # Nav-bypass mirror: bypass collision_monitor while a Nav2 goal is
+        # actually executing, restore it the moment the goal terminates.
+        # Fire SetParameters in a background thread so this callback never
+        # blocks the ROS executor (the helper does a synchronous wait).
+        if label == 'EXECUTING' and prev != 'EXECUTING':
+            threading.Thread(target=self._set_nav_bypass, args=(True,),
+                             daemon=True).start()
+        elif prev == 'EXECUTING' and label in ('SUCCEEDED', 'CANCELED',
+                                               'ABORTED', 'UNKNOWN', 'IDLE'):
+            threading.Thread(target=self._set_nav_bypass, args=(False,),
+                             daemon=True).start()
         # ABORTED soon after send usually means SMAC couldn't plan from
         # a costly start pose (typical wall-parked case). Fire one auto-
         # retry: clear costmaps, relax inflation, re-publish the *same*
@@ -510,6 +534,29 @@ class MobileBridgeNode(Node):
                 self._current_goal['active'] = False
             with self._plan_lock:
                 self._plan_points = []
+
+    def _set_nav_bypass(self, active: bool) -> None:
+        """Flip /nav2_pico_bridge:nav_bypass_active to the given value.
+        Runs on a background thread because set_remote_params does a
+        synchronous wait on the parameter service. Logs the outcome
+        either way — this is a real safety mode flip and we want it
+        visible in the bridge journal."""
+        try:
+            res = self.set_remote_params(
+                '/nav2_pico_bridge', {'nav_bypass_active': bool(active)},
+                timeout=2.0)
+            r = res.get('nav_bypass_active', {})
+            if r.get('ok'):
+                self._nav_bypass_active = bool(active)
+                self.get_logger().warning(
+                    f"nav-bypass -> {'ON' if active else 'OFF'} "
+                    f"(nav_status transition)")
+            else:
+                self.get_logger().error(
+                    f"nav-bypass set to {active} REJECTED: "
+                    f"{r.get('reason', '(no reason)')}")
+        except Exception as exc:
+            self.get_logger().error(f'_set_nav_bypass({active}) failed: {exc}')
 
     def _maybe_auto_retry_goal(self) -> None:
         """Re-escape + re-publish the last goal once, if we just aborted
@@ -1615,6 +1662,7 @@ class MobileBridgeNode(Node):
             'telemetry': self.get_telemetry(),
             'mode': self.get_mode(),
             'safety_mode': self.get_safety_mode(),
+            'nav_bypass_active': self._nav_bypass_active,
             'nav_status': nav_status,
             'nav_status_stamp': nav_stamp,
             'goal': self.get_goal(),
@@ -1916,6 +1964,7 @@ def api_status():
     scan_points, scan_stamp = bridge_node.get_scan()
     map_info = bridge_node.get_map_info()
     markers = bridge_node.get_markers()
+    nav_status, _ = bridge_node.get_nav_status()
     return jsonify({
         'pose': {**pose, 'source': source},
         'scan': {
@@ -1924,6 +1973,11 @@ def api_status():
         },
         'map': map_info,
         'markers': {str(k): v for k, v in markers.items()},
+        'nav_status': nav_status,
+        # True while a Nav2 goal is executing and the chassis is following
+        # /cmd_vel_smoothed (collision_monitor bypassed). Diagnostic-only;
+        # the bridge's own SetParameters response is the source of truth.
+        'nav_bypass_active': bridge_node._nav_bypass_active,
     })
 
 

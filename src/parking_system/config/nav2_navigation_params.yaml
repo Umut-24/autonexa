@@ -124,11 +124,12 @@ controller_server:
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
-      # 0.10 m/s default — precision-first for the 2x2 m testbed. Slower
-      # than 0.12 reduces snake *frequency* but not amplitude; the real
-      # snake fixes are the lookahead + cost params below. App slider
-      # still lets the user live-tune via Settings → Nav2 Max Speed.
-      desired_linear_vel: 0.10
+      # 0.08 m/s default (was 0.10). User reported the chassis never
+      # actually reaches 0.10 in practice, and the slower cruise means
+      # less momentum the bumper has to dissipate at goal approach.
+      # App slider still lets the user live-tune via Settings → Nav2
+      # Max Speed when they want to push harder.
+      desired_linear_vel: 0.08
 
       # SNAKE FIX (primary): push the carrot well outside the chassis
       # footprint. With small lookahead the steering command was a steep
@@ -181,24 +182,25 @@ controller_server:
       # is already crawling by the time it hits the cusp.
       regulated_linear_scaling_min_radius: 1.20
 
-      # Curve-floor speed lowered from 0.18 to 0.06 m/s so the regulator
-      # is allowed to crawl through tight curves and final-approach
-      # cusps. The bridge's min_vx_creep (0.02 m/s) still gates anything
-      # below the chassis's L298N deadband, so we don't get stalled
-      # commands — we just expose the slower band that the bridge can
-      # actually drive.
-      regulated_linear_scaling_min_speed: 0.06
-      # Begin slowing 0.8 m before the goal — start the taper earlier so
-      # the chassis is already crawling by the time DirectionalStop's
-      # forward polygon (13-22 cm ahead) sees the wall. Without this
-      # earlier taper the robot was still at full 0.10 m/s into the last
-      # 60 cm and momentum carried it past the goal.
-      approach_velocity_scaling_dist: 0.80
-      # Floor the approach speed at 0.03 m/s (was 0.04). With the L298N
-      # kick-start the wheels still move at this level, but only just —
-      # which is what we want during the last few centimeters of a
-      # parking approach.
-      min_approach_linear_velocity: 0.03
+      # Curve-floor speed 0.05 m/s — lowered to match the new
+      # DirectionalStop linear_min creep window (0.05 m/s). The regulator
+      # can dip the chassis below the bumper-trigger threshold when a
+      # curve actually demands it, which is exactly how parking-style
+      # final-approach cusps need to feel.
+      regulated_linear_scaling_min_speed: 0.05
+      # Start the approach taper 1.5 m out (was 0.8 m). The car was
+      # cruising at full speed into near-wall goals and only beginning
+      # to slow in the final 0.8 m — too late given map-drift uncertainty
+      # about exactly where the wall is. 1.5 m gives the regulator
+      # nearly twice the runway, so by the time DirectionalStop's
+      # 6 cm bumper sees anything, vx is already below 5 cm/s and
+      # stop-distance momentum is negligible.
+      approach_velocity_scaling_dist: 1.50
+      # Floor the approach speed at 0.04 m/s. Stays above the bridge's
+      # min_vx_creep (0.02) and the new DirectionalStop linear_min
+      # creep gate (0.05) so the chassis still creeps through the
+      # final cm, but at a real, repeatable speed.
+      min_approach_linear_velocity: 0.04
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
       # DUBIN's forward-only paths produced contorted loops that satisfied
@@ -265,12 +267,13 @@ local_costmap:
         # disabled), so this only shapes how the planner_server's local
         # view inflates — kept at 6.0 for symmetry with global.
         cost_scaling_factor: 6.0
-        # Bumped 0.05 → 0.08 m. Field reports of clip-the-corner crashes
-        # showed the old 5 cm halo wasn't enough margin given the 27×20 cm
-        # rectangular footprint and 2 cm grid quantization. 8 cm gives the
-        # controller a clearer "stay back" signal while still letting it
-        # squeeze through real gaps the planner agreed to.
-        inflation_radius: 0.08
+        # 0.08 → 0.10 m: moderate-margin bump after the user reported
+        # the chassis still occasionally driving into walls on goal
+        # approach. With the new global inflation of 0.12 m the planner
+        # never proposes a path closer than that to walls; the local
+        # 0.10 m halo gives the controller a slightly tighter view so
+        # it still has freedom to execute the route through real gaps.
+        inflation_radius: 0.10
 
       always_send_full_costmap: true
 
@@ -313,11 +316,14 @@ global_costmap:
         # away from inflated cells. The planner reads global cost; bigger
         # gradient = stronger "go around" bias.
         cost_scaling_factor: 6.0
-        # Bumped 0.05 → 0.10 m for the planner. Global > local on
-        # purpose: planner must route safely (10 cm halo), controller
-        # only needs enough margin to execute the safe route (8 cm halo).
-        # This widened gap is what stopped the corner-clip crashes.
-        inflation_radius: 0.10
+        # 0.10 → 0.12 m for the planner. Global > local on purpose:
+        # planner must route safely (12 cm halo from any wall), the
+        # controller's local view is slightly tighter (10 cm) so it can
+        # still execute the safe route. The extra 2 cm here is the user-
+        # requested "never crash" buffer — at 12 cm the goal endpoint
+        # itself can't sit inside a wall halo even with a few cm of
+        # SLAM drift.
+        inflation_radius: 0.12
 
       always_send_full_costmap: true
 
@@ -375,18 +381,18 @@ planner_server:
       # for our MG995 + Hiwonder linkage. Tune down further (0.80 → 0.75)
       # in tests if the chassis tracks tighter arcs cleanly.
       minimum_turning_radius: 0.85
-      # Reverse penalty pulled back 1.8 → 1.2. Test showed that with 1.8
-      # the planner refused 3-point park solutions even when the geometry
-      # clearly needed one (180° behind-goal case emitted a single long
-      # reverse instead of forward-reverse-forward). 1.2 is barely a
-      # nudge, just enough to bias toward forward when both options fit.
-      reverse_penalty: 1.2
-      # 0.4 (was briefly 0.2 in V2, was 0.5 in V1). 0.2 turned out to
-      # explode the search — combined with the lowered R_min and reverse
-      # penalty it made cusps too cheap, so SMAC explored huge cusp-heavy
-      # subtrees and ran out of planning time on many goals. 0.4 still
-      # lets 3-point park solutions through but keeps the search guided.
-      change_penalty: 0.4
+      # 1.2 → 1.5 on 2026-05-13: operator reported the planner was
+      # reaching for reverse on simple goals that should be forward-only.
+      # 1.5 is a moderate bump that still permits real 3-point parks
+      # when geometry demands them, just makes them less reflexive.
+      # Pull back toward 1.2 if 3-point park goals start failing.
+      reverse_penalty: 1.5
+      # 0.4 → 0.6 on 2026-05-13 in lockstep with the reverse_penalty
+      # bump: each cusp itself now costs more, so a forward-only
+      # solution wins even when its arc is somewhat longer than a
+      # cusp-heavy alternative. Combined effect: visible drop in
+      # gratuitous cusp use without losing the genuine K-turn cases.
+      change_penalty: 0.6
       # 1.05 (was briefly 1.0 in V2). A small straight-line bias gives
       # the A* heuristic a clearer "prefer straight when straight fits"
       # signal, which translates to faster planning and fewer empty
@@ -399,13 +405,15 @@ planner_server:
       smooth_path: true
       smoother:
         max_iterations: 1000
-        # Stronger smoothing weight + lower waypoint fidelity. The
-        # planner output is already a Reeds-Shepp arc, but the discrete
-        # samples can have small heading jitter that the controller
-        # then over-tracks → snake. Accept more drift from the raw
-        # samples in exchange for a curvature-continuous path.
-        w_smooth: 0.5
-        w_data: 0.1
+        # 0.5 → 0.7 / 0.1 → 0.05 on 2026-05-13: operator said "I prefer
+        # longer, smoother paths over the planner's shortest-path bias".
+        # Heavier smoothing weight + lower waypoint-fidelity weight lets
+        # the post-smoother round corners more aggressively, even at the
+        # cost of drifting further from the raw A* sample sequence. The
+        # underlying A* still picks the same cells; the smoother just
+        # takes more freedom in how to fit a curve through them.
+        w_smooth: 0.7
+        w_data: 0.05
         tolerance: 1.0e-10
 
 smoother_server:
@@ -458,9 +466,10 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
 
-    # vx cap dropped 0.15 → 0.12 m/s in lockstep with the controller's
-    # new 0.10 m/s desired_linear_vel. wz cap unchanged (0.5 rad/s).
-    max_velocity: [0.12, 0.0, 0.5]
+    # vx cap dropped to 0.10 m/s in lockstep with the controller's new
+    # 0.08 m/s desired_linear_vel (with a 0.02 m/s headroom buffer above
+    # cruise). wz cap unchanged (0.5 rad/s).
+    max_velocity: [0.10, 0.0, 0.5]
     min_velocity: [-0.3, 0.0, -0.5]
     # Acceleration caps softened further (was 0.20/0.45). The bridge's
     # own 0.30/0.50 caps already shape the ramp; this smoother layer is
@@ -501,11 +510,12 @@ collision_monitor:
     DirectionalStop:
       type: "velocity_polygon"
       action_type: "stop"
-      # Raised 4 → 8: at the new 4 cm bumper depth and 2 cm grid /
-      # ~10 Hz LiDAR density, 4 points was easy to trip on a single
-      # noisy scan and was the second contributor to the "frozen at
-      # parking goal" symptom. 8 points needs a real wall, not noise.
-      min_points: 8
+      # 8 → 5: the previous bump was over-tightened. At oblique wall
+      # angles only 5–6 rays land inside the polygon and 8 was rejecting
+      # real walls (a contributor to "didn't slow down before crash").
+      # 5 still filters single-scan spec noise but catches the real
+      # geometry reliably.
+      min_points: 5
       visualize: true
       enabled: true
       holonomic: false
@@ -513,24 +523,26 @@ collision_monitor:
       # Chassis: 27 cm long × 20 cm wide, centered on base_link.
       # Front edge at x=+0.135, rear edge at x=-0.135, sides at y=±0.10.
       forward:
-        # Shrunk 10 cm → 4 cm (x: 0.135 → 0.175). User parks at walls
-        # by intent — the old 10 cm bumper hard-stopped the chassis
-        # well before goal completion even when the planner had a
-        # legal path. 4 cm still bounds the stop distance (cruise
-        # 0.10 m/s × 1.0 m/s² decel ≈ 5 mm) and the 8-point threshold
-        # above prevents single-noise-hit triggering. Lateral half-width
-        # 0.11 m unchanged (1 cm safety margin past the 0.10 m chassis
-        # half-width).
-        points: "[[0.175, 0.11], [0.175, -0.11], [0.135, -0.11], [0.135, 0.11]]"
-        linear_min: 0.01
+        # 6 cm bumper (x: 0.135 → 0.195) — middle ground between the
+        # old too-generous 10 cm and the previous too-tight 4 cm. At
+        # the new 0.08 m/s cruise + 0.30 m/s² bridge decel the stop
+        # distance is ~1.1 cm; 6 cm leaves a comfortable margin.
+        # `linear_min: 0.05` carves a creep window: when the chassis
+        # is wall-adjacent and commanded vx < 5 cm/s, this polygon
+        # doesn't fire — so paths can execute even from poses parked
+        # next to walls. Above 5 cm/s the bumper applies normally.
+        points: "[[0.195, 0.11], [0.195, -0.11], [0.135, -0.11], [0.135, 0.11]]"
+        linear_min: 0.05
         linear_max: 1.0
         theta_min: -1.0
         theta_max: 1.0
       reverse:
-        # Symmetric 4 cm bumper behind the chassis (x: -0.135 → -0.175).
-        points: "[[-0.135, 0.11], [-0.135, -0.11], [-0.175, -0.11], [-0.175, 0.11]]"
+        # Symmetric 6 cm bumper behind the chassis (x: -0.135 → -0.195),
+        # with the matching -0.05 creep gate so reverse can also break
+        # out of wall-adjacent parking poses at sub-5 cm/s.
+        points: "[[-0.135, 0.11], [-0.135, -0.11], [-0.195, -0.11], [-0.195, 0.11]]"
         linear_min: -1.0
-        linear_max: -0.01
+        linear_max: -0.05
         theta_min: -1.0
         theta_max: 1.0
       stopped:

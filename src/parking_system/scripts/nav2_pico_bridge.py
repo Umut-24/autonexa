@@ -74,6 +74,12 @@ RUNTIME_OVERRIDABLE = (
     'servo_us_min',
     'servo_us_max',
     'manual_priority_window_s',
+    # nav_bypass_active is intentionally NOT in this tuple. It's a
+    # transient runtime mode, not a configuration choice: the mobile
+    # bridge sets it true while a Nav2 goal is executing and false
+    # again when the goal completes. Persisting "always bypass" across
+    # a relaunch would be a foot-gun (collision_monitor would stay off
+    # even with no goal active).
 )
 
 
@@ -106,10 +112,25 @@ class Nav2PicoBridge(Node):
         # joystick stream comfortable margin without permanently locking
         # out auto control after a stale manual frame.
         self.declare_parameter('manual_priority_window_s', 0.30)
+        # /cmd_vel_smoothed is the velocity_smoother's output BEFORE
+        # collision_monitor. When `nav_bypass_active` is true (mobile
+        # bridge sets this while a Nav2 goal is executing), the bridge
+        # follows /cmd_vel_smoothed instead of /cmd_vel_safe — the
+        # chassis tracks the planner's path through what would otherwise
+        # be a hard-stop, and only an operator E-STOP halts it. Default
+        # off; never persisted to runtime_overrides.yaml on purpose.
+        self.declare_parameter('smoothed_cmd_vel_topic', '/cmd_vel_smoothed')
+        self.declare_parameter('nav_bypass_active', False)
         self.declare_parameter('publish_rate_hz', 30.0)
         self.declare_parameter('command_timeout_s', 0.20)
 
-        self.declare_parameter('max_vx_mps', 0.30)
+        # 0.30 → 0.15 m/s on 2026-05-13. The chassis was never reaching
+        # 0.30 in real driving anyway, and capping the bridge layer this
+        # tight means even if controller / smoother caps drift open the
+        # chassis can't accumulate dangerous momentum into a wall.
+        # App's live speed slider still has comfortable headroom above
+        # the 0.08 m/s cruise.
+        self.declare_parameter('max_vx_mps', 0.15)
         self.declare_parameter('max_wz_radps', 0.8)
         # Acceleration caps tightened again (was 0.5 / 0.7) to match the
         # smoother's new 0.15 / 0.35 ramps. The bridge layer is just the
@@ -173,6 +194,8 @@ class Nav2PicoBridge(Node):
         self.cmd_vel_topic = str(self.get_parameter('cmd_vel_topic').value)
         self.manual_priority_window = float(
             self.get_parameter('manual_priority_window_s').value)
+        self.nav_bypass_active = bool(
+            self.get_parameter('nav_bypass_active').value)
         self.publish_rate_hz = float(self.get_parameter('publish_rate_hz').value)
         self.command_timeout = float(self.get_parameter('command_timeout_s').value)
 
@@ -211,21 +234,27 @@ class Nav2PicoBridge(Node):
         if self.vx_polarity not in (-1, 1):
             raise RuntimeError(f"vx_polarity must be +1 or -1, got {self.vx_polarity}")
 
-        # Per-topic targets + timestamps. The auto path (/cmd_vel_safe via
-        # the Nav2 safety chain) and the manual path (/cmd_vel_manual from
-        # the mobile app's OFF safety mode) maintain independent slots so
-        # auto-zero-frames can't clobber a recent manual joystick command.
-        # Selection happens in on_timer(): manual wins inside the priority
-        # window, auto otherwise. `self.target` is the *selected* target
-        # for the current tick (used by tests / dry-run logging).
+        # Per-topic targets + timestamps. Three sources, three slots:
+        #   auto      = /cmd_vel_safe (post-collision_monitor — Nav2's
+        #               normal safety-chain output)
+        #   smoothed  = /cmd_vel_smoothed (pre-collision_monitor — the
+        #               planner's output before bumper / FootprintApproach
+        #               can interfere). Selected only when
+        #               `nav_bypass_active` is true.
+        #   manual    = /cmd_vel_manual (mobile app OFF safety mode joystick)
+        # Selection precedence in on_timer(): manual (within window) →
+        # smoothed (if bypass active) → auto. `self.target` is the
+        # *selected* target for the current tick (used by tests / logs).
         self._auto_target = MotionState()
+        self._smoothed_target = MotionState()
         self._manual_target = MotionState()
         self.target = MotionState()
         self.output = MotionState()
         self._auto_cmd_time = self.get_clock().now()
+        self._smoothed_cmd_time = self.get_clock().now() - Duration(seconds=10.0)
         self._manual_cmd_time = self.get_clock().now() - Duration(seconds=10.0)
         self.last_cmd_time = self._auto_cmd_time
-        self._last_active_source = 'auto'  # 'auto' | 'manual'
+        self._last_active_source = 'auto'  # 'auto' | 'smoothed' | 'manual'
         self._last_us_sent = None
         self._last_speed_sent = None
         self._last_steer_sent_rad = 0.0
@@ -255,6 +284,10 @@ class Nav2PicoBridge(Node):
         if manual_topic and manual_topic != self.cmd_vel_topic:
             self.manual_sub = self.create_subscription(
                 Twist, manual_topic, self.on_manual_cmd_vel, 20)
+        smoothed_topic = str(self.get_parameter('smoothed_cmd_vel_topic').value)
+        if smoothed_topic and smoothed_topic != self.cmd_vel_topic:
+            self.smoothed_sub = self.create_subscription(
+                Twist, smoothed_topic, self.on_smoothed_cmd_vel, 20)
         dt = 1.0 / max(1.0, self.publish_rate_hz)
         self.timer = self.create_timer(dt, self.on_timer)
 
@@ -431,6 +464,14 @@ class Nav2PicoBridge(Node):
                         successful=False,
                         reason='manual_priority_window_s out of range [0, 5]')
                 self.manual_priority_window = float(p.value)
+            elif p.name == 'nav_bypass_active':
+                new_val = bool(p.value)
+                if new_val != self.nav_bypass_active:
+                    # Loud on purpose — this is a real safety mode flip.
+                    self.get_logger().warning(
+                        f"nav-bypass {'ON' if new_val else 'OFF'}: chassis "
+                        f"{'now follows /cmd_vel_smoothed (collision_monitor inactive)' if new_val else 'back to /cmd_vel_safe (collision_monitor active)'}")
+                self.nav_bypass_active = new_val
         return SetParametersResult(successful=True)
 
     # ── Mapping math ──────────────────────────────────────────────
@@ -495,6 +536,16 @@ class Nav2PicoBridge(Node):
         self._manual_target.wz = clamp(msg.angular.z, -self.max_wz, self.max_wz)
         self._manual_cmd_time = self.get_clock().now()
 
+    def on_smoothed_cmd_vel(self, msg: Twist) -> None:
+        """Pre-collision_monitor command on /cmd_vel_smoothed. Used only
+        when `nav_bypass_active` is true (mobile bridge sets that while
+        a Nav2 goal is executing). Always updates the slot regardless of
+        bypass state — keeps the timestamp fresh so the arbiter can
+        switch in the moment bypass flips on."""
+        self._smoothed_target.vx = clamp(msg.linear.x, -self.max_vx, self.max_vx)
+        self._smoothed_target.wz = clamp(msg.angular.z, -self.max_wz, self.max_wz)
+        self._smoothed_cmd_time = self.get_clock().now()
+
     def _apply_rate_limit(self, current: float, target: float, max_delta: float) -> float:
         delta = target - current
         if delta > max_delta:
@@ -509,14 +560,20 @@ class Nav2PicoBridge(Node):
         now = self.get_clock().now()
         dt = 1.0 / max(1.0, self.publish_rate_hz)
 
-        # Pick the active source: manual wins inside the priority window
-        # so /cmd_vel_safe zero-frames from collision_monitor can't clobber
-        # a recent joystick command. Outside the window auto takes over.
+        # Pick the active source. Precedence (highest → lowest):
+        #   1. manual    — inside `manual_priority_window_s` always wins
+        #   2. smoothed  — when nav_bypass_active (Nav2 goal executing,
+        #                  mobile bridge has flipped the flag)
+        #   3. auto      — /cmd_vel_safe via collision_monitor (default)
         manual_age = (now - self._manual_cmd_time).nanoseconds * 1e-9
         if manual_age <= self.manual_priority_window:
             source = 'manual'
             self.target = self._manual_target
             self.last_cmd_time = self._manual_cmd_time
+        elif self.nav_bypass_active:
+            source = 'smoothed'
+            self.target = self._smoothed_target
+            self.last_cmd_time = self._smoothed_cmd_time
         else:
             source = 'auto'
             self.target = self._auto_target
@@ -524,7 +581,8 @@ class Nav2PicoBridge(Node):
         if source != self._last_active_source:
             self.get_logger().info(
                 f"cmd_vel source -> {source} (manual_age={manual_age:.2f}s, "
-                f"window={self.manual_priority_window:.2f}s)")
+                f"window={self.manual_priority_window:.2f}s, "
+                f"bypass={self.nav_bypass_active})")
             self._last_active_source = source
 
         command_stale = (now - self.last_cmd_time) > Duration(seconds=self.command_timeout)
