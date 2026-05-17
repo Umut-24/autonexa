@@ -286,6 +286,18 @@ class Nav2PicoBridge(Node):
         self.add_on_set_parameters_callback(self._on_param_set)
         self._apply_runtime_overrides()
 
+        # Wheel-odometry publisher — fed by the serial RX thread (_rx_loop)
+        # parsing the Pico's TEL telemetry line. Must be set up *before*
+        # _open_serial(): _open_serial() starts _rx_loop, which reads
+        # publish_wheel_odom and publishes via _wheel_odom_pub.
+        self.publish_wheel_odom = bool(self.get_parameter('publish_wheel_odom').value)
+        self.odom_frame = str(self.get_parameter('odom_frame').value)
+        self.base_frame = str(self.get_parameter('base_frame').value)
+        self._wheel_odom_pub = None
+        if self.publish_wheel_odom:
+            self._wheel_odom_pub = self.create_publisher(
+                Odometry, str(self.get_parameter('wheel_odom_topic').value), 10)
+
         if not self.dry_run:
             self._open_serial()
             if self.auto_enable:
@@ -301,16 +313,6 @@ class Nav2PicoBridge(Node):
         if smoothed_topic and smoothed_topic != self.cmd_vel_topic:
             self.smoothed_sub = self.create_subscription(
                 Twist, smoothed_topic, self.on_smoothed_cmd_vel, 20)
-
-        # Wheel-odometry publisher — fed by the serial RX thread (_rx_loop)
-        # parsing the Pico's TEL telemetry line.
-        self.publish_wheel_odom = bool(self.get_parameter('publish_wheel_odom').value)
-        self.odom_frame = str(self.get_parameter('odom_frame').value)
-        self.base_frame = str(self.get_parameter('base_frame').value)
-        self._wheel_odom_pub = None
-        if self.publish_wheel_odom:
-            self._wheel_odom_pub = self.create_publisher(
-                Odometry, str(self.get_parameter('wheel_odom_topic').value), 10)
 
         dt = 1.0 / max(1.0, self.publish_rate_hz)
         self.timer = self.create_timer(dt, self.on_timer)
