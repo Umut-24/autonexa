@@ -104,19 +104,25 @@ controller_server:
     
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.3
-      movement_time_allowance: 10.0
+      # 0.10 m (was 0.3) + 30 s allowance (was 10 s): the open-loop L298N
+      # chassis legitimately creeps during a parking approach. The old
+      # 0.3 m / 10 s gate read that slow-but-progressing creep as "stuck"
+      # and aborted FollowPath before the robot reached the goal. A
+      # smaller movement radius over a longer window only trips on a
+      # genuine stall.
+      required_movement_radius: 0.10
+      movement_time_allowance: 30.0
     
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 3 cm: parking-grade precision. Achievable only with the matching
-      # Group-3 changes below (min_approach_linear_velocity raised above
-      # the L298N PWM floor, approach_velocity_scaling_dist shortened so
-      # the slow tail doesn't stall). If hunting at the goal appears,
-      # loosen back to 0.05 — do NOT loosen below 0.07 until the encoder
-      # PI velocity loop (F2 follow-up) lands.
-      xy_goal_tolerance: 0.03
+      # 5 cm: realistic precision for the open-loop L298N chassis. The
+      # previous 3 cm was below what an encoder-less, open-loop drive can
+      # repeatably settle on — the car hunted around the goal, never
+      # covered the progress-checker movement radius, and got aborted.
+      # Do NOT tighten below 0.05 until the encoder PI velocity loop
+      # (F2 follow-up) lands.
+      xy_goal_tolerance: 0.05
       # 0.06 rad (~3.5°): tightened for parking-grade heading. With
       # R_min now at 0.50 m the planner can settle on goal yaw without
       # the old 0.12 rad slop.
