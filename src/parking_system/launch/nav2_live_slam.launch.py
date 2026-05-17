@@ -104,8 +104,10 @@ def generate_launch_description():
     )
     min_vx_creep_arg = DeclareLaunchArgument(
         'min_vx_creep',
-        default_value='0.02',
-        description='|vx| below this -> SPEED 0 in the ASCII bridge (firmware deadband workaround).'
+        default_value='0.05',
+        description='|vx| below this -> SPEED 0 in the ASCII bridge (firmware deadband workaround). '
+                    'Raised from 0.02 alongside the RPP min_approach_linear_velocity floor at 0.07 '
+                    'so sub-stall commands are silenced rather than being passed to the open-loop motors.'
     )
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
     # Symmetric ±500 µs around the 1650 center — the previous 1100/1900

@@ -151,8 +151,11 @@ class Nav2PicoBridge(Node):
         # Deadband gate: the L298N firmware uses a kick-start to break
         # static friction, then sustains at MOTOR_MIN_RUN_PCT (~30%).
         # Sub-creep vx still gets SPEED 0 to avoid micro-lurching at the
-        # goal approach.
-        self.declare_parameter('min_vx_creep', 0.02)
+        # goal approach. Raised from 0.02 to 0.05 to match the new RPP
+        # min_approach_linear_velocity floor of 0.07: anything the
+        # controller commands above its floor passes through, anything
+        # below is silenced rather than stalling the motor open-loop.
+        self.declare_parameter('min_vx_creep', 0.05)
 
         self.declare_parameter('wheelbase_m', 0.25)
         # 100 = vx 0.30 m/s -> SPEED 30 -> 100% PWM duty on the L298N path.

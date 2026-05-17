@@ -110,15 +110,17 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 10 cm: tighter precision for parking — was 0.15 m. If hunting at
-      # the goal becomes a problem the param tuner can loosen this back
-      # to 0.12-0.15.
-      xy_goal_tolerance: 0.10
-      # 0.12 rad (~7°): loosened from 0.10 to give the Ackermann chassis a
-      # realistic chance of settling without a cusp-correct cusp-correct
-      # loop. With the new 0.85 m R_min the wheels still need degrees of
-      # tolerance to settle on a goal yaw.
-      yaw_goal_tolerance: 0.12
+      # 3 cm: parking-grade precision. Achievable only with the matching
+      # Group-3 changes below (min_approach_linear_velocity raised above
+      # the L298N PWM floor, approach_velocity_scaling_dist shortened so
+      # the slow tail doesn't stall). If hunting at the goal appears,
+      # loosen back to 0.05 — do NOT loosen below 0.07 until the encoder
+      # PI velocity loop (F2 follow-up) lands.
+      xy_goal_tolerance: 0.03
+      # 0.06 rad (~3.5°): tightened for parking-grade heading. With
+      # R_min now at 0.50 m the planner can settle on goal yaw without
+      # the old 0.12 rad slop.
+      yaw_goal_tolerance: 0.06
     
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
     FollowPath:
@@ -189,18 +191,21 @@ controller_server:
       # final-approach cusps need to feel.
       regulated_linear_scaling_min_speed: 0.05
       # Start the approach taper 1.5 m out (was 0.8 m). The car was
-      # cruising at full speed into near-wall goals and only beginning
-      # to slow in the final 0.8 m — too late given map-drift uncertainty
-      # about exactly where the wall is. 1.5 m gives the regulator
-      # nearly twice the runway, so by the time DirectionalStop's
-      # 6 cm bumper sees anything, vx is already below 5 cm/s and
-      # stop-distance momentum is negligible.
-      approach_velocity_scaling_dist: 1.50
-      # Floor the approach speed at 0.04 m/s. Stays above the bridge's
-      # min_vx_creep (0.02) and the new DirectionalStop linear_min
-      # creep gate (0.05) so the chassis still creeps through the
-      # final cm, but at a real, repeatable speed.
-      min_approach_linear_velocity: 0.04
+      # 0.60 m: shortened from 1.5 m. The previous long slow tail caused
+      # the chassis to spend ~10 s creeping at sub-stall speeds, which
+      # masked goal-overshoot under open-loop motor scaling. 0.60 m
+      # keeps cruise velocity up until the last 60 cm, then ramps down
+      # to the new floor at min_approach_linear_velocity. With the
+      # 8 cm DirectionalStop bumper there's still plenty of runway to
+      # decelerate before the bumper trips.
+      approach_velocity_scaling_dist: 0.60
+      # 0.07 m/s: lifted above the L298N PWM stall floor. The previous
+      # 0.04 m/s commanded value was below the duty needed to overcome
+      # static friction on the JGB37 motors — the wheel would stall
+      # while the controller still thought it was creeping, producing
+      # the ~10 cm short-of-goal pattern. Paired with the bridge's
+      # min_vx_creep lifted to 0.05.
+      min_approach_linear_velocity: 0.07
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
       # DUBIN's forward-only paths produced contorted loops that satisfied
@@ -267,13 +272,13 @@ local_costmap:
         # disabled), so this only shapes how the planner_server's local
         # view inflates — kept at 6.0 for symmetry with global.
         cost_scaling_factor: 6.0
-        # 0.08 → 0.10 m: moderate-margin bump after the user reported
-        # the chassis still occasionally driving into walls on goal
-        # approach. With the new global inflation of 0.12 m the planner
-        # never proposes a path closer than that to walls; the local
-        # 0.10 m halo gives the controller a slightly tighter view so
-        # it still has freedom to execute the route through real gaps.
-        inflation_radius: 0.10
+        # 0.18 m: real clearance halo. The previous 0.10 m was equal
+        # to the chassis half-width, leaving the controller with zero
+        # margin for localisation drift — any drift > 0 led to contact.
+        # 0.18 m gives 8 cm of true free space beyond the chassis edge,
+        # which is enough to absorb the ~5 cm scan-matcher drift seen
+        # on featureless walls plus a 3 cm safety pad.
+        inflation_radius: 0.18
 
       always_send_full_costmap: true
 
@@ -317,13 +322,13 @@ global_costmap:
         # gradient = stronger "go around" bias.
         cost_scaling_factor: 6.0
         # 0.10 → 0.12 m for the planner. Global > local on purpose:
-        # planner must route safely (12 cm halo from any wall), the
-        # controller's local view is slightly tighter (10 cm) so it can
-        # still execute the safe route. The extra 2 cm here is the user-
-        # requested "never crash" buffer — at 12 cm the goal endpoint
-        # itself can't sit inside a wall halo even with a few cm of
-        # SLAM drift.
-        inflation_radius: 0.12
+        # 0.22 m: planner-side halo, 4 cm bigger than local (0.18). Keeps
+        # `global > local` so the planner stays farther from walls than
+        # the controller is allowed to wander to. 4 cm of extra slack
+        # absorbs the planner↔controller path-deviation introduced by
+        # the actual driven turning radius being tighter than the
+        # planner's minimum_turning_radius assumption.
+        inflation_radius: 0.22
 
       always_send_full_costmap: true
 
@@ -375,12 +380,16 @@ planner_server:
       # 2x2 m testbed reality: at R_min 1.00 m the turning *diameter* equals
       # the whole testbed width, so 180° goals had no room for a forward
       # arc — the planner just emitted a long single-segment reverse, and
-      # the chassis couldn't fit a 3-point maneuver in. Pulled R_min back
-      # to 0.85 m (user choice — middle ground) to let the planner emit
-      # true forward-reverse-forward sequences. Still above the math limit
-      # for our MG995 + Hiwonder linkage. Tune down further (0.80 → 0.75)
-      # in tests if the chassis tracks tighter arcs cleanly.
-      minimum_turning_radius: 0.85
+      # 0.50 m: matches the chassis's real turning capability with a
+      # 7 cm engineering margin above the geometric limit
+      # R = L / tan(δ_max) = 0.25 / tan(0.5236) ≈ 0.43 m. The previous
+      # 0.85 m was ~2× the real R_min, causing the planner to draw
+      # gentle arcs while the controller drove tighter actual curves —
+      # the chassis deviated from the planned line and ended up inside
+      # the inflation halo on every turn. With 0.50 m the planner and
+      # controller agree on geometry, eliminating the corner-cutting
+      # contact pattern.
+      minimum_turning_radius: 0.50
       # 1.2 → 1.5 on 2026-05-13: operator reported the planner was
       # reaching for reverse on simple goals that should be forward-only.
       # 1.5 is a moderate bump that still permits real 3-point parks
@@ -481,7 +490,7 @@ velocity_smoother:
     odom_topic: "odom"
     odom_duration: 0.1
     # Smoother deadband removed — let small velocities through. The
-    # bridge's own min_vx_creep (0.02 m/s) handles the final gate.
+    # bridge's own min_vx_creep (0.05 m/s) handles the final gate.
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
 
@@ -523,24 +532,30 @@ collision_monitor:
       # Chassis: 27 cm long × 20 cm wide, centered on base_link.
       # Front edge at x=+0.135, rear edge at x=-0.135, sides at y=±0.10.
       forward:
-        # 6 cm bumper (x: 0.135 → 0.195) — middle ground between the
-        # old too-generous 10 cm and the previous too-tight 4 cm. At
-        # the new 0.08 m/s cruise + 0.30 m/s² bridge decel the stop
-        # distance is ~1.1 cm; 6 cm leaves a comfortable margin.
+        # 8 cm bumper (x: 0.135 → 0.215) — deepened from 6 cm. Because
+        # the L298N has no active brake (l298n_stop_all() coasts), real
+        # stop distance is dominated by coast, not by the commanded
+        # decel. At 0.08 m/s the coast distance with gearbox friction
+        # is ~3 cm; allowing 2× margin for IPC + planner latency lands
+        # at 8 cm. This is the primary lever against straight-line wall
+        # hits — RPP's own use_collision_detection is off, so this
+        # polygon is the only forward safety stop.
         # `linear_min: 0.05` carves a creep window: when the chassis
         # is wall-adjacent and commanded vx < 5 cm/s, this polygon
         # doesn't fire — so paths can execute even from poses parked
         # next to walls. Above 5 cm/s the bumper applies normally.
-        points: "[[0.195, 0.11], [0.195, -0.11], [0.135, -0.11], [0.135, 0.11]]"
+        points: "[[0.215, 0.11], [0.215, -0.11], [0.135, -0.11], [0.135, 0.11]]"
         linear_min: 0.05
         linear_max: 1.0
         theta_min: -1.0
         theta_max: 1.0
       reverse:
-        # Symmetric 6 cm bumper behind the chassis (x: -0.135 → -0.195),
-        # with the matching -0.05 creep gate so reverse can also break
-        # out of wall-adjacent parking poses at sub-5 cm/s.
-        points: "[[-0.135, 0.11], [-0.135, -0.11], [-0.195, -0.11], [-0.195, 0.11]]"
+        # Symmetric 8 cm bumper behind the chassis (x: -0.135 → -0.215),
+        # deepened from 6 cm to match the forward bumper. Same coast-
+        # dominated stop-distance reasoning applies in reverse.
+        # The matching -0.05 creep gate still lets reverse break out
+        # of wall-adjacent parking poses at sub-5 cm/s.
+        points: "[[-0.135, 0.11], [-0.135, -0.11], [-0.215, -0.11], [-0.215, 0.11]]"
         linear_min: -1.0
         linear_max: -0.05
         theta_min: -1.0
