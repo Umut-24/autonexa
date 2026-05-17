@@ -318,6 +318,7 @@ Layers 5A and 5B share the 200 ms threshold but are independent — if USB CDC d
 | `/api/waypoints/<name>` | DELETE | Remove |
 | `/api/waypoints/<name>/navigate` | POST | Republish stored pose on `/goal_pose` |
 | `/api/nav2_speed` | GET/POST | `controller_server.FollowPath.max_vel_x` + `velocity_smoother.max_velocity[0]` in lockstep |
+| `/api/planner_mode` | GET/POST | `standard` (single SMAC goal) / `multipoint` (on ABORT, stage via an intermediate waypoint). Persisted in `~/.autonexa/planner_mode.txt` |
 | `/api/params` | GET/POST | Generic SetParameters / ListParameters / GetParameters; whitelist enforced |
 | `/api/health` | GET | Per-topic EWMA rate + age + ok flag |
 | `/ws/control` | WS | 50 Hz joystick frames |

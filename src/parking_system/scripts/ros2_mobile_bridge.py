@@ -94,6 +94,7 @@ AUTONEXA_DATA_DIR = os.path.expanduser('~/.autonexa')
 RUNTIME_OVERRIDES_PATH = os.path.join(AUTONEXA_DATA_DIR, 'runtime_overrides.yaml')
 WAYPOINTS_PATH = os.path.join(AUTONEXA_DATA_DIR, 'waypoints.json')
 MAPS_DIR = os.path.join(AUTONEXA_DATA_DIR, 'maps')
+PLANNER_MODE_PATH = os.path.join(AUTONEXA_DATA_DIR, 'planner_mode.txt')
 
 # Parameter-tuner whitelist — only these nodes can be reached from the app's
 # generic /api/params endpoint. Keeps the surface small and predictable.
@@ -154,12 +155,35 @@ class MobileBridgeNode(Node):
         self._plan_points = []       # Downsampled [[x, y], ...] in map frame
         self._plan_stamp = 0.0
 
-        # --- Inflation-escape coordination ---
-        # New goals cancel any in-flight inflation-restore thread so we never
-        # flip-flop the costmap inflation while the user is rapidly retrying.
-        self._inflation_escape_lock = threading.Lock()
-        self._inflation_escape_cancel = threading.Event()
-        self._inflation_escape_thread = None  # type: threading.Thread | None
+        # --- Near-wall safety state (continuous monitor) -----------------
+        # While a goal is active a background monitor watches the robot's
+        # distance to the nearest LiDAR obstacle. Near a wall it engages a
+        # full bypass (collision_monitor skipped + inflation relaxed) so
+        # escape and final-park paths are not blocked; clear of walls it
+        # restores collision_monitor + normal inflation. Hysteresis between
+        # the enter/exit thresholds keeps it from flapping.
+        self._near_wall_lock = threading.Lock()
+        self._near_wall_engaged = False      # full bypass currently engaged?
+        self._inflation_relaxed = False      # inflation at the escape value?
+        # Default fallbacks match the current nav2_navigation_params.yaml
+        # (global 0.22 / local 0.18); the live values are captured before
+        # each relax so the exact pre-relax halo is put back.
+        self._saved_inflation = {'global': 0.22, 'local': 0.18}
+        self._inflation_escape_radius = 0.015
+        self._near_wall_enter_m = 0.35       # engage when an obstacle is closer
+        self._near_wall_exit_m = 0.55        # release when all obstacles farther
+
+        # --- Planner mode + multi-point decompose-on-failure (item 2) ----
+        # 'standard'  — single SMAC goal; on ABORT, one same-goal auto-retry.
+        # 'multipoint'— on ABORT, stage the goal: drive to an intermediate
+        #               open-space waypoint, then re-issue the final goal.
+        self._planner_mode_lock = threading.Lock()
+        self._planner_mode = self._load_planner_mode()
+        self._mp_lock = threading.Lock()
+        self._mp_final_goal = None           # {'x','y','yaw'} the user's goal
+        self._mp_stage = 'idle'              # 'idle' | 'waypoint' | 'final'
+        self._mp_decompose_count = 0
+        self._mp_decompose_max = 2
 
         self._goal_lock = threading.Lock()
         self._current_goal = {       # Last goal sent (active until cancel)
@@ -378,6 +402,12 @@ class MobileBridgeNode(Node):
             self.get_logger().warning(f'cannot create {AUTONEXA_DATA_DIR}: {exc}')
         self._load_waypoints()
 
+        # Continuous near-wall safety monitor (items 3 + 4).
+        self._near_wall_thread = threading.Thread(
+            target=self._near_wall_monitor_loop, daemon=True,
+            name='near-wall-monitor')
+        self._near_wall_thread.start()
+
         self.get_logger().info('MobileBridgeNode started')
 
     # ---- Callbacks ----
@@ -509,23 +539,40 @@ class MobileBridgeNode(Node):
             self._nav_status = label
             self._nav_status_stamp = time.time()
             self._prev_nav_status_for_bypass = label
-        # Nav-bypass mirror: bypass collision_monitor while a Nav2 goal is
-        # actually executing, restore it the moment the goal terminates.
-        # Fire SetParameters in a background thread so this callback never
-        # blocks the ROS executor (the helper does a synchronous wait).
-        if label == 'EXECUTING' and prev != 'EXECUTING':
-            threading.Thread(target=self._set_nav_bypass, args=(True,),
-                             daemon=True).start()
-        elif prev == 'EXECUTING' and label in ('SUCCEEDED', 'CANCELED',
-                                               'ABORTED', 'UNKNOWN', 'IDLE'):
-            threading.Thread(target=self._set_nav_bypass, args=(False,),
-                             daemon=True).start()
-        # ABORTED soon after send usually means SMAC couldn't plan from
-        # a costly start pose (typical wall-parked case). Fire one auto-
-        # retry: clear costmaps, relax inflation, re-publish the *same*
-        # goal. Capped so a genuinely impossible goal doesn't loop.
+        # Nav-bypass is no longer flipped here. The old behaviour bypassed
+        # collision_monitor for the *entire* EXECUTING phase, which left the
+        # chassis with no obstacle braking during autonomous driving. The
+        # near-wall monitor (_near_wall_monitor_loop) now owns nav-bypass:
+        # collision_monitor stays authoritative in open space and is only
+        # bypassed when the robot is genuinely close to a wall.
+        # ABORTED soon after send usually means SMAC couldn't plan from a
+        # costly start pose (typical wall-parked case). In 'standard' mode
+        # fire one same-goal auto-retry; in 'multipoint' mode decompose:
+        # stage the goal via an intermediate open-space waypoint and then
+        # re-issue the final goal.
         if label == 'ABORTED':
-            self._maybe_auto_retry_goal()
+            if self.get_planner_mode() == 'multipoint':
+                self._maybe_decompose_goal()
+            else:
+                self._maybe_auto_retry_goal()
+
+        # Multi-point staging: an intermediate waypoint just SUCCEEDED ->
+        # resume the final goal. When the final goal itself succeeds the
+        # stage is 'final', so this does not re-fire.
+        if label == 'SUCCEEDED':
+            with self._mp_lock:
+                resume = (self._mp_stage == 'waypoint'
+                          and self._mp_final_goal is not None)
+                final = dict(self._mp_final_goal) if resume else None
+                if resume:
+                    self._mp_stage = 'final'
+                else:
+                    self._mp_stage = 'idle'
+                    self._mp_final_goal = None
+            if resume:
+                threading.Thread(target=self._mp_resume_final,
+                                 args=(final,), daemon=True,
+                                 name='multipoint-final').start()
 
         # Once a goal terminates, mark the cached goal inactive so the map
         # overlay clears even if the user didn't explicitly cancel.
@@ -534,6 +581,10 @@ class MobileBridgeNode(Node):
                 self._current_goal['active'] = False
             with self._plan_lock:
                 self._plan_points = []
+        if label == 'CANCELED':
+            with self._mp_lock:
+                self._mp_stage = 'idle'
+                self._mp_final_goal = None
 
     def _set_nav_bypass(self, active: bool) -> None:
         """Flip /nav2_pico_bridge:nav_bypass_active to the given value.
@@ -585,7 +636,7 @@ class MobileBridgeNode(Node):
                     f'auto-retry {attempt}/{self._retry_max}: re-escaping '
                     f'and re-publishing ({goal["x"]:.2f},{goal["y"]:.2f})')
                 try:
-                    self._escape_inflation_for_goal()
+                    self._relax_inflation()
                 except Exception as exc:
                     self.get_logger().warning(
                         f'auto-retry escape failed: {exc}')
@@ -1341,95 +1392,253 @@ class MobileBridgeNode(Node):
                     q.append((ny_, nx_))
         return dist
 
-    def _escape_inflation_for_goal(self) -> None:
-        """Pre-goal inflation relax so SMAC Hybrid-A* can plan from a
-        start pose currently inside wall inflation (the wall-parked case).
+    # --- Near-wall bypass monitor (items 3 + 4) ----------------------------
+    # Replaces the old _escape_inflation_for_goal one-shot relax + fixed-timer
+    # restorer. A background monitor continuously evaluates how close the robot
+    # is to a wall and engages/releases a full bypass accordingly.
 
-        Sequence:
-          1. Signal any in-flight restorer thread to exit, join it.
-          2. Capture current inflation_radius on both costmaps.
-          3. ClearEntireCostmap on both (force a fresh obstacle pass).
-          4. Temporarily set inflation_radius -> 0.015 m on both (a thin
-             1.5 cm halo — enough for SMAC's A* heuristic to keep guiding
-             expansion toward open space, but tight enough that the planner
-             can still start from inside the normal 5 cm inflation cell).
-             0.0 m turned out to *break* planning: without any gradient
-             A* loses its directional bias and the search space explodes,
-             especially with our lowered reverse/change penalties.
-          5. Restore inflation on first /plan arrival OR on the 6 s
-             deadline, whichever comes second after a 2 s minimum hold.
-             The minimum-hold gate stops the early-restore race that
-             previously re-inflated under the wheels mid-execution.
-        """
+    def _near_wall_distance(self):
+        """Distance (m) from base_link to the nearest LiDAR obstacle, or
+        None if there is no fresh scan/pose. Reuses the map-frame scan
+        points the bridge already caches for the app overlay."""
+        with self._pose_lock:
+            px = self._pose['x_m']
+            py = self._pose['y_m']
+            pose_stamp = self._pose['stamp']
+        with self._scan_lock:
+            pts = list(self._scan_points)
+            scan_stamp = self._scan_stamp
+        if not pts or pose_stamp <= 0.0 or (time.time() - scan_stamp) > 1.5:
+            return None
+        best = None
+        for x, y in pts:
+            d = hypot(x - px, y - py)
+            if best is None or d < best:
+                best = d
+        return best
+
+    def _relax_inflation(self) -> None:
+        """Clear both costmaps and drop inflation_radius to the escape value
+        so SMAC Hybrid-A* can plan from / through wall inflation. Idempotent —
+        captures the pre-relax inflation only on the first call so a later
+        _restore_inflation() puts back the exact operating halo."""
         global_key = '/global_costmap/global_costmap'
         local_key = '/local_costmap/local_costmap'
         ir_name = 'inflation_layer.inflation_radius'
-
-        # Cancel any restorer still running from a prior goal and wait for
-        # it to release the lock. Without this, a quick second goal can
-        # land while the old thread is still mid-flight; when the old
-        # thread eventually restores the saved inflation, it clobbers the
-        # relax that the new goal just applied — planner sees inflated
-        # walls again and the second goal fails.
-        with self._inflation_escape_lock:
-            prev = self._inflation_escape_thread
-        if prev is not None and prev.is_alive():
-            self._inflation_escape_cancel.set()
-            prev.join(timeout=1.0)
-        self._inflation_escape_cancel.clear()
-
+        with self._near_wall_lock:
+            if self._inflation_relaxed:
+                return
+            self._inflation_relaxed = True
+        # Capture the live inflation so it can be restored exactly. Ignore a
+        # reading that is already at (or below) the escape value — that means
+        # a stale relax; fall back to the configured operating default.
         saved_g = self.get_remote_params(global_key, [ir_name]).get(ir_name)
         saved_l = self.get_remote_params(local_key, [ir_name]).get(ir_name)
-        # Fall back to the YAML default if read failed.
-        if saved_g is None:
-            saved_g = 0.05
-        if saved_l is None:
-            saved_l = 0.05
-
+        if saved_g is None or float(saved_g) <= self._inflation_escape_radius:
+            saved_g = self._saved_inflation['global']
+        if saved_l is None or float(saved_l) <= self._inflation_escape_radius:
+            saved_l = self._saved_inflation['local']
+        with self._near_wall_lock:
+            self._saved_inflation = {'global': float(saved_g),
+                                     'local': float(saved_l)}
         self.clear_costmaps()
-        self.set_remote_params(global_key, {ir_name: 0.015})
-        self.set_remote_params(local_key, {ir_name: 0.015})
+        esc = self._inflation_escape_radius
+        self.set_remote_params(global_key, {ir_name: esc})
+        self.set_remote_params(local_key, {ir_name: esc})
         self.get_logger().info(
-            f'goal escape: inflation {saved_g:.3f}/{saved_l:.3f} -> 0.015 '
-            f'(global/local), will restore on first /plan + min 2 s, '
-            f'or hard deadline at 6 s')
+            f'near-wall: inflation relaxed {saved_g:.3f}/{saved_l:.3f} -> '
+            f'{esc:.3f} (global/local)')
 
-        relaxed_at = time.time()
-        cancel_event = self._inflation_escape_cancel
+    def _restore_inflation(self) -> None:
+        """Restore inflation_radius to the values captured before the last
+        relax. Idempotent."""
+        with self._near_wall_lock:
+            if not self._inflation_relaxed:
+                return
+            self._inflation_relaxed = False
+            saved = dict(self._saved_inflation)
+        global_key = '/global_costmap/global_costmap'
+        local_key = '/local_costmap/local_costmap'
+        ir_name = 'inflation_layer.inflation_radius'
+        self.set_remote_params(global_key, {ir_name: float(saved['global'])})
+        self.set_remote_params(local_key, {ir_name: float(saved['local'])})
+        self.get_logger().info(
+            f'near-wall: inflation restored {saved["global"]:.3f}/'
+            f'{saved["local"]:.3f} (global/local)')
 
-        def _restorer():
-            min_hold_until = relaxed_at + 2.0  # never restore before this
-            deadline = relaxed_at + 6.0
-            # Watch /plan_stamp; restore once a fresh plan has arrived AND
-            # the minimum-hold has elapsed (so the chassis has actually had
-            # 2 s to start moving away from the wall before inflation
-            # snaps back). Honour the cancel signal so a follow-up goal
-            # does not race with the restore we are about to publish.
-            while time.time() < deadline:
-                if cancel_event.is_set():
-                    self.get_logger().info(
-                        'goal escape: superseded by new goal, restorer exiting')
-                    return
-                if time.time() >= min_hold_until:
-                    with self._plan_lock:
-                        if self._plan_stamp >= relaxed_at and self._plan_points:
-                            break
-                time.sleep(0.1)
+    def _engage_near_wall_bypass(self, engage: bool) -> None:
+        """Engage/release the full near-wall bypass. Engaged = collision_monitor
+        skipped (nav_bypass_active) AND inflation relaxed — the same
+        no-safety posture as manual 'off' mode, deliberately chosen so escape
+        and final-park paths next to walls are never blocked. Released =
+        collision_monitor authoritative + normal inflation. Edge-triggered."""
+        with self._near_wall_lock:
+            if engage == self._near_wall_engaged:
+                return
+            self._near_wall_engaged = engage
+        if engage:
+            self.get_logger().warning(
+                'near-wall: BYPASS engaged (collision_monitor off, '
+                'inflation relaxed)')
+            self._relax_inflation()
+            self._set_nav_bypass(True)
+        else:
+            self.get_logger().warning(
+                'near-wall: bypass released (collision_monitor restored)')
+            self._set_nav_bypass(False)
+            self._restore_inflation()
+
+    def _near_wall_monitor_loop(self) -> None:
+        """Background daemon: while a Nav2 goal is active, engage the
+        near-wall bypass when the robot is close to an obstacle and release
+        it when clear. Covers every goal source (app /api/nav_goal and RViz
+        /goal_pose both set _current_goal['active']). Replaces the old
+        EXECUTING-phase unconditional bypass and the fixed-timer restorer."""
+        while True:
+            time.sleep(0.3)
             try:
-                self.set_remote_params(global_key, {ir_name: float(saved_g)})
-                self.set_remote_params(local_key, {ir_name: float(saved_l)})
-                self.get_logger().info(
-                    f'goal escape: inflation restored '
-                    f'({saved_g:.3f}/{saved_l:.3f})')
+                with self._goal_lock:
+                    goal_active = self._current_goal['active']
+                if not goal_active:
+                    # No goal in flight — return to the safe default state.
+                    with self._near_wall_lock:
+                        engaged = self._near_wall_engaged
+                    if engaged:
+                        self._engage_near_wall_bypass(False)
+                    continue
+                dist = self._near_wall_distance()
+                if dist is None:
+                    continue
+                with self._near_wall_lock:
+                    engaged = self._near_wall_engaged
+                if not engaged and dist < self._near_wall_enter_m:
+                    # Robot is near a wall (start wall-parked, mid-trip stall,
+                    # or final park approach) — drop to no-safety so the
+                    # planner can route through the inflation halo and the
+                    # car can reach the exact goal point.
+                    self._engage_near_wall_bypass(True)
+                elif engaged and dist > self._near_wall_exit_m:
+                    self._engage_near_wall_bypass(False)
             except Exception as exc:
-                self.get_logger().warning(
-                    f'inflation restore failed: {exc}')
+                self.get_logger().warning(f'near-wall monitor error: {exc}')
 
-        t = threading.Thread(target=_restorer, daemon=True,
-                             name='inflation-restore')
-        with self._inflation_escape_lock:
-            self._inflation_escape_thread = t
-        t.start()
+    # --- Planner mode + multi-point decompose-on-failure (item 2) ----------
+
+    def _load_planner_mode(self) -> str:
+        """Read the persisted planner mode; default 'standard'."""
+        try:
+            with open(PLANNER_MODE_PATH, 'r', encoding='utf-8') as fh:
+                mode = fh.read().strip()
+            if mode in ('standard', 'multipoint'):
+                return mode
+        except OSError:
+            pass
+        return 'standard'
+
+    def _save_planner_mode(self, mode: str) -> None:
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+            with open(PLANNER_MODE_PATH, 'w', encoding='utf-8') as fh:
+                fh.write(mode)
+        except OSError as exc:
+            self.get_logger().warning(f'cannot persist planner mode: {exc}')
+
+    def get_planner_mode(self) -> str:
+        with self._planner_mode_lock:
+            return self._planner_mode
+
+    def set_planner_mode(self, mode: str) -> bool:
+        if mode not in ('standard', 'multipoint'):
+            return False
+        with self._planner_mode_lock:
+            self._planner_mode = mode
+        self._save_planner_mode(mode)
+        self.get_logger().info(f'planner mode -> {mode}')
+        return True
+
+    def _publish_raw_goal(self, x: float, y: float, yaw: float) -> None:
+        """Build + publish a /goal_pose and refresh the cached goal overlay."""
+        from math import cos as mcos, sin as msin
+        msg = PoseStamped()
+        msg.header.frame_id = 'map'
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.pose.position.x = float(x)
+        msg.pose.position.y = float(y)
+        msg.pose.orientation.z = msin(float(yaw) / 2.0)
+        msg.pose.orientation.w = mcos(float(yaw) / 2.0)
+        with self._goal_lock:
+            self._current_goal = {
+                'x': float(x), 'y': float(y), 'yaw': float(yaw),
+                'active': True, 'stamp': time.time(),
+            }
+        self._goal_pub.publish(msg)
+
+    def _maybe_decompose_goal(self) -> None:
+        """Multi-point decompose-on-failure: a goal just ABORTed. If a final
+        goal is tracked and budget remains, drive to an intermediate open-
+        space waypoint (the midpoint robot<->goal, nudged clear of walls)
+        and let the SUCCEEDED handler resume the final goal afterwards.
+        Runs the publish on a background thread so the status callback never
+        blocks."""
+        with self._mp_lock:
+            final = self._mp_final_goal
+            stage = self._mp_stage
+            count = self._mp_decompose_count
+            if final is None:
+                return
+            if stage == 'waypoint':
+                # The intermediate leg itself failed — the waypoint is
+                # unreachable; stop rather than chase it.
+                self.get_logger().warning(
+                    'multipoint: intermediate waypoint unreachable, giving up')
+                self._mp_stage = 'idle'
+                self._mp_final_goal = None
+                return
+            if count >= self._mp_decompose_max:
+                self.get_logger().warning(
+                    f'multipoint: decompose cap reached '
+                    f'({count}/{self._mp_decompose_max}), giving up')
+                self._mp_stage = 'idle'
+                self._mp_final_goal = None
+                return
+            self._mp_decompose_count = count + 1
+            self._mp_stage = 'waypoint'
+            attempt = self._mp_decompose_count
+            final = dict(final)
+
+        def _decompose():
+            try:
+                from math import atan2
+                with self._pose_lock:
+                    rx = self._pose['x_m']
+                    ry = self._pose['y_m']
+                mx = (rx + final['x']) / 2.0
+                my = (ry + final['y']) / 2.0
+                myaw = atan2(final['y'] - ry, final['x'] - rx)
+                wx, wy, wyaw = self._nudge_goal_from_walls(mx, my, myaw)
+                self.get_logger().info(
+                    f'multipoint {attempt}/{self._mp_decompose_max}: staging '
+                    f'via waypoint ({wx:.2f},{wy:.2f}) toward final '
+                    f'({final["x"]:.2f},{final["y"]:.2f})')
+                self.clear_costmaps()
+                time.sleep(0.3)
+                self._publish_raw_goal(wx, wy, wyaw)
+            except Exception as exc:
+                self.get_logger().warning(f'multipoint decompose failed: {exc}')
+                with self._mp_lock:
+                    self._mp_stage = 'idle'
+                    self._mp_final_goal = None
+
+        threading.Thread(target=_decompose, daemon=True,
+                         name='multipoint-decompose').start()
+
+    def _mp_resume_final(self, final: dict) -> None:
+        """Re-issue the final goal after an intermediate waypoint succeeded."""
+        self.get_logger().info(
+            f'multipoint: waypoint reached, resuming final goal '
+            f'({final["x"]:.2f},{final["y"]:.2f})')
+        time.sleep(0.3)
+        self._publish_raw_goal(final['x'], final['y'], final['yaw'])
 
     # --- Pose reset / relocalize (Part G1) ---
 
@@ -1817,13 +2026,24 @@ class MobileBridgeNode(Node):
             }
             self._retry_count = 0
 
-        # Wall-parked escape: clear costmaps + temporarily relax inflation so
-        # SMAC Hybrid-A* can plan from a start pose inside wall inflation.
-        # Inflation snaps back as soon as a plan arrives (<=4 s deadline).
+        # Multi-point planner: track the user's real goal so a later ABORT
+        # can decompose it via an intermediate open-space waypoint.
+        with self._mp_lock:
+            self._mp_final_goal = {'x': float(nx), 'y': float(ny),
+                                   'yaw': float(nyaw)}
+            self._mp_stage = 'final'
+            self._mp_decompose_count = 0
+
+        # Wall-parked escape: if the robot is starting next to a wall, engage
+        # the near-wall bypass now so SMAC's first plan already sees the
+        # relaxed inflation. The near-wall monitor maintains it for the rest
+        # of the trip and releases it once the chassis is clear of walls.
         try:
-            self._escape_inflation_for_goal()
+            d0 = self._near_wall_distance()
+            if d0 is not None and d0 < self._near_wall_enter_m:
+                self._engage_near_wall_bypass(True)
         except Exception as exc:
-            self.get_logger().warning(f'goal escape sequence failed: {exc}')
+            self.get_logger().warning(f'near-wall pre-goal check failed: {exc}')
 
         self._goal_pub.publish(msg)
         self.get_logger().info(
@@ -2316,6 +2536,28 @@ def api_lock_map():
 
 
 # ---------------------------------------------------------------------------
+#  Part E0 — Path planner mode (standard / multipoint)
+# ---------------------------------------------------------------------------
+
+@flask_app.route('/api/planner_mode', methods=['GET', 'POST'])
+def api_planner_mode():
+    """GET/POST the path-planner mode.
+
+    'standard'   — single SMAC Hybrid-A* goal; on ABORT, one same-goal retry.
+    'multipoint' — on ABORT, decompose: drive to an intermediate open-space
+                   waypoint, then re-issue the final goal. Persists across
+                   relaunches in ~/.autonexa/planner_mode.txt."""
+    if request.method == 'GET':
+        return jsonify({'planner_mode': bridge_node.get_planner_mode()})
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get('planner_mode', '')).strip()
+    if not bridge_node.set_planner_mode(mode):
+        return jsonify(
+            {'error': "planner_mode must be 'standard' or 'multipoint'"}), 400
+    return jsonify({'planner_mode': mode})
+
+
+# ---------------------------------------------------------------------------
 #  Part E — Nav2 max linear speed
 # ---------------------------------------------------------------------------
 
@@ -2608,6 +2850,7 @@ def index():
 <li>POST /api/save_spot · POST /api/park_at · POST /api/summon</li>
 <li>POST /api/lock_map — save current SLAM map under ~/.autonexa/maps</li>
 <li>GET/POST /api/nav2_speed — live Nav2 target-speed slider</li>
+<li>GET/POST /api/planner_mode — standard | multipoint path planner</li>
 <li>POST /api/relocalize — set robot pose (x,y,yaw)</li>
 <li>GET/POST /api/params?node=&lt;name&gt; — live param tuner (whitelist only)</li>
 <li><a href="/api/health">/api/health</a> — topic rates / staleness</li>

@@ -25,6 +25,10 @@ class _SettingsTabState extends State<SettingsTab> {
   // another connection round-trip on tab open if the user never touches it.
   double? _nav2MaxSpeed;
   bool _nav2SpeedFetching = false;
+  // Local cache for the path-planner mode ('standard' | 'multipoint'),
+  // fetched lazily on first render of the Path Planner card.
+  String? _plannerMode;
+  bool _plannerModeFetching = false;
 
   @override
   void initState() {
@@ -68,6 +72,19 @@ class _SettingsTabState extends State<SettingsTab> {
     setState(() {
       _nav2MaxSpeed = v ?? 0.30;
       _nav2SpeedFetching = false;
+    });
+  }
+
+  Future<void> _ensurePlannerMode() async {
+    if (_plannerMode != null || _plannerModeFetching) return;
+    final conn = context.read<ConnectionService>();
+    if (!conn.isConnected) return;
+    _plannerModeFetching = true;
+    final m = await conn.getPlannerMode();
+    if (!mounted) return;
+    setState(() {
+      _plannerMode = m ?? 'standard';
+      _plannerModeFetching = false;
     });
   }
 
@@ -592,6 +609,60 @@ class _SettingsTabState extends State<SettingsTab> {
                         Text(
                           'Applies to RPP FollowPath.desired_linear_vel and velocity_smoother in lockstep. '
                           'Persists across relaunches.',
+                          style: TextStyle(
+                              fontSize: 11, color: colors.textTertiary),
+                        ),
+                      ],
+                    );
+                  }),
+                ],
+              ),
+            ),
+
+            // ── Path Planner ──
+            GlassCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('PATH PLANNER',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
+                  const SizedBox(height: 14),
+                  Builder(builder: (_) {
+                    if (!conn.isConnected) {
+                      return Text('Connect to choose the path planner.',
+                          style: TextStyle(
+                              fontSize: 12, color: colors.textTertiary));
+                    }
+                    _ensurePlannerMode();
+                    final multipoint =
+                        (_plannerMode ?? 'standard') == 'multipoint';
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _switchRow('Multi-point planner', multipoint, colors,
+                            (v) async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          final mode = v ? 'multipoint' : 'standard';
+                          setState(() => _plannerMode = mode);
+                          final ok = await conn.setPlannerMode(mode);
+                          if (!ok && mounted) {
+                            setState(() =>
+                                _plannerMode = v ? 'standard' : 'multipoint');
+                            messenger.showSnackBar(const SnackBar(
+                                content:
+                                    Text('Failed to update planner mode')));
+                          }
+                        }),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Standard: a single Nav2 goal. Multi-point: if a '
+                          'goal fails to plan, the robot is routed via an '
+                          'intermediate waypoint and then on to the final '
+                          'goal. Persists across relaunches.',
                           style: TextStyle(
                               fontSize: 11, color: colors.textTertiary),
                         ),

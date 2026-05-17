@@ -1040,6 +1040,37 @@ class ConnectionService extends ChangeNotifier {
     } catch (_) { return null; }
   }
 
+  // --- Path planner mode (standard / multipoint) ---
+
+  Future<String?> getPlannerMode() async {
+    if (_baseUrl == null) return null;
+    try {
+      final resp = await http.get(Uri.parse('$_baseUrl/api/planner_mode'))
+          .timeout(const Duration(seconds: 2));
+      if (resp.statusCode != 200) return null;
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      final m = json['planner_mode'];
+      return m is String ? m : null;
+    } catch (_) { return null; }
+  }
+
+  Future<bool> setPlannerMode(String mode) async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/planner_mode'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'planner_mode': mode}),
+      ).timeout(const Duration(seconds: 3));
+      final ok = resp.statusCode == 200;
+      if (ok) logger.info('Planner mode -> $mode', LogCategory.navigation);
+      return ok;
+    } catch (e) {
+      logger.error('planner_mode: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
   // --- NamedWaypoints (Part D) ---
 
   Future<List<NamedWaypoint>> listNamedWaypoints() async {
