@@ -2881,10 +2881,8 @@ def main():
     pusher_thread = threading.Thread(target=_telemetry_pusher_loop, daemon=True)
     pusher_thread.start()
 
-    # 1 Hz desktop capture for the Desktop tab. Cheap on the Pi and stays
-    # silent if gnome-screenshot is missing (capture_desktop_once warns once).
-    desktop_thread = threading.Thread(target=_desktop_capture_loop, daemon=True)
-    desktop_thread.start()
+    # Desktop capture loop disabled: 1 Hz gnome-screenshot calls were crashing
+    # GNOME Shell. Desktop tab is non-essential. Re-enable behind a flag if needed.
 
     bridge_node.get_logger().info('Starting Flask server on http://0.0.0.0:5000')
     flask_app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
