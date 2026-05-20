@@ -82,7 +82,8 @@ Bench-test (CLI) command surface and `TEL` telemetry format are documented in [d
 ```
 src/parking_system/              # Main ROS2 package (ament_cmake + Python)
   launch/
-    nav2_live_slam.launch.py     # Primary: SLAM + Nav2 + LiDAR + Pico bridge + RViz
+    nav2_live_slam.launch.py     # Mapping mode: SLAM + Nav2 + LiDAR + Pico bridge + RViz
+    nav2_amcl_navigation.launch.py # Localization mode: pre-saved map + AMCL + Nav2 (no live SLAM)
     rpi5_pico_bridge.launch.py   # Pico bridge only (micro-ROS agent + cmd_vel bridge)
     ekf_fusion.launch.py         # Optional EKF skeleton (publish_tf: false, no IMU yet)
     lidar_visualization.launch.py
@@ -141,7 +142,7 @@ cd pico_firmware && mkdir -p build && cd build && cmake .. && make
 ### Launch commands
 
 ```bash
-# Full system (SLAM + Nav2 + LiDAR + Pico bridge + RViz):
+# Mapping mode — full system (SLAM + Nav2 + LiDAR + Pico bridge + RViz):
 ros2 launch parking_system nav2_live_slam.launch.py
 
 # Full system with by-id serial paths (deployment):
@@ -150,6 +151,17 @@ ros2 launch parking_system nav2_live_slam.launch.py \
   enforce_single_publisher:=true \
   serial_port:=/dev/serial/by-id/<lidar-id> \
   pico_serial_port:=/dev/serial/by-id/<pico-id>
+
+# Localization mode — once a map is saved, re-launch against the pre-saved map.
+# Map a static testbed once with live-SLAM above, then save via the mobile bridge:
+curl -X POST http://localhost:5000/api/lock_map
+# (writes ~/.autonexa/maps/garage_<YYYYMMDD_HHMMSS>.{pgm,yaml})
+ros2 launch parking_system nav2_amcl_navigation.launch.py \
+  map_yaml:=$HOME/.autonexa/maps/garage_<ts>.yaml \
+  initial_pose_x:=0.0 initial_pose_y:=0.0 initial_pose_yaw:=0.0
+# AMCL anchors to the saved prior so pose doesn't drift away from the map
+# the way live-SLAM does in a multi-minute session. Use /api/relocalize
+# (or RViz 2D Pose Estimate) to nudge the pose if it loses lock.
 
 # Bridge only (manual drive / unit tests):
 ros2 launch parking_system rpi5_pico_bridge.launch.py
@@ -213,9 +225,11 @@ SLAMTEC C1 → /scan (raw)
 
 ```
 map → odom → base_link → laser_link
-      (laser_scan_matcher)  (static TF)
-(SLAM Toolbox)
+      (laser_scan_matcher)  (robot_state_publisher)
+(SLAM Toolbox in mapping mode, or AMCL in localization mode)
 ```
+
+`map→odom` ownership swaps depending on launch file: SLAM Toolbox publishes it when running `nav2_live_slam.launch.py`; `nav2_amcl` publishes it when running `nav2_amcl_navigation.launch.py` against a pre-saved map. `laser_scan_matcher` always owns `odom→base_link`.
 
 EKF (when IMU lands) will take over `odom→base_link`; `ekf_2d_no_imu.yaml` is pre-configured with `publish_tf: false` to avoid fighting the scan matcher until the swap is made.
 

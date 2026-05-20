@@ -10,18 +10,25 @@ amcl:
     base_frame_id: "base_link"
     odom_frame_id: "odom"
     global_frame_id: "map"
-    scan_topic: "/scan"
-    
+    # Subscribe to the cleaned scan so AMCL benefits from the same 4-stage
+    # filter chain that feeds laser_scan_matcher and the costmap obstacle
+    # layers. Raw /scan still exists for diagnostics.
+    scan_topic: "/scan_filtered"
+
     # UPDATE RATE - VERY FREQUENT FOR SMALL SPACE
     update_min_d: 0.02       # Update every 2cm
     update_min_a: 0.05       # Update every ~3 degrees
-    
+
     # RESAMPLING - FAST CONVERGENCE
     resample_interval: 1     # Resample every update
-    
-    # PARTICLE FILTER - DENSE FOR GLOBAL LOCALIZATION
-    min_particles: 5000      # Dense cloud
-    max_particles: 10000     # Wide coverage
+
+    # PARTICLE FILTER - sized for a known-prior 2 m testbed.
+    # Was 5000/10000 (global-localization sizing) which ran the Pi 5 hot
+    # without accuracy gain once set_initial_pose seeds the cloud at the
+    # operator's chosen pose. nav2 defaults (500/2000) converge in <1 s
+    # here and leave CPU headroom for the rest of the Nav2 stack.
+    min_particles: 500
+    max_particles: 2000
     pf_err: 0.01             # Lower error threshold
     pf_z: 0.99               # High confidence required
     
@@ -31,13 +38,15 @@ amcl:
     
     # LASER MODEL - AGGRESSIVE MATCHING (TRUST LASER!)
     laser_model_type: "likelihood_field_prob"
-    laser_max_range: 8.0
+    # Cap at the /scan_filtered upper threshold (4 m) and SLAM Toolbox
+    # max_laser_range — beyond this the C1 returns are too noisy to trust.
+    laser_max_range: 4.0
     laser_min_range: 0.05
     max_beams: 180           # Use ALL beams for shape matching
-    
+
     # LIKELIHOOD FIELD - WIDE ATTRACTION
     sigma_hit: 0.1           # 10cm acceptance radius
-    laser_likelihood_max_dist: 8.0   # Search entire room
+    laser_likelihood_max_dist: 4.0   # Match laser_max_range
     
     # LASER MODEL WEIGHTS - TRUST GEOMETRY
     z_hit: 0.9               # Trust laser hits!
@@ -60,8 +69,13 @@ amcl:
     tf_broadcast: true
     transform_tolerance: 1.0
     
-    # INITIAL POSE - DISABLED FOR GLOBAL LOCALIZATION
-    set_initial_pose: false
+    # INITIAL POSE - seeded by nav2_amcl_navigation.launch.py via RewrittenYaml.
+    # The launch file rewrites initial_pose.{x,y,yaw} from operator-supplied
+    # CLI args so AMCL converges from a known seed instead of doing global
+    # localization (which is wasteful when the operator knows the start pose
+    # on a small testbed). Set false + use /initialpose if you want global
+    # localization or external seeding via the mobile app /api/relocalize.
+    set_initial_pose: true
     always_reset_initial_pose: false
     first_map_only: true
 
