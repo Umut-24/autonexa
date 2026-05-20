@@ -69,6 +69,9 @@ laser_scan_matcher:
     # ============================================
     # DEBUGGING
     # ============================================
-    do_compute_covariance: true  # Compute covariance for odometry
-    debug: false  # Disable debug output for performance
+    # NOTE: this build declares do_compute_covariance as an INTEGER (0/1), not
+    # a bool — passing `true` throws InvalidParameterTypeException and SIGABRTs
+    # the node at startup (fixed 2026-05-20). Use 1/0.
+    do_compute_covariance: 1  # 1 = compute covariance for odometry
+    debug: 0  # 0 = disable debug output for performance
 

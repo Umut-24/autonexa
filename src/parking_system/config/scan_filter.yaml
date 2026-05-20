@@ -15,15 +15,10 @@ scan_to_scan_filter_chain:
         max_angle: 170.0
         neighbors: 20
         window: 0
-    filter3:
-      name: median
-      type: laser_filters/MedianFilter
-      params:
-        number_of_observations: 5
-        max_queue_size: 10
-    filter4:
-      name: outlier
-      type: laser_filters/LaserScanOutlierFilter
-      params:
-        outlier_threshold: 0.5
-        neighbor_window: 5
+    # NOTE: the previous filter3 (laser_filters/MedianFilter) and filter4
+    # (laser_filters/LaserScanOutlierFilter) were REMOVED on 2026-05-20 —
+    # neither plugin type exists in the installed Jazzy laser_filters, so the
+    # whole scan_to_scan_filter_chain aborted (SIGABRT) at startup, which
+    # collapsed /scan_filtered -> laser_scan_matcher -> AMCL -> map->odom.
+    # range + shadow both load and are sufficient. If outlier rejection is
+    # wanted later, use a VALID Jazzy type, e.g. laser_filters/LaserScanSpeckleFilter.

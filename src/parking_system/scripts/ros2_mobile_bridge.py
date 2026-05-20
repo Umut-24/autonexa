@@ -2508,6 +2508,7 @@ def api_summon():
 
 
 @flask_app.route('/api/lock_map', methods=['POST'])
+@flask_app.route('/api/save_map', methods=['POST'])
 def api_lock_map():
     """Persist the current SLAM map with nav2_map_server's map_saver_cli."""
     os.makedirs(MAPS_DIR, exist_ok=True)

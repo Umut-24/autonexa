@@ -56,7 +56,6 @@ def generate_launch_description():
             robot_description_content = _f.read()
 
     nav2_params_file = PathJoinSubstitution([pkg_dir, 'config', 'nav2_navigation_params.yaml'])
-    scan_filter_params_file = PathJoinSubstitution([pkg_dir, 'config', 'scan_filter.yaml'])
     laser_scan_matcher_params_file = PathJoinSubstitution([pkg_dir, 'config', 'laser_scan_matcher.yaml'])
     rviz_config = PathJoinSubstitution([pkg_dir, 'rviz', 'navigation.rviz'])
 
@@ -156,11 +155,11 @@ def generate_launch_description():
         root_key='',
         param_rewrites={
             'global_costmap.global_costmap.ros__parameters.keepout_filter.enabled': 'false',
-            'global_costmap.global_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan_filtered',
-            'local_costmap.local_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan_filtered',
-            'collision_monitor.ros__parameters.scan.topic': '/scan_filtered',
+            'global_costmap.global_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan',
+            'local_costmap.local_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan',
+            'collision_monitor.ros__parameters.scan.topic': '/scan',
             'bt_navigator.ros__parameters.default_nav_to_pose_bt_xml': _bt_xml_path,
-            'amcl.ros__parameters.scan_topic': '/scan_filtered',
+            'amcl.ros__parameters.scan_topic': '/scan',
             'amcl.ros__parameters.set_initial_pose': 'true',
             'amcl.ros__parameters.initial_pose.x': LaunchConfiguration('initial_pose_x'),
             'amcl.ros__parameters.initial_pose.y': LaunchConfiguration('initial_pose_y'),
@@ -193,18 +192,8 @@ def generate_launch_description():
         }.items()
     )
 
-    scan_filter = Node(
-        package='laser_filters',
-        executable='scan_to_scan_filter_chain',
-        name='scan_to_scan_filter_chain',
-        output='screen',
-        parameters=[scan_filter_params_file],
-        remappings=[
-            ('scan', '/scan'),
-            ('scan_filtered', '/scan_filtered'),
-        ],
-    )
-
+    # Scan filtering removed 2026-05-20: SLAM/AMCL run on the driver's raw
+    # /scan (the map was built on raw /scan too, so this stays consistent).
     # laser_scan_matcher still owns odom -> base_link. AMCL only publishes
     # map -> odom, so the two TF producers don't fight.
     laser_scan_matcher = Node(
@@ -216,7 +205,7 @@ def generate_launch_description():
             laser_scan_matcher_params_file,
             {'use_sim_time': False},
         ],
-        remappings=[('scan', '/scan_filtered')]
+        remappings=[('scan', '/scan')]
     )
 
     map_server = Node(
@@ -487,7 +476,6 @@ def generate_launch_description():
         use_mobile_bridge_arg,
         robot_state_publisher,
         lidar,
-        scan_filter,
         laser_scan_matcher,
         map_server,
         amcl,
