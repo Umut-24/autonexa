@@ -302,7 +302,10 @@ local_costmap:
         # 0.18 m gives 8 cm of true free space beyond the chassis edge,
         # which is enough to absorb the ~5 cm scan-matcher drift seen
         # on featureless walls plus a 3 cm safety pad.
-        inflation_radius: 0.18
+        # 0.18 -> 0.14 (2026-05-20): tighter halo so the planner can route
+        # through the small room and closer to walls. Still > inscribed
+        # (~0.13 for the 0.27x0.20 footprint + 0.03 pad).
+        inflation_radius: 0.14
 
       always_send_full_costmap: true
 
@@ -364,7 +367,9 @@ global_costmap:
         # absorbs the planner↔controller path-deviation introduced by
         # the actual driven turning radius being tighter than the
         # planner's minimum_turning_radius assumption.
-        inflation_radius: 0.22
+        # 0.22 -> 0.16 (2026-05-20): tighter halo to draw paths near walls in
+        # the small room; still > local (0.14) and > inscribed (~0.13).
+        inflation_radius: 0.16
 
       # New-obstacle layer for the planner. Placed AFTER inflation on
       # purpose: walls keep their fat halo (from static + inflation), and

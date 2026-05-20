@@ -158,6 +158,14 @@ def generate_launch_description():
             'global_costmap.global_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan',
             'local_costmap.local_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan',
             'collision_monitor.ros__parameters.scan.topic': '/scan',
+            # "Unsafe navigation" (operator choice): disable collision_monitor's
+            # stop/approach polygons so AUTO nav drives to the goal without
+            # halting near walls (behaves like the manual OFF/bypass chain).
+            # collision_monitor still republishes cmd_vel_smoothed -> cmd_vel_safe
+            # unchanged. Bridge clamps + 200 ms watchdog + E-STOP remain. Flip
+            # these back to 'true' to restore wall-stop safety.
+            'collision_monitor.ros__parameters.DirectionalStop.enabled': 'false',
+            'collision_monitor.ros__parameters.FootprintApproach.enabled': 'false',
             'bt_navigator.ros__parameters.default_nav_to_pose_bt_xml': _bt_xml_path,
             'amcl.ros__parameters.scan_topic': '/scan',
             'amcl.ros__parameters.set_initial_pose': 'true',

@@ -59,14 +59,17 @@
               <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
               <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
             </Sequence>
-            <!-- 2 s (was 5 s) — long enough for a moving obstacle to
-                 clear, short enough that the operator doesn't perceive
-                 a frozen chassis. -->
+            <!-- 0.05 m back-off, reordered ahead of Wait (2026-05-20):
+                 the primary "no path near wall" failure is start-in-collision,
+                 which a costmap clear can't fix (the wall is static_layer);
+                 only a small retreat gains clearance. Operator asked for
+                 ~3 cm — set to 5 cm so the open-loop chassis actually
+                 overcomes deadband/coast. Reverse is unguarded now that
+                 collision_monitor is disabled in the AMCL launch; this
+                 assumes a typical park has space behind the chassis. -->
+            <BackUp backup_dist="0.05" backup_speed="0.10" error_code_id="{backup_error_code}"/>
+            <!-- 2 s — last-resort wait so a moving obstacle can clear. -->
             <Wait wait_duration="2.0"/>
-            <!-- 0.15 m / 0.10 m/s (was 0.20 / 0.15). Smaller, slower
-                 retreat — in a 2x2 m testbed the 0.20 m back-up often
-                 carried us into the OPPOSITE wall. -->
-            <BackUp backup_dist="0.15" backup_speed="0.10" error_code_id="{backup_error_code}"/>
           </RoundRobin>
         </ReactiveFallback>
       </Sequence>
