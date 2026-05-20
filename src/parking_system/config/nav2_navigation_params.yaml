@@ -263,14 +263,13 @@ local_costmap:
       width: 2
       height: 2
       resolution: 0.02  # 2cm resolution for small spaces
-      # Rectangular Ackermann footprint matches the URDF collision box
-      # (0.30 × 0.20 m centered on base_link). Using a circle (robot_radius)
-      # underestimated the chassis length and overestimated the width,
-      # which mismatched the global costmap (12 cm inflation) and made
-      # tight perpendicular goals look reachable to the planner but
-      # blocked to the controller.
-      footprint: "[[0.135, 0.10], [0.135, -0.10], [-0.135, -0.10], [-0.135, 0.10]]"
-      footprint_padding: 0.04
+      # Rectangular Ackermann footprint (0.30 × 0.22 m centered on base_link).
+      # NOTE: these two lines are COSMETIC — the launch files override both
+      # footprint and footprint_padding from build_urdf.render()
+      # (~/.autonexa/robot_dimensions.yaml or DEFAULT_DIMENSIONS). Edit the
+      # size THERE; kept in sync here only so a raw YAML read isn't misleading.
+      footprint: "[[0.15, 0.11], [0.15, -0.11], [-0.15, -0.11], [-0.15, 0.11]]"
+      footprint_padding: 0.05
       plugins: ["obstacle_layer", "inflation_layer"]
       
       obstacle_layer:
@@ -318,15 +317,15 @@ global_costmap:
       global_frame: map
       robot_base_frame: base_link
       use_sim_time: false
-      # Same rectangular footprint as local_costmap. Keeps planner +
-      # controller in lockstep about what fits.
-      footprint: "[[0.135, 0.10], [0.135, -0.10], [-0.135, -0.10], [-0.135, 0.10]]"
-      # 0.04 m (was 0.01): virtual margin around new dynamic obstacles.
-      # Walls already get a 22 cm inflation halo; new obstacles from the
-      # obstacle_layer below DON'T (the layer runs AFTER inflation on
-      # purpose). Bumping footprint_padding gives the planner a built-in
-      # ~4 cm buffer per new obstacle without adding a second inflation.
-      footprint_padding: 0.04
+      # Same rectangular footprint as local_costmap. COSMETIC — overridden
+      # by the launch from build_urdf.render() (see local_costmap note).
+      footprint: "[[0.15, 0.11], [0.15, -0.11], [-0.15, -0.11], [-0.15, 0.11]]"
+      # 0.05 m: virtual margin around new dynamic obstacles AND walls.
+      # New obstacles from the obstacle_layer below get NO inflation halo
+      # (the layer runs AFTER inflation on purpose), so this padding is the
+      # planner's built-in buffer per new obstacle. COSMETIC here — the
+      # launch overrides it from build_urdf footprint_padding (also 0.05).
+      footprint_padding: 0.05
       resolution: 0.05  # Coarser global grid for faster Hybrid-A* planning
       track_unknown_space: true
       # static_layer + keepout_filter own the long-term map; inflation runs
@@ -595,41 +594,42 @@ collision_monitor:
       enabled: true
       holonomic: false
       velocity_polygons: ["forward", "reverse", "stopped"]
-      # Chassis: 27 cm long × 20 cm wide, centered on base_link.
-      # Front edge at x=+0.135, rear edge at x=-0.135, sides at y=±0.10.
+      # Chassis: 30 cm long × 22 cm wide, centered on base_link.
+      # Front edge at x=+0.15, rear edge at x=-0.15, sides at y=±0.11.
       forward:
-        # 8 cm bumper (x: 0.135 → 0.215) — deepened from 6 cm. Because
-        # the L298N has no active brake (l298n_stop_all() coasts), real
-        # stop distance is dominated by coast, not by the commanded
-        # decel. At 0.08 m/s the coast distance with gearbox friction
-        # is ~3 cm; allowing 2× margin for IPC + planner latency lands
-        # at 8 cm. This is the primary lever against straight-line wall
-        # hits — RPP's own use_collision_detection is off, so this
-        # polygon is the only forward safety stop.
+        # 12 cm bumper (x: 0.15 → 0.27) — deepened from 8 cm and re-anchored
+        # to the new 0.30 m chassis front (was x=0.135). Because the L298N
+        # has no active brake (l298n_stop_all() coasts), real stop distance
+        # is dominated by coast, not by commanded decel; the deeper bumper
+        # buys coast + IPC/planner latency margin. RPP's own
+        # use_collision_detection is off, so this polygon is the only
+        # forward safety stop. Width ±0.12 (slightly past the 0.11
+        # half-width) catches oblique walls.
         # `linear_min: 0.05` carves a creep window: when the chassis
         # is wall-adjacent and commanded vx < 5 cm/s, this polygon
         # doesn't fire — so paths can execute even from poses parked
         # next to walls. Above 5 cm/s the bumper applies normally.
-        points: "[[0.215, 0.11], [0.215, -0.11], [0.135, -0.11], [0.135, 0.11]]"
+        points: "[[0.27, 0.12], [0.27, -0.12], [0.15, -0.12], [0.15, 0.12]]"
         linear_min: 0.05
         linear_max: 1.0
         theta_min: -1.0
         theta_max: 1.0
       reverse:
-        # Symmetric 8 cm bumper behind the chassis (x: -0.135 → -0.215),
-        # deepened from 6 cm to match the forward bumper. Same coast-
-        # dominated stop-distance reasoning applies in reverse.
+        # Symmetric 12 cm bumper behind the chassis (x: -0.15 → -0.27),
+        # re-anchored to the new 0.30 m chassis rear and deepened to match
+        # the forward bumper (3-point parks reverse toward walls too). Same
+        # coast-dominated stop-distance reasoning applies in reverse.
         # The matching -0.05 creep gate still lets reverse break out
         # of wall-adjacent parking poses at sub-5 cm/s.
-        points: "[[-0.135, 0.11], [-0.135, -0.11], [-0.215, -0.11], [-0.215, 0.11]]"
+        points: "[[-0.15, 0.12], [-0.15, -0.12], [-0.27, -0.12], [-0.27, 0.12]]"
         linear_min: -1.0
         linear_max: -0.05
         theta_min: -1.0
         theta_max: 1.0
       stopped:
-        # Exact chassis footprint — only fires if we somehow ended up
-        # *inside* an obstacle while stationary (sanity check).
-        points: "[[0.135, 0.10], [0.135, -0.10], [-0.135, -0.10], [-0.135, 0.10]]"
+        # Exact chassis footprint (0.30 × 0.22) — only fires if we somehow
+        # ended up *inside* an obstacle while stationary (sanity check).
+        points: "[[0.15, 0.11], [0.15, -0.11], [-0.15, -0.11], [-0.15, 0.11]]"
         linear_min: -0.01
         linear_max: 0.01
         theta_min: -1.0
