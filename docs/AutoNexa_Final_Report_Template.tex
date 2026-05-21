@@ -1,0 +1,215 @@
+\documentclass[12pt,a4paper]{report}
+
+% ---------- Packages ----------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{setspace}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{appendix}
+\usepackage{listings}
+\usepackage{titlesec}
+
+% ---------- Hyperref ----------
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue,
+  pdftitle={AutoNexa Final Design Report},
+  pdfauthor={AutoNexa Team}
+}
+
+% ---------- Layout ----------
+\onehalfspacing
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\textbf{AutoNexa}}
+\fancyhead[R]{Final Design Report}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\titleformat{\chapter}[display]{\bfseries\Large}{\chaptertitlename\ \thechapter}{10pt}{\Huge}
+\titleformat{\section}{\bfseries\large}{\thesection}{1em}{}
+
+% ---------- Metadata Macros ----------
+\newcommand{\projectname}{AutoNexa}
+\newcommand{\reporttitle}{Final Design Report}
+\newcommand{\teamname}{Team Name}
+\newcommand{\department}{Department / Program}
+\newcommand{\university}{University Name}
+\newcommand{\supervisor}{Supervisor Name}
+\newcommand{\reportdate}{\today}
+
+\begin{document}
+
+% ==================== FRONT PAGE ====================
+\begin{titlepage}
+  \centering
+  \vspace*{1.5cm}
+
+  {\Huge \textbf{\projectname} \par}
+  \vspace{0.5cm}
+  {\LARGE \reporttitle \par}
+  \vspace{1.2cm}
+
+  \noindent\rule{\textwidth}{1.2pt}\\[0.4cm]
+  {\large \textbf{Basic Information and Organization}}\\[0.4cm]
+  \noindent\rule{\textwidth}{1.2pt}
+
+  \vfill
+
+  \begin{flushleft}
+    \textbf{Team / Company Organization:} \\[0.2cm]
+    \begin{tabular}{ll}
+      Team Name: & \teamname \\
+      Department: & \department \\
+      Institution: & \university \\
+      Supervisor: & \supervisor \\
+      Report Date: & \reportdate \\
+      Version: & v1.0
+    \end{tabular}
+  \end{flushleft}
+
+  \vspace{0.8cm}
+  \begin{flushleft}
+    \textbf{Team Members and Roles:}\\
+    \begin{tabular}{p{4cm}p{10cm}}
+      Member 1 & Role / Responsibility \\
+      Member 2 & Role / Responsibility \\
+      Member 3 & Role / Responsibility \\
+      Member 4 & Role / Responsibility \\
+    \end{tabular}
+  \end{flushleft}
+
+  \vfill
+\end{titlepage}
+
+% ==================== FRONT MATTER ====================
+\pagenumbering{roman}
+\tableofcontents
+\clearpage
+\listoffigures
+\clearpage
+\listoftables
+\clearpage
+\pagenumbering{arabic}
+
+% ==================== EXECUTIVE SUMMARY ====================
+\chapter*{Executive Summary}
+\addcontentsline{toc}{chapter}{Executive Summary}
+Write a concise 1--2 page summary of the overall design effort, key achievements, final performance, major risks, and final conclusions.
+
+% ==================== MAIN REPORT ====================
+\chapter{Design Description}
+
+\section{Top-Down System Description}
+Provide a system-level explanation from requirements to subsystem decomposition, interfaces, and integration strategy.
+
+\subsection{Requirements and Design Drivers}
+List functional/non-functional requirements, constraints, and assumptions.
+
+\subsection{System Architecture}
+Insert architecture diagram and describe each subsystem and data/control flow.
+
+\subsection{Subsystem Descriptions}
+For each subsystem, include purpose, inputs/outputs, algorithms, hardware/software components, and verification approach.
+
+\subsection{Interface Definitions}
+Document electrical, mechanical, and software interfaces (signals, protocols, message types, API contracts).
+
+\section{Engineering Details and Compliance}
+
+\subsection{Related Calculations}
+Include key sizing, control, timing, power, thermal, accuracy, and tolerance calculations.
+
+\subsection{Circuit Diagrams and Flow Charts}
+Insert and explain relevant schematics and process/control flow charts.
+
+\subsection{Relevant Standards}
+State applicable standards/regulations and how your design satisfies them.
+
+\subsection{Design Decisions and Trade-offs}
+Explain alternatives considered and rationale for final choices.
+
+\chapter{Results and Analyses of Performance Tests}
+
+\section{Test Plan Overview}
+Define objectives, metrics, test environment, instrumentation, acceptance criteria.
+
+\section{Test Results}
+Present quantitative results in tables/figures with pass/fail against criteria.
+
+\section{Analysis}
+Interpret the results, identify limitations, root causes of failures, and improvements.
+
+\section{Validation of Final Requirements}
+Map final measured outcomes to original requirements.
+
+\chapter{Budget}
+
+\section{Actual Expenditures (Cost of Final Product)}
+Provide itemized bill of materials and procurement costs.
+
+\begin{longtable}{p{6cm}p{2cm}p{2cm}p{3cm}}
+\toprule
+Item & Qty & Unit Cost & Subtotal \\
+\midrule
+Component A & 1 & \$0.00 & \$0.00 \\
+Component B & 1 & \$0.00 & \$0.00 \\
+\midrule
+\textbf{Final Product Cost} & & & \textbf{\$0.00} \\
+\bottomrule
+\end{longtable}
+
+\section{Total Cost (Including Engineering and Infrastructure)}
+Include labor/engineering effort, tooling, facilities, software licenses, and overhead.
+
+\begin{longtable}{p{6cm}p{2cm}p{5cm}}
+\toprule
+Cost Category & Amount & Notes \\
+\midrule
+Engineering Labor & \$0.00 & Person-hours $\times$ hourly rate \\
+Infrastructure / Lab & \$0.00 & Test setup, utilities, equipment access \\
+Software / Services & \$0.00 & Licenses, cloud, subscriptions \\
+Other Overhead & \$0.00 & Miscellaneous \\
+\midrule
+\textbf{Total Expenditures} & \textbf{\$0.00} & \textbf{Product + Engineering + Infrastructure} \\
+\bottomrule
+\end{longtable}
+
+\chapter{Discussions}
+
+\section{Safety Issues and Precautions}
+Write one paragraph discussing hazards, risk mitigation, fail-safe features, and safety validation evidence.
+
+\section{Widespread Application and Societal Impact}
+Write one paragraph on scalability, potential broad applications, and positive/negative societal effects.
+
+\section{Environmental Effects}
+Write one paragraph on environmental footprint, lifecycle impact, and expected effects at widespread deployment.
+
+% ==================== APPENDICES ====================
+\begin{appendices}
+
+\chapter{List of Deliverables}
+Provide a checklist/table of all final deliverables (hardware, software, documentation, datasets, demos, source code links).
+
+\chapter{User Manual (Mandatory)}
+Include installation, setup, operation, troubleshooting, maintenance, and safety instructions.
+
+\chapter{Supplementary Technical Material}
+Place extended calculations, additional circuit diagrams, flow charts, logs, raw test tables, and extra figures.
+
+\end{appendices}
+
+\end{document}
