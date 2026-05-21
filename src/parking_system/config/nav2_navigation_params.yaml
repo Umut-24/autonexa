@@ -643,11 +643,14 @@ collision_monitor:
       type: "polygon"
       action_type: "approach"
       footprint_topic: "/local_costmap/published_footprint"
-      # 1.0 s slow-down window — generous enough to begin decelerating
-      # well before DirectionalStop's hard stop fires. At the new 0.10 m/s
-      # cruise that's ~10 cm forward projection, plenty given the 1.0 m/s²
-      # decel cap.
-      time_before_collision: 1.0
+      # 0.6 s slow-down window (was 1.0 s). The longer window projected the
+      # footprint along a *curved* twist far enough that, on a bend in a
+      # narrow lane, the rotating footprint corners swept into a side wall —
+      # scaling speed toward zero on walls the chassis would simply pass.
+      # 0.6 s still begins the gentle slow-down well before DirectionalStop's
+      # 12 cm hard stop fires; at the 0.08 m/s cruise the stopping distance
+      # under the 1.0 m/s² decel cap is sub-cm, so margin is ample.
+      time_before_collision: 0.6
       simulation_time_step: 0.1
       # Require 8 laser points inside the projected footprint before
       # acting. At 2 cm costmap resolution with the LiDAR's angular
