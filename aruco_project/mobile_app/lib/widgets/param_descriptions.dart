@@ -173,10 +173,153 @@ const paramMetadata = <String, Map<String, ParamMeta>>{
   },
 
   // ════════════════════════════════════════════════════════════════════
-  // /controller_server — Regulated Pure Pursuit (RPP) + Goal Checker
+  // /controller_server — MPPI (varsayılan) veya RPP (fallback) + Goal Checker
+  // MPPI params yalnızca controller:=mppi ile, RPP params yalnızca
+  // controller:=rpp ile görünür (tuner canlı ListParameters'a göre filtreler).
   // ════════════════════════════════════════════════════════════════════
   '/controller_server': {
-    // ── Hız ────────────────────────────────────────────────────────
+    // ── MPPI — Hız / Limit ──────────────────────────────────────────
+    'FollowPath.vx_max': ParamMeta(
+      label: 'MPPI max ileri hız',
+      description:
+          'MPPI\'nin örneklediği trajektörilerin üst hız sınırı. velocity_smoother '
+          'max_velocity[0] ile aynı tutulmalı. Settings → Nav2 Max Speed slider\'ı MPPI '
+          'modunda bu parametreyi değiştirir.',
+      effect: '↑ hızlı sürüş, ↓ precision',
+      unit: 'm/s',
+      category: 'MPPI Hız/Limit',
+      typicalMin: 0.05, typicalMax: 0.40,
+    ),
+    'FollowPath.vx_min': ParamMeta(
+      label: 'MPPI max geri hız',
+      description:
+          'Negatif değer geri gitmeyi açar (K-dönüş / geri park). 0 yaparsan MPPI '
+          'yalnızca ileri sürer.',
+      effect: '↓ (daha negatif) daha hızlı geri manevra',
+      unit: 'm/s',
+      category: 'MPPI Hız/Limit',
+      typicalMin: -0.30, typicalMax: 0.0,
+    ),
+    'FollowPath.wz_max': ParamMeta(
+      label: 'MPPI max dönüş hızı',
+      description:
+          'Örneklenen maksimum açısal hız. velocity_smoother wz cap (0.5) ile uyumlu tut.',
+      unit: 'rad/s',
+      category: 'MPPI Hız/Limit',
+      typicalMin: 0.2, typicalMax: 1.0,
+    ),
+    'FollowPath.AckermannConstraints.min_turning_r': ParamMeta(
+      label: 'Min dönüş yarıçapı',
+      description:
+          'MPPI\'nin uyacağı minimum dönüş yarıçapı. Planner minimum_turning_radius '
+          '(0.50) ile aynı tutulmalı — yoksa controller planner\'ın çizemeyeceği yolları dener.',
+      unit: 'm',
+      category: 'MPPI Hız/Limit',
+      typicalMin: 0.40, typicalMax: 0.80,
+    ),
+    // ── MPPI — Optimizer ────────────────────────────────────────────
+    'FollowPath.batch_size': ParamMeta(
+      label: 'Trajektöri sayısı',
+      description:
+          'Her tick\'te örneklenen trajektöri sayısı. ASIL Pi 5 CPU kolu — /cmd_vel Hz '
+          'düşerse ilk bunu düşür (1000 → 800 → 600).',
+      effect: '↑ daha iyi çözüm + çok CPU, ↓ hafif ama kaba',
+      category: 'MPPI Optimizer',
+      typicalMin: 400, typicalMax: 2000,
+    ),
+    'FollowPath.time_steps': ParamMeta(
+      label: 'Horizon adım sayısı',
+      description:
+          'Trajektöri horizon uzunluğu (adım). horizon_s = time_steps × model_dt. '
+          'Fazla → daha smooth ama daha çok CPU. Pi 5 back-off: 40 → 30 → 24.',
+      effect: '↑ smooth/uzak görüş + CPU, ↓ hafif ama kısa görüş',
+      category: 'MPPI Optimizer',
+      typicalMin: 20, typicalMax: 60,
+    ),
+    'FollowPath.model_dt': ParamMeta(
+      label: 'Model zaman adımı',
+      description:
+          'Her örnekleme adımının süresi. 1/controller_frequency\'ye eşit olmalı (10 Hz → 0.1).',
+      unit: 's',
+      category: 'MPPI Optimizer',
+      typicalMin: 0.05, typicalMax: 0.2,
+    ),
+    'FollowPath.temperature': ParamMeta(
+      label: 'Softmax sıcaklığı',
+      description:
+          'Trajektöri ağırlıklandırmasının seçiciliği. Düşük → daha açgözlü (en iyi '
+          'trajektöriye yapışır), yüksek → daha yumuşak ortalama.',
+      category: 'MPPI Optimizer',
+      typicalMin: 0.1, typicalMax: 0.5,
+    ),
+    'FollowPath.vx_std': ParamMeta(
+      label: 'Hız örnekleme std',
+      description:
+          'Örneklenen lineer hız gürültüsünün std-sapması. Yüksek → daha keşifçi '
+          'trajektöriler ama daha çok CPU.',
+      effect: '↑ daha çeşitli trajektöri + CPU, ↓ daha dar arama',
+      unit: 'm/s',
+      category: 'MPPI Optimizer',
+      typicalMin: 0.05, typicalMax: 0.3,
+    ),
+    'FollowPath.wz_std': ParamMeta(
+      label: 'Dönüş örnekleme std',
+      description:
+          'Örneklenen açısal hız gürültüsünün std-sapması. Yüksek → daha agresif dönüş '
+          'arama ama daha çok CPU.',
+      unit: 'rad/s',
+      category: 'MPPI Optimizer',
+      typicalMin: 0.1, typicalMax: 0.6,
+    ),
+    // ── MPPI — Critic ağırlıkları ───────────────────────────────────
+    'FollowPath.CostCritic.cost_weight': ParamMeta(
+      label: 'Engel kaçınma ağırlığı',
+      description:
+          'CostCritic = engel/duvar kaçınma. collision_monitor kapalı olduğundan ASIL '
+          'engel güvenliği bu. ↑ duvarlardan daha çok kaçınır.',
+      effect: '↑ daha geniş duvar payı, ↓ duvarlara daha yakın geçer',
+      category: 'MPPI Critic',
+      typicalMin: 1.0, typicalMax: 8.0,
+    ),
+    'FollowPath.PathAlignCritic.cost_weight': ParamMeta(
+      label: 'Path\'e hizalanma ağırlığı',
+      description:
+          'Trajektörinin planlanan path\'e yanal hizalanmasını ödüllendirir. ↑ path\'i '
+          'sıkı takip (lane merkezi), ↓ daha serbest sapma.',
+      category: 'MPPI Critic',
+      typicalMin: 2.0, typicalMax: 20.0,
+    ),
+    'FollowPath.PathFollowCritic.cost_weight': ParamMeta(
+      label: 'Path ilerleme ağırlığı',
+      description:
+          'Path boyunca ileri ilerlemeyi ödüllendirir. Düşükse robot yerinde oyalanabilir.',
+      category: 'MPPI Critic',
+      typicalMin: 2.0, typicalMax: 10.0,
+    ),
+    'FollowPath.GoalCritic.cost_weight': ParamMeta(
+      label: 'Hedefe ulaşma ağırlığı',
+      description: 'Hedef xy konumuna yakınsamayı ödüllendirir (yaklaşma bölgesinde).',
+      category: 'MPPI Critic',
+      typicalMin: 2.0, typicalMax: 10.0,
+    ),
+    'FollowPath.PreferForwardCritic.cost_weight': ParamMeta(
+      label: 'İleri tercih ağırlığı',
+      description:
+          'İleri sürüşü tercih ettirir; gereksiz geri manevraları azaltır (vx_min<0 ile '
+          'gerçek geri park hâlâ mümkün).',
+      category: 'MPPI Critic',
+      typicalMin: 1.0, typicalMax: 10.0,
+    ),
+    'FollowPath.PathAngleCritic.cost_weight': ParamMeta(
+      label: 'Yön (heading) ağırlığı',
+      description:
+          'Trajektöri yönünün path yönüyle uyumunu ödüllendirir. mode:2 ileri+geri '
+          'yönleri birlikte değerlendirir (reverse cusp\'lar engellenmez).',
+      category: 'MPPI Critic',
+      typicalMin: 1.0, typicalMax: 6.0,
+    ),
+
+    // ── RPP (fallback) — Hız ────────────────────────────────────────
     'FollowPath.desired_linear_vel': ParamMeta(
       label: 'İstenen cruise hızı',
       description:

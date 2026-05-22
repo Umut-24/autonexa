@@ -607,7 +607,8 @@ class _SettingsTabState extends State<SettingsTab> {
                           ),
                         ),
                         Text(
-                          'Applies to RPP FollowPath.desired_linear_vel and velocity_smoother in lockstep. '
+                          'Applies to the active controller speed cap (MPPI FollowPath.vx_max or '
+                          'RPP FollowPath.desired_linear_vel) and velocity_smoother in lockstep. '
                           'Persists across relaunches.',
                           style: TextStyle(
                               fontSize: 11, color: colors.textTertiary),
