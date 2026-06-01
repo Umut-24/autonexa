@@ -11,9 +11,10 @@
  * Phase 2: micro-ROS executor replaces serial CLI (compile with -DUSE_MICRO_ROS)
  *
  * Hardware migrated from Hiwonder I2C smart driver to L298N on 2026-05-06
- * after the Hiwonder board's MCU burned. Without on-board encoders, ENC_READ
- * and the odometry fields in TEL/STATUS report zero. Encoders to be added
- * back as external quadrature inputs later.
+ * after the Hiwonder board's MCU burned. External quadrature encoders are
+ * now wired (GP10/11 left, GP12/13 right), so ENC_READ and the odometry
+ * fields in TEL/STATUS carry real data, and motor_control_apply() uses the
+ * measured wheel motion for its encoder-aware kick-start.
  */
 
 #include <stdio.h>
@@ -167,9 +168,10 @@ static void process_serial_command(const char *cmd)
         }
     }
 
-    /* === ENCODER (no encoders connected on L298N path) === */
+    /* === ENCODER (external quadrature on GP10/11 + GP12/13) === */
     else if (strcmp(cmd, "ENC_READ") == 0) {
-        printf("ENC L=0 R=0 (no encoders on L298N)\n");
+        printf("ENC L=%ld R=%ld\n",
+               (long)encoder_get_left(), (long)encoder_get_right());
     }
 
     /* === RAW PWM INJECTION (open-loop, bypasses motor_control) ===
@@ -255,7 +257,7 @@ static void process_serial_command(const char *cmd)
         printf("  SPEED_R <-30..30>    - Right motor speed\n");
         printf("  STEER <rad>          - Steering angle\n");
         printf("  VEL <vx> <wz>        - Ackermann velocity cmd (m/s, rad/s)\n");
-        printf("  ENC_READ             - (no-op: no encoders connected)\n");
+        printf("  ENC_READ             - Read quadrature encoder counts (L/R)\n");
         printf("  RAW_PWM <m1..m4>     - Open-loop PWM duty %% (m1=L, m2=R, m3/m4 ignored)\n");
         printf("  RAW_PID/I2C_*        - Not supported on L298N\n");
         printf("  ENABLE               - Enable motors\n");
@@ -417,7 +419,10 @@ int main(void)
         /* 3) Safety check */
         safety_update();
 
-        /* 4) Apply motor commands */
+        /* 4) Feed measured wheel motion to the encoder-aware kick-start,
+         *    then apply motor commands. The feedback call must precede
+         *    apply() so the kick logic sees this tick's rolling state. */
+        motor_control_update_feedback(d_l, d_r);
         motor_control_apply();
 
 #ifdef USE_MICRO_ROS

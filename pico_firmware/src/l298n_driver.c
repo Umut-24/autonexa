@@ -120,16 +120,13 @@ bool l298n_set_speed(uint8_t channel, int8_t speed)
     if (channel < 1 || channel > 2) return false;
     int idx = channel - 1;
     int8_t s = clamp_speed(speed);
-    /* Map [-MOTOR_SPEED_MAX, +MOTOR_SPEED_MAX] → [-100, +100] %. */
+    /* Honest linear map [-MOTOR_SPEED_MAX, +MOTOR_SPEED_MAX] → [-100, +100]%.
+     * The static-friction kick-start (and the rolling sustain floor) now
+     * live in motor_control_apply(), which is encoder-aware and drives the
+     * board via l298n_set_raw_pwm(). The old permanent deadband floor that
+     * lived here is removed — it made the drive bang-bang and defeated
+     * Nav2's slow-down/creep commands. */
     int duty = ((int)s * 100) / MOTOR_SPEED_MAX;
-    /* Static-friction kick-start: snap any non-zero duty up to the
-     * deadband floor so motors actually rotate. Does not affect duty=0
-     * (motors coast / stop normally). RAW_PWM path bypasses this. */
-    if (duty > 0 && duty < MOTOR_DEADBAND_PCT) {
-        duty = MOTOR_DEADBAND_PCT;
-    } else if (duty < 0 && duty > -MOTOR_DEADBAND_PCT) {
-        duty = -MOTOR_DEADBAND_PCT;
-    }
     apply_duty(idx, duty);
     return true;
 }

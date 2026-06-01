@@ -21,8 +21,9 @@ The Flutter app is now a full operator console (the user typically has no monito
 - **Generic param tuner** — Diagnostics tab → "Open param tuner". Whitelisted nodes only (`/nav2_pico_bridge`, `/controller_server`, `/planner_server`, `/velocity_smoother`, `/global_costmap/global_costmap`, `/local_costmap/local_costmap`). Numeric edits persist to `runtime_overrides.yaml` under the node's section.
 
 Persistent operator data lives in `~/.autonexa/` outside the ROS workspace:
-- `runtime_overrides.yaml` — per-node parameter overrides replayed on bridge startup (loaded via `add_on_set_parameters_callback` so the validation path runs).
+- `runtime_overrides.yaml` — **calibration-only replay** on bridge startup. Only physical chassis calibration (`vx_polarity`, `servo_polarity`, `reverse_steer_polarity`, `servo_center_us`/`servo_us_min`/`servo_us_max`) is persisted + re-applied. Bridge *tunables* (speed/accel caps, `min_vx_creep`, `max_steer_rate`, manual window) are **PC-config-authoritative**: the app can change them live for the session, but they are not written to disk and reset to the launch/PC values on the next relaunch. This stops a stale phone-saved value from silently overriding the PC config (the "car randomly drives reverse / wrong speed after relaunch" foot-gun). `POST /api/reset_overrides` wipes the file.
 - `waypoints.json` — manual park/summon/home spots with map fingerprint binding.
+- `planner_mode.txt`, `relocalize_auto.json`, `use_ekf.txt` — persisted launch/runtime mode flags (planner mode; periodic AMCL re-settle; encoder→EKF odom fusion).
 
 ## Tech Stack
 
@@ -182,6 +183,7 @@ ros2 launch parking_system ekf_fusion.launch.py
 | `bridge_lock_file` | `/tmp/cmd_vel_to_pico_bridge.lock` | fcntl lock for the bridge |
 | `use_rviz` | `true` |  |
 | `bridge_cmd_vel_topic` | `/cmd_vel_safe` | Velocity topic consumed by the bridge |
+| `use_ekf` | from `~/.autonexa/use_ekf.txt` (else `false`) | Fuse `/pico/odom` (wheel) + scan-match odom via a `robot_localization` EKF that owns `odom→base_link` TF. When false (default), `laser_scan_matcher` owns the TF as before. Toggle via app `/api/ekf_mode` + relaunch. Same arg on `nav2_amcl_navigation`. |
 
 Note: the launch files still expose a `use_micropython_bridge` argument that's now dead code (the MicroPython bridge script was removed). Leave it at its default `false`.
 
@@ -231,7 +233,7 @@ map → odom → base_link → laser_link
 
 `map→odom` ownership swaps depending on launch file: SLAM Toolbox publishes it when running `nav2_live_slam.launch.py`; `nav2_amcl` publishes it when running `nav2_amcl_navigation.launch.py` against a pre-saved map. `laser_scan_matcher` always owns `odom→base_link`.
 
-EKF (when IMU lands) will take over `odom→base_link`; `ekf_2d_no_imu.yaml` is pre-configured with `publish_tf: false` to avoid fighting the scan matcher until the swap is made.
+EKF can take over `odom→base_link` **now** (no IMU required) when launched with `use_ekf:=true`: it fuses `/pico/odom` (wheel velocity) + `/odom_icp` (ICP pose, the scan matcher in EKF mode publishes here instead of owning the TF) and publishes the fused `odom→base_link`. Default `use_ekf:=false` keeps the scan matcher as the TF owner. `ekf_2d_no_imu.yaml` still ships `publish_tf: false` so it's safe to load standalone; the launch overrides it to `true` in EKF mode. An IMU can later be added as a third source.
 
 ## Pico ROS Topics
 
@@ -292,12 +294,14 @@ Controller is Regulated Pure Pursuit (RPP) with SMAC Hybrid-A* planner (REEDS_SH
 | `max_wz_radps` | 0.8 | Yaw cap |
 | `max_ax_mps2` / `max_aw_radps2` | 0.8 / 1.2 | Per-cycle accel caps |
 | `max_steer_rate_radps` | 3.0 | Servo slew limit (rad/s in steering-angle space) |
-| `min_vx_creep` | 0.02 | Sub-deadband vx → SPEED 0 (lowered to let slow curve speeds through) |
+| `min_vx_creep` | 0.03 | Sub-creep vx → SPEED 0 (lowered 0.05→0.03 after the firmware kick-start lets the motors sustain slow motion) |
 | `vx_polarity` | +1 | Forward/back inversion (calibration wizard flips this) |
 | `servo_polarity` | -1 | Steering inversion (chassis-specific) |
 | `servo_center_us` / `servo_us_min` / `servo_us_max` | 1650 / 1100 / 1900 | Calibrated servo bounds |
 
-Runtime overrides are loaded from `~/.autonexa/runtime_overrides.yaml` (under key `nav2_pico_bridge`) at startup and re-applied via `set_parameters` so the validation callback runs. The mobile bridge writes that file when the user toggles polarity / changes a tunable from the app.
+Runtime overrides are loaded from `~/.autonexa/runtime_overrides.yaml` (under key `nav2_pico_bridge`) at startup and re-applied via `set_parameters` so the validation callback runs — but **only the calibration subset** (`RUNTIME_CALIBRATION`: polarities + servo bounds). Tunables (`RUNTIME_TUNABLE`: speed/accel caps, `min_vx_creep`, `max_steer_rate`, manual window) are logged-and-ignored at startup so the PC config stays authoritative; the mobile bridge no longer persists them for this node.
+
+**Firmware speed mapping (kick-start, not a deadband floor):** the Pico no longer snaps every command up to a permanent 60% PWM floor. `motor_control_apply()` is encoder-aware — it pulses `MOTOR_KICK_PCT` for `MOTOR_KICK_MS` to break static friction from rest, then honors the proportional duty (floored to `MOTOR_MIN_RUN_PCT` while rolling). This is what lets Nav2's slow-down/approach/creep commands actually reach the motors (the fix for "Nav2 commands a slow-down but the chassis keeps going and hits the wall"). See `pico_firmware/include/config.h`.
 
 ## Safety Layer Stack (outermost → innermost)
 
@@ -325,6 +329,7 @@ Layers 5A and 5B share the 200 ms threshold but are independent — if USB CDC d
 | `/api/mode` | GET/POST | AUTO / MANUAL / ESTOP |
 | `/api/safety_mode` | GET/POST | soft (default) / off — picks `/cmd_vel` vs `/cmd_vel_manual` for joystick output |
 | `/api/calibrate_direction` | GET/POST | `vx_polarity` / `servo_polarity` ±1 → SetParameters + persist |
+| `/api/reset_overrides` | POST | Wipe `runtime_overrides.yaml` so the PC config wins (relaunch to apply) |
 | `/api/clear_costmaps` | POST | `nav2_msgs/ClearEntireCostmap` on global + local |
 | `/api/restart_mapping` | POST | slam_toolbox lifecycle deactivate→cleanup→configure→activate |
 | `/api/relocalize` | POST | Publish `PoseWithCovarianceStamped` on `/initialpose` |
@@ -333,6 +338,8 @@ Layers 5A and 5B share the 200 ms threshold but are independent — if USB CDC d
 | `/api/waypoints/<name>/navigate` | POST | Republish stored pose on `/goal_pose` |
 | `/api/nav2_speed` | GET/POST | `controller_server.FollowPath.max_vel_x` + `velocity_smoother.max_velocity[0]` in lockstep |
 | `/api/planner_mode` | GET/POST | `standard` (single SMAC goal) / `multipoint` (on ABORT, stage via an intermediate waypoint). Persisted in `~/.autonexa/planner_mode.txt` |
+| `/api/relocalize_auto` | GET/POST | Periodic AMCL `request_nomotion_update` to re-settle the filter (localization mode only). `{enabled, interval_s}` persisted in `relocalize_auto.json`; default off |
+| `/api/ekf_mode` | GET/POST | Toggle encoder→EKF odom fusion (`use_ekf` launch flag in `use_ekf.txt`); takes effect on next relaunch |
 | `/api/params` | GET/POST | Generic SetParameters / ListParameters / GetParameters; whitelist enforced |
 | `/api/health` | GET | Per-topic EWMA rate + age + ok flag |
 | `/ws/control` | WS | 50 Hz joystick frames |
@@ -356,7 +363,7 @@ If Stage 3 fails, Stage 7 cannot work. Stage 3 commands must be published at `--
 
 ## Known Open Items
 
-- **Pico odom not fused into TF** — published at 20 Hz but only scan matcher owns `odom→base_link`. Fusion waits on IMU.
+- **Pico odom fusion is now opt-in** — `/pico/odom` (working encoders) can be fused with the scan matcher via the EKF by launching with `use_ekf:=true` (app: `/api/ekf_mode` + relaunch). Default off (scan matcher owns `odom→base_link`). Experimental — verify on hardware before relying on it.
 - **No IMU connected** — EKF skeleton staged with `publish_tf: false`.
 - **Control-source arbitration** — AUTO/MANUAL/ESTOP state machine plus a SOFT/OFF safety mode now live in `ros2_mobile_bridge.py`. Joystick is mode-gated (only published in MANUAL); safety_mode picks `/cmd_vel` (full chain) vs `/cmd_vel_manual` (bypass). Single-publisher guard remains as a backstop.
 - **LiDAR stale-process lock** — killing `sllidar_node` uncleanly can hold `/dev/ttyUSB0`; next launch hits `SL_RESULT_OPERATION_TIMEOUT`. Fix: `sudo fuser -k /dev/ttyUSB0`. Prefer `/dev/serial/by-id/` paths.

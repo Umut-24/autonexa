@@ -58,30 +58,46 @@ except ImportError:
 # user's last-known-good calibration survives a relaunch.
 RUNTIME_OVERRIDES_PATH = os.path.expanduser('~/.autonexa/runtime_overrides.yaml')
 
-# Parameters the bridge will accept overrides for. Anything outside this list
-# is ignored when reading the YAML — keeps a stale or hand-edited file from
-# poking at parameters that aren't safe to change at runtime (e.g. serial port).
-RUNTIME_OVERRIDABLE = (
+# Calibration is physical to THIS chassis: which way is forward, which way
+# the steering turns, and the servo's mechanical bounds. These are worth
+# remembering across relaunches, so the mobile app persists them and the
+# bridge replays them on startup (see _apply_runtime_overrides).
+RUNTIME_CALIBRATION = (
     'vx_polarity',
     'servo_polarity',
     'reverse_steer_polarity',
+    'servo_center_us',
+    'servo_us_min',
+    'servo_us_max',
+)
+
+# Tunables (speed/accel caps, creep gate, steer slew, manual window) are
+# NOT replayed on startup. The PC config (launch args + nav2 params) is the
+# single source of truth for these, so a stale phone-saved value can't
+# silently override it on the next launch — that was the cause of the
+# "car randomly drives reverse / uses a different speed after relaunch"
+# behaviour. They remain live-settable for the running session via
+# SetParameters (the app's sliders still work); they just reset to the PC
+# values on the next relaunch.
+RUNTIME_TUNABLE = (
     'max_vx_mps',
     'max_wz_radps',
     'max_ax_mps2',
     'max_aw_radps2',
     'max_steer_rate_radps',
     'min_vx_creep',
-    'servo_center_us',
-    'servo_us_min',
-    'servo_us_max',
     'manual_priority_window_s',
-    # nav_bypass_active is intentionally NOT in this tuple. It's a
-    # transient runtime mode, not a configuration choice: the mobile
-    # bridge sets it true while a Nav2 goal is executing and false
-    # again when the goal completes. Persisting "always bypass" across
-    # a relaunch would be a foot-gun (collision_monitor would stay off
-    # even with no goal active).
+    # nav_bypass_active is intentionally in neither tuple. It's a transient
+    # runtime mode, not a configuration choice: the mobile bridge sets it
+    # true while a Nav2 goal is executing and false again when the goal
+    # completes. Persisting "always bypass" across a relaunch would be a
+    # foot-gun (collision_monitor would stay off even with no goal active).
 )
+
+# Everything the bridge will accept an override for (union). Used only to
+# bound what a hand-edited YAML can touch; the startup-replay path applies
+# the RUNTIME_CALIBRATION subset only.
+RUNTIME_OVERRIDABLE = RUNTIME_CALIBRATION + RUNTIME_TUNABLE
 
 
 @dataclass
@@ -476,8 +492,13 @@ class Nav2PicoBridge(Node):
         if not isinstance(section, dict):
             return
         kv = []
+        ignored_tunables = []
         for key, value in section.items():
-            if key not in RUNTIME_OVERRIDABLE:
+            # Tunables are PC-authoritative — never replayed at startup.
+            if key in RUNTIME_TUNABLE:
+                ignored_tunables.append(key)
+                continue
+            if key not in RUNTIME_CALIBRATION:
                 continue
             try:
                 param = self.get_parameter(key)
@@ -487,12 +508,22 @@ class Nav2PicoBridge(Node):
                 kv.append(rclpy.parameter.Parameter(key, param.type_, value))
             except Exception as exc:
                 self.get_logger().warning(
-                    f'override {key}={value!r} rejected: {exc}')
+                    f'calibration override {key}={value!r} rejected: {exc}')
+        if ignored_tunables:
+            self.get_logger().warning(
+                f'{RUNTIME_OVERRIDES_PATH} still lists tunables that are NO '
+                f'LONGER replayed (PC config is authoritative): '
+                f'{sorted(ignored_tunables)}. Change them live from the app, '
+                f'or edit the PC config files. Use /api/reset_overrides to clear.')
         if kv:
             results = self.set_parameters(kv)
-            applied = [k.name for k, r in zip(kv, results) if r.successful]
-            self.get_logger().info(
-                f'runtime overrides applied: {applied}')
+            applied = {k.name: k.value for k, r in zip(kv, results) if r.successful}
+            # WARNING level on purpose: the operator should always be able to
+            # see which physical-calibration values the phone file is applying
+            # on top of the PC launch defaults.
+            self.get_logger().warning(
+                f'CALIBRATION overrides applied over launch defaults '
+                f'(from {RUNTIME_OVERRIDES_PATH}): {applied}')
 
     def _on_param_set(self, params):
         """Validate + apply parameter changes pushed from the mobile bridge

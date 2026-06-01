@@ -62,7 +62,7 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
 from sensor_msgs.msg import JointState
-from std_srvs.srv import SetBool
+from std_srvs.srv import SetBool, Empty
 from action_msgs.srv import CancelGoal
 from action_msgs.msg import GoalStatusArray
 from rcl_interfaces.srv import SetParameters, GetParameters, ListParameters
@@ -95,6 +95,10 @@ RUNTIME_OVERRIDES_PATH = os.path.join(AUTONEXA_DATA_DIR, 'runtime_overrides.yaml
 WAYPOINTS_PATH = os.path.join(AUTONEXA_DATA_DIR, 'waypoints.json')
 MAPS_DIR = os.path.join(AUTONEXA_DATA_DIR, 'maps')
 PLANNER_MODE_PATH = os.path.join(AUTONEXA_DATA_DIR, 'planner_mode.txt')
+RELOCALIZE_AUTO_PATH = os.path.join(AUTONEXA_DATA_DIR, 'relocalize_auto.json')
+# Launch-time flag for encoder->EKF odometry fusion. Read by the launch files
+# (use_ekf arg default); written here. Toggling requires a relaunch.
+USE_EKF_PATH = os.path.join(AUTONEXA_DATA_DIR, 'use_ekf.txt')
 
 # Parameter-tuner whitelist — only these nodes can be reached from the app's
 # generic /api/params endpoint. Keeps the surface small and predictable.
@@ -105,6 +109,22 @@ PARAM_TUNER_WHITELIST = (
     '/velocity_smoother',
     '/global_costmap/global_costmap',
     '/local_costmap/local_costmap',
+)
+
+# Only these nav2_pico_bridge params are physical CALIBRATION and may be
+# persisted to runtime_overrides.yaml (the bridge replays just these on
+# startup). Everything else on the bridge (speed/accel caps, creep gate,
+# steer slew, manual window) is PC-config-authoritative: the app can change
+# it live for the session, but it is NOT written to disk, so it can't
+# silently override the PC config on the next launch. Mirror of
+# nav2_pico_bridge.RUNTIME_CALIBRATION — keep the two in sync.
+BRIDGE_CALIBRATION_KEYS = (
+    'vx_polarity',
+    'servo_polarity',
+    'reverse_steer_polarity',
+    'servo_center_us',
+    'servo_us_min',
+    'servo_us_max',
 )
 
 # Topics monitored by /api/health. Each tuple: (topic, expected_min_hz, label).
@@ -184,6 +204,18 @@ class MobileBridgeNode(Node):
         self._mp_stage = 'idle'              # 'idle' | 'waypoint' | 'final'
         self._mp_decompose_count = 0
         self._mp_decompose_max = 2
+
+        # --- AMCL periodic relocalize (localization mode) ----------------
+        # Periodically forces an AMCL filter update against the latest scan
+        # (request_nomotion_update) to counter the slow pose drift seen on
+        # featureless walls. Localization-mode only — a silent no-op in
+        # live-SLAM mode (no /amcl). Persisted across relaunches; default OFF.
+        self._relocalize_auto_lock = threading.Lock()
+        _ra = self._load_relocalize_auto()
+        self._relocalize_auto_enabled = _ra['enabled']
+        self._relocalize_auto_interval = _ra['interval_s']
+        self._relocalize_last_t = 0.0
+        self._relocalize_fut = None          # keep last call_async future alive
 
         self._goal_lock = threading.Lock()
         self._current_goal = {       # Last goal sent (active until cancel)
@@ -375,6 +407,15 @@ class MobileBridgeNode(Node):
                 'nav2_msgs missing — /api/clear_costmaps will be unavailable')
         self._slam_change_state = self.create_client(
             ChangeState, '/slam_toolbox/change_state')
+
+        # --- AMCL no-motion update client + timer (Part E) ---
+        # nav2_amcl advertises this Empty service globally as
+        # /request_nomotion_update. In live-SLAM mode it simply never becomes
+        # ready, so the periodic callback no-ops. The timer ticks at 1 Hz and
+        # the callback enforces the configured interval itself.
+        self._amcl_nomotion_client = self.create_client(
+            Empty, '/request_nomotion_update')
+        self._relocalize_timer = self.create_timer(1.0, self._relocalize_auto_cb)
 
         # --- Generic remote SetParameters cache (Parts B / E / G2) ---
         # Keyed by node name so we don't recreate clients on every call.
@@ -1121,11 +1162,27 @@ class MobileBridgeNode(Node):
 
     def persist_runtime_overrides(self, node: str, items: dict) -> None:
         """Merge `items` under `node` in runtime_overrides.yaml. Surviving
-        on-disk entries for that node are preserved if not overwritten."""
+        on-disk entries for that node are preserved if not overwritten.
+
+        For the nav2_pico_bridge node, only physical CALIBRATION keys are
+        written to disk (BRIDGE_CALIBRATION_KEYS) — bridge tunables are kept
+        out of the file so a stale phone value can't silently override the PC
+        config on the next launch. The values are still applied live to the
+        running node by the caller; they just aren't persisted."""
         if yaml is None:
             self.get_logger().warning(
                 'PyYAML missing — runtime overrides not persisted to disk')
             return
+        if node.lstrip('/') == 'nav2_pico_bridge':
+            kept = {k: v for k, v in items.items() if k in BRIDGE_CALIBRATION_KEYS}
+            dropped = [k for k in items if k not in BRIDGE_CALIBRATION_KEYS]
+            if dropped:
+                self.get_logger().info(
+                    f'not persisting non-calibration bridge params '
+                    f'(PC config authoritative): {sorted(dropped)}')
+            items = kept
+            if not items:
+                return
         try:
             os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
         except OSError as exc:
@@ -1151,6 +1208,24 @@ class MobileBridgeNode(Node):
             os.replace(tmp, RUNTIME_OVERRIDES_PATH)
         except OSError as exc:
             self.get_logger().error(f'overrides write failed: {exc}')
+
+    def reset_runtime_overrides(self) -> dict:
+        """Delete runtime_overrides.yaml so the PC config files (launch args +
+        nav2 params) become the single source of truth on the next relaunch.
+        Used by the app's 'Reset to PC defaults' control to clear stale
+        phone-saved values. Live params on running nodes are left untouched;
+        PC defaults are re-applied at the next launch."""
+        if not os.path.exists(RUNTIME_OVERRIDES_PATH):
+            return {'ok': True, 'existed': False}
+        try:
+            os.remove(RUNTIME_OVERRIDES_PATH)
+        except OSError as exc:
+            self.get_logger().error(f'overrides reset failed: {exc}')
+            return {'ok': False, 'existed': True, 'reason': str(exc)}
+        self.get_logger().warning(
+            f'{RUNTIME_OVERRIDES_PATH} deleted via /api/reset_overrides — '
+            f'PC config is authoritative on the next relaunch')
+        return {'ok': True, 'existed': True}
 
     # --- Costmap clear + SLAM restart (Part C) ---
 
@@ -1555,6 +1630,88 @@ class MobileBridgeNode(Node):
         self._save_planner_mode(mode)
         self.get_logger().info(f'planner mode -> {mode}')
         return True
+
+    # --- AMCL periodic relocalize (Part E) ---------------------------
+    def _load_relocalize_auto(self) -> dict:
+        """Read persisted auto-relocalize config; default disabled / 20 s."""
+        default = {'enabled': False, 'interval_s': 20.0}
+        try:
+            with open(RELOCALIZE_AUTO_PATH, 'r', encoding='utf-8') as fh:
+                doc = json.load(fh) or {}
+            return {
+                'enabled': bool(doc.get('enabled', False)),
+                'interval_s': float(doc.get('interval_s', 20.0)),
+            }
+        except (OSError, ValueError, TypeError):
+            return default
+
+    def _save_relocalize_auto(self) -> None:
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+            with open(RELOCALIZE_AUTO_PATH, 'w', encoding='utf-8') as fh:
+                json.dump({'enabled': self._relocalize_auto_enabled,
+                           'interval_s': self._relocalize_auto_interval}, fh)
+        except OSError as exc:
+            self.get_logger().warning(f'cannot persist relocalize_auto: {exc}')
+
+    def get_relocalize_auto(self) -> dict:
+        with self._relocalize_auto_lock:
+            return {'enabled': self._relocalize_auto_enabled,
+                    'interval_s': self._relocalize_auto_interval}
+
+    def set_relocalize_auto(self, enabled=None, interval_s=None) -> dict:
+        with self._relocalize_auto_lock:
+            if enabled is not None:
+                self._relocalize_auto_enabled = bool(enabled)
+            if interval_s is not None:
+                self._relocalize_auto_interval = max(2.0, float(interval_s))
+            self._save_relocalize_auto()
+            result = {'enabled': self._relocalize_auto_enabled,
+                      'interval_s': self._relocalize_auto_interval}
+        self.get_logger().info(f'relocalize_auto -> {result}')
+        return result
+
+    def _relocalize_auto_cb(self) -> None:
+        """1 Hz tick: when enabled and the interval has elapsed, ask AMCL to
+        re-settle its particle filter against the latest scan. No-op when
+        disabled or when /amcl isn't running (live-SLAM mode)."""
+        with self._relocalize_auto_lock:
+            enabled = self._relocalize_auto_enabled
+            interval = self._relocalize_auto_interval
+        if not enabled:
+            return
+        now = time.time()
+        if now - self._relocalize_last_t < interval:
+            return
+        cli = self._amcl_nomotion_client
+        if cli is None or not cli.service_is_ready():
+            return   # AMCL absent (live-SLAM) — silent no-op
+        self._relocalize_last_t = now
+        # Fire-and-forget; retain the future so it isn't GC'd before delivery.
+        self._relocalize_fut = cli.call_async(Empty.Request())
+
+    # --- Encoder->EKF fusion launch flag (Part F) --------------------
+    def get_use_ekf(self) -> bool:
+        """Read the persisted use_ekf launch flag (~/.autonexa/use_ekf.txt)."""
+        try:
+            with open(USE_EKF_PATH, 'r', encoding='utf-8') as fh:
+                return fh.read().strip().lower() in ('1', 'true', 'yes', 'on')
+        except OSError:
+            return False
+
+    def set_use_ekf(self, enabled: bool) -> bool:
+        """Persist the use_ekf launch flag. Takes effect on the NEXT relaunch —
+        the EKF owns the odom->base_link TF, which can't be swapped live."""
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+            with open(USE_EKF_PATH, 'w', encoding='utf-8') as fh:
+                fh.write('true' if enabled else 'false')
+            self.get_logger().info(
+                f'use_ekf flag -> {enabled} (takes effect on next relaunch)')
+            return True
+        except OSError as exc:
+            self.get_logger().warning(f'cannot persist use_ekf: {exc}')
+            return False
 
     def _publish_raw_goal(self, x: float, y: float, yaw: float) -> None:
         """Build + publish a /goal_pose and refresh the cached goal overlay."""
@@ -2357,6 +2514,17 @@ def api_calibrate_direction():
     return jsonify({'results': results, 'persisted': list(persisted.keys())})
 
 
+@flask_app.route('/api/reset_overrides', methods=['POST'])
+def api_reset_overrides():
+    """Wipe runtime_overrides.yaml so the PC config files (launch args + nav2
+    params) become the single source of truth again. Clears stale phone-saved
+    calibration/tunables that were silently overriding the PC config on launch.
+    Takes effect on the next relaunch."""
+    res = bridge_node.reset_runtime_overrides()
+    res['relaunch_required'] = True
+    return jsonify(res), (200 if res.get('ok') else 500)
+
+
 # ---------------------------------------------------------------------------
 #  Part C — Map / Nav2 reset
 # ---------------------------------------------------------------------------
@@ -2556,6 +2724,46 @@ def api_planner_mode():
         return jsonify(
             {'error': "planner_mode must be 'standard' or 'multipoint'"}), 400
     return jsonify({'planner_mode': mode})
+
+
+@flask_app.route('/api/relocalize_auto', methods=['GET', 'POST'])
+def api_relocalize_auto():
+    """GET: current auto-relocalize config.
+    POST {enabled?: bool, interval_s?: number in [2, 600]} — periodically
+    calls AMCL request_nomotion_update to re-settle the particle filter
+    (counters drift on featureless walls). Localization mode only; a no-op in
+    live-SLAM mode (no /amcl). Persisted across relaunches; default off."""
+    if request.method == 'GET':
+        return jsonify(bridge_node.get_relocalize_auto())
+    data = request.get_json(silent=True) or {}
+    interval = data.get('interval_s')
+    if interval is not None:
+        try:
+            interval = float(interval)
+        except (TypeError, ValueError):
+            return jsonify({'error': 'interval_s must be a number'}), 400
+        if not 2.0 <= interval <= 600.0:
+            return jsonify({'error': 'interval_s must be in [2, 600]'}), 400
+    return jsonify(bridge_node.set_relocalize_auto(
+        enabled=data.get('enabled'), interval_s=interval))
+
+
+@flask_app.route('/api/ekf_mode', methods=['GET', 'POST'])
+def api_ekf_mode():
+    """GET: current use_ekf flag.
+    POST {enabled: bool} — persist the encoder->EKF odometry-fusion launch
+    flag (~/.autonexa/use_ekf.txt). The EKF owns the odom->base_link TF, a
+    launch-time choice, so this takes effect on the NEXT relaunch. Disabling +
+    relaunch returns to scan-matcher-owned TF (today's behavior)."""
+    if request.method == 'GET':
+        return jsonify({'use_ekf': bridge_node.get_use_ekf()})
+    data = request.get_json(silent=True) or {}
+    if 'enabled' not in data:
+        return jsonify({'error': 'enabled (bool) required'}), 400
+    enabled = bool(data['enabled'])
+    ok = bridge_node.set_use_ekf(enabled)
+    return jsonify({'use_ekf': enabled, 'persisted': ok,
+                    'relaunch_required': True}), (200 if ok else 500)
 
 
 # ---------------------------------------------------------------------------
@@ -2844,6 +3052,7 @@ def index():
 <li>GET/POST /api/safety_mode — soft (default) | off (manual bypass)</li>
 <li><a href="/api/nav_status">/api/nav_status</a> — Nav2 action status</li>
 <li>GET/POST /api/calibrate_direction — vx_polarity / servo_polarity</li>
+<li>POST /api/reset_overrides — wipe runtime_overrides.yaml (PC config wins)</li>
 <li>POST /api/clear_costmaps · POST /api/restart_mapping</li>
 <li>GET/POST/DELETE /api/waypoints — manual park/summon spots</li>
 <li>POST /api/waypoints/&lt;name&gt;/navigate</li>
@@ -2852,6 +3061,8 @@ def index():
 <li>POST /api/lock_map — save current SLAM map under ~/.autonexa/maps</li>
 <li>GET/POST /api/nav2_speed — live Nav2 target-speed slider</li>
 <li>GET/POST /api/planner_mode — standard | multipoint path planner</li>
+<li>GET/POST /api/relocalize_auto — periodic AMCL re-settle (localization mode)</li>
+<li>GET/POST /api/ekf_mode — toggle encoder->EKF odom fusion (relaunch to apply)</li>
 <li>POST /api/relocalize — set robot pose (x,y,yaw)</li>
 <li>GET/POST /api/params?node=&lt;name&gt; — live param tuner (whitelist only)</li>
 <li><a href="/api/health">/api/health</a> — topic rates / staleness</li>

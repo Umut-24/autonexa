@@ -50,6 +50,16 @@ void motor_control_stop(void);
 bool motor_control_is_enabled(void);
 
 /**
+ * Feed measured per-tick encoder deltas so motor_control_apply() knows
+ * whether each wheel is actually rolling. Drives the encoder-aware
+ * kick-start (break static friction from rest, then honor proportional
+ * duty). Call once per control loop iteration BEFORE motor_control_apply().
+ * @param d_enc_left   left-wheel encoder edges since last tick (signed)
+ * @param d_enc_right  right-wheel encoder edges since last tick (signed)
+ */
+void motor_control_update_feedback(int32_t d_enc_left, int32_t d_enc_right);
+
+/**
  * Apply current motor commands to hardware.
  * Call once per control loop iteration. Only actuates if enabled and
  * safety is OK; otherwise stops motors.

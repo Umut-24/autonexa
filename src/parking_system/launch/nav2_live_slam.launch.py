@@ -15,7 +15,7 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import AndSubstitution, LaunchConfiguration, NotSubstitution, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
@@ -35,6 +35,20 @@ try:
     from parking_system.build_urdf import render as _render_urdf
 except Exception:  # fallback to the static URDF if the renderer is unavailable
     _render_urdf = None
+
+
+def _persisted_use_ekf() -> str:
+    """Default for the `use_ekf` launch arg, read from the app-written flag at
+    ~/.autonexa/use_ekf.txt. Returns 'true'/'false'; defaults 'false' if the
+    file is missing. The app's /api/ekf_mode writes this; the operator toggles
+    it and relaunches (the EKF TF-ownership swap can't be flipped live)."""
+    try:
+        path = os.path.expanduser('~/.autonexa/use_ekf.txt')
+        with open(path, 'r', encoding='utf-8') as fh:
+            on = fh.read().strip().lower() in ('1', 'true', 'yes', 'on')
+        return 'true' if on else 'false'
+    except OSError:
+        return 'false'
 
 
 def generate_launch_description():
@@ -104,10 +118,11 @@ def generate_launch_description():
     )
     min_vx_creep_arg = DeclareLaunchArgument(
         'min_vx_creep',
-        default_value='0.05',
-        description='|vx| below this -> SPEED 0 in the ASCII bridge (firmware deadband workaround). '
-                    'Raised from 0.02 alongside the RPP min_approach_linear_velocity floor at 0.07 '
-                    'so sub-stall commands are silenced rather than being passed to the open-loop motors.'
+        default_value='0.03',
+        description='|vx| below this -> SPEED 0 in the ASCII bridge. Lowered 0.05 -> 0.03 now that the '
+                    'firmware kick-start (encoder-aware) replaces the old permanent 60% PWM floor: the '
+                    'motors can sustain slow motion, so the chain no longer has to silence sub-stall '
+                    'commands. Lets the controller realise finer approach/creep speeds. Tune on hardware.'
     )
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
     # Symmetric ±500 µs around the 1650 center — the previous 1100/1900
@@ -127,6 +142,13 @@ def generate_launch_description():
     max_steer_rate_arg = DeclareLaunchArgument(
         'max_steer_rate_radps', default_value='3.0',
         description='Servo slew-rate cap (rad/s). Smooths Nav2 wz step changes.')
+    use_ekf_arg = DeclareLaunchArgument(
+        'use_ekf', default_value=_persisted_use_ekf(),
+        description='Fuse wheel odom (/pico/odom) + scan-match odom via a '
+                    'robot_localization EKF that owns odom->base_link TF. '
+                    'Default read from ~/.autonexa/use_ekf.txt (app toggle); '
+                    'false = scan-matcher-owned TF (today\'s behavior). '
+                    'Relaunch to change — the TF swap is not live-switchable.')
 
     # In live SLAM mode there is no road-mask topic by default.
     # The Ackermann-aware BT XML at config/bt_navigate_to_pose_ackermann.xml
@@ -192,11 +214,18 @@ def generate_launch_description():
         }.items()
     )
 
+    # --- Odometry: scan matcher, optionally fused with wheel odom via EKF ---
+    # use_ekf OFF (default): the scan matcher owns odom->base_link TF and
+    #   publishes /odom directly — exactly today's behavior.
+    # use_ekf ON: the scan matcher publishes only /odom_icp (no TF); the EKF
+    #   fuses /odom_icp (ICP pose) + /pico/odom (wheel velocity) and owns the
+    #   odom->base_link TF, publishing the fused result on /odom.
     laser_scan_matcher = Node(
         package='ros2_laser_scan_matcher',
         executable='laser_scan_matcher',
         name='laser_scan_matcher',
         output='screen',
+        condition=UnlessCondition(LaunchConfiguration('use_ekf')),
         parameters=[{
             'base_frame': 'base_link',
             'odom_frame': 'odom',
@@ -206,6 +235,39 @@ def generate_launch_description():
             'use_sim_time': False,
         }],
         remappings=[('scan', '/scan')]
+    )
+
+    laser_scan_matcher_ekf = Node(
+        package='ros2_laser_scan_matcher',
+        executable='laser_scan_matcher',
+        name='laser_scan_matcher',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_ekf')),
+        parameters=[{
+            'base_frame': 'base_link',
+            'odom_frame': 'odom',
+            'laser_frame': 'laser_link',
+            'publish_tf': False,          # EKF owns the TF in this mode
+            'publish_odom': '/odom_icp',  # feeds the EKF as odom1
+            'use_sim_time': False,
+        }],
+        remappings=[('scan', '/scan')]
+    )
+
+    # robot_localization EKF — only started when use_ekf is true. Fuses
+    # /pico/odom (odom0, wheel velocity) + /odom_icp (odom1, ICP pose); the
+    # yaml's publish_tf:false is overridden to true here so the EKF owns
+    # odom->base_link. Output odometry/filtered is remapped to /odom so Nav2's
+    # odom_topic + costmaps keep reading the same topic.
+    ekf_params_file = PathJoinSubstitution([pkg_dir, 'config', 'ekf_2d_no_imu.yaml'])
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_ekf')),
+        parameters=[ekf_params_file, {'publish_tf': True, 'use_sim_time': False}],
+        remappings=[('odometry/filtered', '/odom')],
     )
 
     slam_toolbox = Node(
@@ -486,10 +548,13 @@ def generate_launch_description():
         reverse_steer_polarity_arg,
         vx_polarity_arg,
         max_steer_rate_arg,
+        use_ekf_arg,
         use_mobile_bridge_arg,
         robot_state_publisher,
         lidar,
         laser_scan_matcher,
+        laser_scan_matcher_ekf,
+        ekf_node,
         slam_toolbox,
         lifecycle_manager_slam,
         planner_server,

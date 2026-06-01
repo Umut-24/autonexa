@@ -1071,6 +1071,89 @@ class ConnectionService extends ChangeNotifier {
     }
   }
 
+  // --- Runtime overrides reset (calibration-only hygiene) ---
+
+  /// Wipe ~/.autonexa/runtime_overrides.yaml so the PC config files become the
+  /// single source of truth on the next relaunch. Clears stale phone-saved
+  /// values (the "wrong direction / wrong speed after relaunch" foot-gun).
+  Future<bool> resetOverrides() async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(Uri.parse('$_baseUrl/api/reset_overrides'))
+          .timeout(const Duration(seconds: 3));
+      final ok = resp.statusCode == 200;
+      if (ok) {
+        logger.warn('runtime_overrides wiped — PC config authoritative on next relaunch',
+            LogCategory.control);
+      }
+      return ok;
+    } catch (e) {
+      logger.error('reset_overrides: $e', LogCategory.control);
+      return false;
+    }
+  }
+
+  // --- Auto re-localize (AMCL periodic re-settle, localization mode) ---
+
+  Future<Map<String, dynamic>?> getRelocalizeAuto() async {
+    if (_baseUrl == null) return null;
+    try {
+      final resp = await http.get(Uri.parse('$_baseUrl/api/relocalize_auto'))
+          .timeout(const Duration(seconds: 2));
+      if (resp.statusCode != 200) return null;
+      return jsonDecode(resp.body) as Map<String, dynamic>;
+    } catch (_) { return null; }
+  }
+
+  Future<bool> setRelocalizeAuto({required bool enabled, double? intervalS}) async {
+    if (_baseUrl == null) return false;
+    try {
+      final body = <String, dynamic>{'enabled': enabled};
+      if (intervalS != null) body['interval_s'] = intervalS;
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/relocalize_auto'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(body),
+      ).timeout(const Duration(seconds: 3));
+      final ok = resp.statusCode == 200;
+      if (ok) logger.info('Auto re-localize -> $enabled', LogCategory.navigation);
+      return ok;
+    } catch (e) {
+      logger.error('relocalize_auto: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
+  // --- Encoder->EKF odometry fusion (launch flag; relaunch to apply) ---
+
+  Future<bool?> getEkfMode() async {
+    if (_baseUrl == null) return null;
+    try {
+      final resp = await http.get(Uri.parse('$_baseUrl/api/ekf_mode'))
+          .timeout(const Duration(seconds: 2));
+      if (resp.statusCode != 200) return null;
+      final json = jsonDecode(resp.body) as Map<String, dynamic>;
+      return json['use_ekf'] == true;
+    } catch (_) { return null; }
+  }
+
+  Future<bool> setEkfMode(bool enabled) async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/ekf_mode'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'enabled': enabled}),
+      ).timeout(const Duration(seconds: 3));
+      final ok = resp.statusCode == 200;
+      if (ok) logger.warn('EKF fusion -> $enabled (relaunch to apply)', LogCategory.navigation);
+      return ok;
+    } catch (e) {
+      logger.error('ekf_mode: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
   // --- NamedWaypoints (Part D) ---
 
   Future<List<NamedWaypoint>> listNamedWaypoints() async {

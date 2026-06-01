@@ -71,17 +71,33 @@
 #define MOTOR_SPEED_MAX      30      /* SPEED 30  -> 100% PWM duty         */
 #define MOTOR_SPEED_MIN     -30      /* SPEED -30 -> 100% reverse duty     */
 
-/* Static-friction kick-start: motors on this chassis need ~60% duty
- * cycle to actually start rotating under load (verified on the bench
- * via RAW_PWM mag sweep — 60% spins slowly, below that doesn't move).
- * Any non-zero SPEED command is snapped up to this floor so the GUI's
- * W/S keys (and Nav2 vx commands) produce real motion even at low
- * commanded speeds. SPEED 0 still produces 0% duty (full stop).
+/* ── Static-friction kick-start (encoder-aware) ──────────────────────
+ * The JGB37 motors need a brief high-duty pulse to break static friction
+ * from rest, but once rolling they sustain motion at far lower duty.
  *
- * RAW_PWM bypasses this — it's a diagnostic verb where the literal duty
- * matters (e.g. for hunting the deadband threshold). Set to 0 to disable
- * the kick-start entirely. */
-#define MOTOR_DEADBAND_PCT   60
+ * The OLD firmware snapped *every* non-zero command up to a permanent 60%
+ * floor (MOTOR_DEADBAND_PCT). With Nav2 only ever commanding SPEED 0-10
+ * (duty <=33%), that made the drive bang-bang — stopped, or ~60% duty —
+ * and silently defeated every Nav2 slow-down / approach / creep command:
+ * the chassis could not decelerate for a wall (=> crashes) or settle on a
+ * parking/summon goal (=> overshoot + hunting).
+ *
+ * New policy (motor_control.c motor_control_apply): when a wheel is stopped
+ * and a non-zero speed is commanded, drive MOTOR_KICK_PCT for MOTOR_KICK_MS
+ * to break stiction; once the encoders report the wheel rolling, honor the
+ * real proportional duty (floored to MOTOR_MIN_RUN_PCT so the command still
+ * produces motion). SPEED 0 always coasts to a stop. "Rolling" is judged
+ * from the quadrature encoders via motor_control_update_feedback().
+ *
+ * RAW_PWM still bypasses all of this — it applies the literal duty.
+ *
+ * Tuning (on-hardware): MOTOR_MIN_RUN_PCT must be >= the duty that keeps a
+ * rolling wheel rolling, otherwise the wheel stalls just below it, the
+ * encoder reads "stopped", and the kick re-fires -> visible lurching. */
+#define MOTOR_KICK_PCT         80   /* kick-pulse duty % to break stiction */
+#define MOTOR_KICK_MS          120  /* kick-pulse duration [ms]            */
+#define MOTOR_MIN_RUN_PCT      22   /* lowest duty % that sustains rolling */
+#define MOTOR_ENC_MOVING_EDGES 2    /* |edges/tick| above this => moving   */
 
 /* ---------- Servo (Steering) — LD-1501MG ---------- */
 #define SERVO_PIN            15      /* GPIO 15 (servo debug wiring)       */

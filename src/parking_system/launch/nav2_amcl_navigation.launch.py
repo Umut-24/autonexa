@@ -24,7 +24,7 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import AndSubstitution, LaunchConfiguration, NotSubstitution, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
@@ -41,6 +41,18 @@ try:
     from parking_system.build_urdf import render as _render_urdf
 except Exception:
     _render_urdf = None
+
+
+def _persisted_use_ekf() -> str:
+    """Default for `use_ekf`, read from the app-written ~/.autonexa/use_ekf.txt
+    flag ('true'/'false', default 'false'). Toggle via /api/ekf_mode + relaunch."""
+    try:
+        path = os.path.expanduser('~/.autonexa/use_ekf.txt')
+        with open(path, 'r', encoding='utf-8') as fh:
+            on = fh.read().strip().lower() in ('1', 'true', 'yes', 'on')
+        return 'true' if on else 'false'
+    except OSError:
+        return 'false'
 
 
 def generate_launch_description():
@@ -120,8 +132,10 @@ def generate_launch_description():
     )
     min_vx_creep_arg = DeclareLaunchArgument(
         'min_vx_creep',
-        default_value='0.05',
-        description='|vx| below this -> SPEED 0 in the ASCII bridge (firmware deadband workaround).'
+        default_value='0.03',
+        description='|vx| below this -> SPEED 0 in the ASCII bridge. Lowered 0.05 -> 0.03 now that the '
+                    'firmware kick-start replaces the old permanent 60% PWM floor (the motors can '
+                    'sustain slow motion). Tune on hardware.'
     )
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
     servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1150')
@@ -135,6 +149,12 @@ def generate_launch_description():
     max_steer_rate_arg = DeclareLaunchArgument(
         'max_steer_rate_radps', default_value='3.0',
         description='Servo slew-rate cap (rad/s). Smooths Nav2 wz step changes.')
+    use_ekf_arg = DeclareLaunchArgument(
+        'use_ekf', default_value=_persisted_use_ekf(),
+        description='Fuse wheel odom (/pico/odom) + scan-match odom via a '
+                    'robot_localization EKF that owns odom->base_link TF. '
+                    'Default from ~/.autonexa/use_ekf.txt (app toggle); false = '
+                    'scan-matcher-owned TF. Relaunch to change.')
 
     _footprint_overrides = {}
     if _render_urdf is not None:
@@ -202,18 +222,47 @@ def generate_launch_description():
 
     # Scan filtering removed 2026-05-20: SLAM/AMCL run on the driver's raw
     # /scan (the map was built on raw /scan too, so this stays consistent).
-    # laser_scan_matcher still owns odom -> base_link. AMCL only publishes
-    # map -> odom, so the two TF producers don't fight.
+    # laser_scan_matcher still owns odom -> base_link (AMCL only publishes
+    # map -> odom, so the two TF producers don't fight) — UNLESS use_ekf is
+    # on, in which case the EKF owns odom -> base_link and the matcher just
+    # feeds it /odom_icp. See nav2_live_slam.launch.py for the same pattern.
     laser_scan_matcher = Node(
         package='ros2_laser_scan_matcher',
         executable='laser_scan_matcher',
         name='laser_scan_matcher',
         output='screen',
+        condition=UnlessCondition(LaunchConfiguration('use_ekf')),
         parameters=[
             laser_scan_matcher_params_file,
             {'use_sim_time': False},
         ],
         remappings=[('scan', '/scan')]
+    )
+
+    laser_scan_matcher_ekf = Node(
+        package='ros2_laser_scan_matcher',
+        executable='laser_scan_matcher',
+        name='laser_scan_matcher',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_ekf')),
+        parameters=[
+            laser_scan_matcher_params_file,
+            # Override the yaml: don't own TF, publish ICP odom to /odom_icp
+            # for the EKF to fuse with /pico/odom.
+            {'use_sim_time': False, 'publish_tf': False, 'publish_odom': '/odom_icp'},
+        ],
+        remappings=[('scan', '/scan')]
+    )
+
+    ekf_params_file = PathJoinSubstitution([pkg_dir, 'config', 'ekf_2d_no_imu.yaml'])
+    ekf_node = Node(
+        package='robot_localization',
+        executable='ekf_node',
+        name='ekf_filter_node',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_ekf')),
+        parameters=[ekf_params_file, {'publish_tf': True, 'use_sim_time': False}],
+        remappings=[('odometry/filtered', '/odom')],
     )
 
     map_server = Node(
@@ -481,10 +530,13 @@ def generate_launch_description():
         reverse_steer_polarity_arg,
         vx_polarity_arg,
         max_steer_rate_arg,
+        use_ekf_arg,
         use_mobile_bridge_arg,
         robot_state_publisher,
         lidar,
         laser_scan_matcher,
+        laser_scan_matcher_ekf,
+        ekf_node,
         map_server,
         amcl,
         planner_server,

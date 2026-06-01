@@ -12,7 +12,11 @@ ekf_filter_node:
     base_link_frame: base_link
     world_frame: odom
 
-    # Wheel/firmware odometry from Pico micro-ROS.
+    # publish_tf is false here so this file is safe to load standalone
+    # (ekf_fusion.launch.py). nav2_live_slam / nav2_amcl launches override it
+    # to true when use_ekf:=true, so the EKF then owns odom->base_link.
+
+    # Wheel/firmware odometry from the Pico — trusted for VELOCITY (vx/vyaw).
     odom0: /pico/odom
     odom0_config: [false, false, false,
                    false, false, false,
@@ -23,6 +27,21 @@ ekf_filter_node:
     odom0_relative: false
     odom0_queue_size: 20
     odom0_nodelay: true
+
+    # ICP scan-match odometry (laser_scan_matcher --> /odom_icp when use_ekf
+    # is on) — trusted for absolute POSE (x/y/yaw) in the odom frame. Fusing
+    # ICP pose + wheel velocity gives smoother, less-drifty odom than either
+    # alone. Only published in the use_ekf launch path.
+    odom1: /odom_icp
+    odom1_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    odom1_differential: false
+    odom1_relative: false
+    odom1_queue_size: 10
+    odom1_nodelay: true
 
     # Keep conservative process noise until IMU is added.
     process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,

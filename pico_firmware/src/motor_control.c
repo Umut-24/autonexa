@@ -5,6 +5,7 @@
 #include "l298n_driver.h"
 #include "safety.h"
 
+#include "pico/stdlib.h"   /* to_ms_since_boot / get_absolute_time */
 #include <math.h>
 
 /* ── State ──────────────────────────────────────────────────── */
@@ -12,6 +13,16 @@ static float   target_steer_rad = 0.0f;
 static int8_t  speed_left       = 0;
 static int8_t  speed_right      = 0;
 static bool    motors_enabled   = false;
+
+/* ── Encoder-aware kick-start state ─────────────────────────── */
+/* Updated each tick by motor_control_update_feedback() from the measured
+ * encoder deltas; read by motor_control_apply()'s kick logic. */
+static bool     wheel_moving_left   = false;
+static bool     wheel_moving_right  = false;
+/* Absolute-time (ms) at which the current kick pulse ends. 0 = no kick
+ * armed (re-armed the next time the wheel is found stopped with a command). */
+static uint32_t kick_until_left_ms  = 0;
+static uint32_t kick_until_right_ms = 0;
 
 /* ── Velocity-to-speed scale factor ─────────────────────────── */
 /* Open-loop on the L298N — without encoder feedback we can't tie a
@@ -99,10 +110,75 @@ bool motor_control_is_enabled(void)
     return motors_enabled;
 }
 
+void motor_control_update_feedback(int32_t d_enc_left, int32_t d_enc_right)
+{
+    int32_t al = (d_enc_left  < 0) ? -d_enc_left  : d_enc_left;
+    int32_t ar = (d_enc_right < 0) ? -d_enc_right : d_enc_right;
+    wheel_moving_left  = (al > MOTOR_ENC_MOVING_EDGES);
+    wheel_moving_right = (ar > MOTOR_ENC_MOVING_EDGES);
+}
+
+/* Encoder-aware kick-start for one channel. Converts the commanded speed to a
+ * signed duty %, then:
+ *   - SPEED 0       -> 0 (coast/stop), disarm the kick so the next start kicks.
+ *   - wheel rolling -> proportional duty, floored to MOTOR_MIN_RUN_PCT; disarm
+ *                      the kick.
+ *   - wheel stopped -> fire ONE kick pulse (MOTOR_KICK_PCT for MOTOR_KICK_MS,
+ *                      used only as a floor so a higher command isn't reduced)
+ *                      to break static friction. After the pulse, if the wheel
+ *                      still hasn't rolled, BACK OFF to the commanded
+ *                      proportional duty (floored to MOTOR_MIN_RUN_PCT) — never
+ *                      a sustained high duty.
+ *
+ * L298N safety: a blocked wheel must not sit at high duty (the L298N has no
+ * current limit and overheats). After the single pulse the duty drops to the
+ * low commanded value — strictly cooler than the firmware's old permanent 60%
+ * floor. A genuine block is then handled upstream (collision_monitor zeroes the
+ * command; the progress checker triggers Nav2 recovery). The kick re-arms only
+ * once the wheel actually rolls again (or the command returns to 0). */
+static int kick_duty(int8_t speed, bool wheel_moving, uint32_t *kick_until_ms)
+{
+    if (speed == 0) {
+        *kick_until_ms = 0;
+        return 0;
+    }
+
+    int target = ((int)speed * 100) / MOTOR_SPEED_MAX;   /* signed duty % */
+    int sign   = (target < 0) ? -1 : 1;
+    int mag    = (target < 0) ? -target : target;
+    if (mag > 100) mag = 100;
+
+    if (wheel_moving) {
+        /* Rolling: proportional duty with a sustain floor; disarm the kick. */
+        *kick_until_ms = 0;
+        if (mag < MOTOR_MIN_RUN_PCT) mag = MOTOR_MIN_RUN_PCT;
+        return sign * mag;
+    }
+
+    /* Stopped with a command: fire a single kick pulse to break stiction. */
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (*kick_until_ms == 0) {
+        *kick_until_ms = now + MOTOR_KICK_MS;   /* arm one pulse */
+    }
+    if (now < *kick_until_ms) {
+        /* During the pulse: kick floor — never reduce an already-higher cmd. */
+        return sign * (mag > MOTOR_KICK_PCT ? mag : MOTOR_KICK_PCT);
+    }
+    /* Pulse over and still not rolling (likely blocked): back off to the low
+     * commanded duty. Do NOT re-arm here — the kick re-arms via the rolling
+     * branch (wheel started) or the SPEED 0 branch (command cleared). */
+    if (mag < MOTOR_MIN_RUN_PCT) mag = MOTOR_MIN_RUN_PCT;
+    return sign * mag;
+}
+
 void motor_control_apply(void)
 {
     if (motors_enabled && safety_is_ok()) {
-        l298n_set_speeds(speed_left, speed_right);
+        int dl = kick_duty(speed_left,  wheel_moving_left,  &kick_until_left_ms);
+        int dr = kick_duty(speed_right, wheel_moving_right, &kick_until_right_ms);
+        /* l298n_set_raw_pwm applies literal duty (m1 = LEFT, m2 = RIGHT),
+         * bypassing the driver's old deadband floor. */
+        l298n_set_raw_pwm((int8_t)dl, (int8_t)dr);
     }
 }
 

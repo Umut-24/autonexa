@@ -161,6 +161,43 @@ ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
 | Both motors spin but backwards | Motor polarity flipped | Swap motor leads or negate `v_l`/`v_r` in `pico_firmware/src/ackermann.c` |
 | Steering goes wrong direction | Servo polarity | Flip sign in `pico_firmware/src/servo.c` |
 
+### 3c — Verify proportional speed + calibrate the kick-start (speed-floor fix)
+
+The firmware now uses an **encoder-aware kick-start** instead of the old permanent
+60% PWM floor (`pico_firmware/include/config.h`: `MOTOR_KICK_PCT` / `MOTOR_KICK_MS` /
+`MOTOR_MIN_RUN_PCT`). This is the fix for "Nav2 sends 10, the Pico does 20" — the old
+floor snapped every slow command up to 60% duty, so the robot could not slow for a
+wall or creep onto a goal. Confirm low commands now produce *slow* motion, not the
+old all-or-nothing lurch.
+
+**Bench (wheels off ground), CLI build `autonexa_pico.uf2` + `python3 test/pico_gui.py`:**
+- `SPEED 5`, `SPEED 10`, `SPEED 20`, `SPEED 30` must produce visibly *increasing*
+  speeds — each start shows a brief kick, then settles. Read the `TEL` `vx` field: it
+  should rise monotonically with SPEED, **not** sit at one fixed value for 5–17.
+- `SPEED 0` coasts to a stop. `ENC_READ` now returns live encoder counts.
+
+**On-the-ground calibration of `vel_to_speed_scale` (open-loop m/s mapping):**
+1. Clear flat floor. Run the bridge (Stage 2) so `/pico/odom` is published.
+2. Command a steady speed and read the measured speed back:
+   ```bash
+   ros2 topic pub /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.10}}" --rate 10 &
+   ros2 topic echo --once /pico/odom   # twist.twist.linear.x = encoder-measured vx
+   ```
+   Repeat for ~0.06 / 0.10 / 0.15 m/s.
+3. If commanded vx and measured vx disagree, scale the `nav2_pico_bridge`
+   `vel_to_speed_scale` param by `commanded / measured` (default 100 assumes
+   SPEED 30 = 0.30 m/s). It is a TUNABLE (now PC-authoritative), so set it in the PC
+   config / launch — a value typed in the app won't survive a relaunch by design.
+
+**Tuning the kick-start (`config.h`, requires rebuild + reflash):**
+- Low command **lurches** (wheel starts, stalls, re-kicks): raise `MOTOR_MIN_RUN_PCT`
+  until a rolling wheel keeps rolling at that duty.
+- Wheel **won't start** at low commands: raise `MOTOR_KICK_PCT` or `MOTOR_KICK_MS`.
+- `MOTOR_ENC_MOVING_EDGES` is the "is it rolling?" threshold (encoder edges/tick @ 50 Hz).
+
+**Pass:** measured `/pico/odom` vx increases monotonically with commanded vx, and the
+robot can hold a slow steady creep with no 60%-duty lurch.
+
 ---
 
 ## Stage 4 — cmd_vel safety chain flows end-to-end
@@ -265,6 +302,14 @@ In **RViz:**
 2. Add → By topic → `/map` → Map → slowly fills in as you push the robot around by hand
 
 **Pass:** `/scan` at ≥ 8 Hz, TF chain intact, map builds when robot moves.
+
+> **Operational tip (avoids the SLAM symmetry/ambiguity problem):** start each
+> mapping session from roughly the **same physical start pose**, and when later
+> re-launching against a saved map, seed the initial pose near where mapping
+> began. Starting from a consistent origin removes the left/right-flip ambiguity
+> a featureless symmetric room can otherwise produce. In localization mode you
+> can also enable periodic re-settling via `POST /api/relocalize_auto
+> {"enabled": true, "interval_s": 20}` to counter slow drift.
 
 **Fail / fix:**
 - No `/scan` → LiDAR not detected. Check `ls /dev/ttyUSB*`. Adjust `serial_port` arg: `ros2 launch parking_system nav2_live_slam.launch.py serial_port:=/dev/ttyUSB1`

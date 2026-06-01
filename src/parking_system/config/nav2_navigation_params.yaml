@@ -224,13 +224,15 @@ controller_server:
       # 8 cm DirectionalStop bumper there's still plenty of runway to
       # decelerate before the bumper trips.
       approach_velocity_scaling_dist: 0.60
-      # 0.07 m/s: lifted above the L298N PWM stall floor. The previous
-      # 0.04 m/s commanded value was below the duty needed to overcome
-      # static friction on the JGB37 motors — the wheel would stall
-      # while the controller still thought it was creeping, producing
-      # the ~10 cm short-of-goal pattern. Paired with the bridge's
-      # min_vx_creep lifted to 0.05.
-      min_approach_linear_velocity: 0.07
+      # 0.04 m/s: the firmware kick-start (encoder-aware) now breaks static
+      # friction with a brief high-duty pulse and then sustains slow motion
+      # at MOTOR_MIN_RUN_PCT, so the controller no longer has to command an
+      # artificially high approach speed to avoid stalling. Lowered 0.07 ->
+      # 0.04 (was originally 0.04 before the stall-floor workaround) for a
+      # gentler final approach; paired with the bridge's min_vx_creep at 0.03.
+      # NOTE: actual minimum speed is still bounded by the open-loop sustain
+      # floor until the closed-loop velocity PID (staged follow-up) lands.
+      min_approach_linear_velocity: 0.04
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
       # DUBIN's forward-only paths produced contorted loops that satisfied
@@ -276,6 +278,10 @@ local_costmap:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
         observation_sources: scan
+        # Raw /scan on purpose: the 4-stage scan-filter chain (/scan_filtered)
+        # was removed 2026-05-20 (commit 454e156) for crashing on bring-up, so
+        # /scan_filtered is not published. Do NOT point this at /scan_filtered
+        # unless that filter node is re-introduced and verified.
         scan:
           topic: /scan
           max_obstacle_height: 2.0
@@ -286,7 +292,11 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 2.0
           obstacle_min_range: 0.0
-      
+          # Ignore "inf" (no-return) rays so they don't spuriously mark or
+          # clear cells — matches the global obstacle layer. Cuts phantom
+          # obstacles from C1 noise without a filter chain.
+          inf_is_valid: false
+
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         # Lowered from 8.0 to 6.0: the steep gradient was causing RPP's
