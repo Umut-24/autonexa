@@ -853,7 +853,16 @@ class Nav2PicoBridge(Node):
             else:
                 steer = 0.0
         else:
-            steer = self._vx_wz_to_steer(self.output.vx, self.output.wz)
+            # Auto (Nav2) steering from the COMMANDED velocity (desired), not the
+            # bridge's accel-ramped output. steer_debug.csv showed _steer_dir
+            # (the direction hysteresis) lagged the command ~9% of ticks at
+            # cusps because it was driven by output.vx, which ramps behind
+            # desired.vx — so the servo briefly steered with the wrong (reverse)
+            # convention during a manoeuvre. Committing direction from the
+            # command removes that lag. Wheel SPEEDS still use the ramped
+            # gated_vx (steering responsive, motors smooth). Symmetric with the
+            # manual branch above, which already steers from desired.
+            steer = self._vx_wz_to_steer(desired.vx, desired.wz)
         # Servo slew-rate limiter — runs in steering-angle space (rad) so it
         # respects the actual mechanical limit of the servo, not the µs scale.
         # Applied here, after Ackermann math, so it bounds the output the
