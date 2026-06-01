@@ -29,6 +29,12 @@ class _SettingsTabState extends State<SettingsTab> {
   // fetched lazily on first render of the Path Planner card.
   String? _plannerMode;
   bool _plannerModeFetching = false;
+  // Local cache for EKF fusion mode ('true' | 'false'), fetched lazily.
+  bool? _useEkf;
+  bool _useEkfFetching = false;
+  // Local cache for AMCL auto-relocalize parameters, fetched lazily.
+  Map<String, dynamic>? _relocalizeAuto;
+  bool _relocalizeAutoFetching = false;
 
   @override
   void initState() {
@@ -85,6 +91,32 @@ class _SettingsTabState extends State<SettingsTab> {
     setState(() {
       _plannerMode = m ?? 'standard';
       _plannerModeFetching = false;
+    });
+  }
+
+  Future<void> _ensureEkfMode() async {
+    if (_useEkf != null || _useEkfFetching) return;
+    final conn = context.read<ConnectionService>();
+    if (!conn.isConnected) return;
+    _useEkfFetching = true;
+    final v = await conn.getEkfMode();
+    if (!mounted) return;
+    setState(() {
+      _useEkf = v ?? false;
+      _useEkfFetching = false;
+    });
+  }
+
+  Future<void> _ensureRelocalizeAuto() async {
+    if (_relocalizeAuto != null || _relocalizeAutoFetching) return;
+    final conn = context.read<ConnectionService>();
+    if (!conn.isConnected) return;
+    _relocalizeAutoFetching = true;
+    final v = await conn.getRelocalizeAuto();
+    if (!mounted) return;
+    setState(() {
+      _relocalizeAuto = v ?? {'enabled': false, 'interval_s': 20.0};
+      _relocalizeAutoFetching = false;
     });
   }
 
@@ -504,6 +536,34 @@ class _SettingsTabState extends State<SettingsTab> {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: conn.isConnected
+                          ? () async {
+                              final messenger = ScaffoldMessenger.of(context);
+                              final ok = await conn.resetOverrides();
+                              if (mounted) {
+                                messenger.showSnackBar(
+                                  SnackBar(
+                                    content: Text(ok
+                                        ? 'Overrides reset successfully. Relaunch required!'
+                                        : 'Failed to reset overrides'),
+                                  ),
+                                );
+                              }
+                            }
+                          : null,
+                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      label: const Text('Reset Overrides'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.danger,
+                        side: const BorderSide(color: AppColors.danger),
+                        disabledForegroundColor: colors.textTertiary,
+                      ),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -666,6 +726,133 @@ class _SettingsTabState extends State<SettingsTab> {
                           'goal. Persists across relaunches.',
                           style: TextStyle(
                               fontSize: 11, color: colors.textTertiary),
+                        ),
+                      ],
+                    );
+                  }),
+                ],
+              ),
+            ),
+
+            // ── Advanced Navigation ──
+            GlassCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('ADVANCED NAVIGATION',
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 1.2,
+                          color: colors.textTertiary)),
+                  const SizedBox(height: 14),
+                  Builder(builder: (_) {
+                    if (!conn.isConnected) {
+                      return Text('Connect to adjust advanced navigation settings.',
+                          style: TextStyle(
+                              fontSize: 12, color: colors.textTertiary));
+                    }
+                    _ensureEkfMode();
+                    _ensureRelocalizeAuto();
+
+                    final useEkf = _useEkf ?? false;
+                    final relocalizeEnabled = _relocalizeAuto?['enabled'] == true;
+                    final currentInterval = (_relocalizeAuto?['interval_s'] as num?)?.toDouble() ?? 20.0;
+
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _switchRow('Encoder-EKF Fusion', useEkf, colors, (v) async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          setState(() => _useEkf = v);
+                          final ok = await conn.setEkfMode(v);
+                          if (!ok && mounted) {
+                            setState(() => _useEkf = !v);
+                            messenger.showSnackBar(
+                              const SnackBar(content: Text('Failed to update EKF mode')),
+                            );
+                          } else if (mounted) {
+                            messenger.showSnackBar(
+                              const SnackBar(content: Text('EKF mode updated. Relaunch required to apply!')),
+                            );
+                          }
+                        }),
+                        Text(
+                          'Fuse wheel encoders with laser scan matching via EKF. '
+                          'Takes effect on the next relaunch.',
+                          style: TextStyle(fontSize: 11, color: colors.textTertiary),
+                        ),
+                        const SizedBox(height: 14),
+                        const Divider(height: 1),
+                        const SizedBox(height: 8),
+                        _switchRow('Auto-relocalize (AMCL)', relocalizeEnabled, colors, (v) async {
+                          final messenger = ScaffoldMessenger.of(context);
+                          setState(() {
+                            _relocalizeAuto = {
+                              'enabled': v,
+                              'interval_s': currentInterval
+                            };
+                          });
+                          final ok = await conn.setRelocalizeAuto(enabled: v, intervalS: currentInterval);
+                          if (!ok && mounted) {
+                            setState(() {
+                              _relocalizeAuto = {
+                                'enabled': !v,
+                                'interval_s': currentInterval
+                              };
+                            });
+                            messenger.showSnackBar(
+                              const SnackBar(content: Text('Failed to update auto-relocalize')),
+                            );
+                          }
+                        }),
+                        if (relocalizeEnabled) ...[
+                          Row(
+                            children: [
+                              Text('Interval',
+                                  style: TextStyle(fontSize: 12, color: colors.textSecondary)),
+                              const Spacer(),
+                              DropdownButton<double>(
+                                value: [10.0, 20.0, 30.0, 60.0, 120.0].contains(currentInterval) ? currentInterval : 20.0,
+                                dropdownColor: colors.surface,
+                                style: TextStyle(fontSize: 12, color: colors.textPrimary),
+                                underline: const SizedBox.shrink(),
+                                items: const [
+                                  DropdownMenuItem(value: 10.0, child: Text('10s')),
+                                  DropdownMenuItem(value: 20.0, child: Text('20s')),
+                                  DropdownMenuItem(value: 30.0, child: Text('30s')),
+                                  DropdownMenuItem(value: 60.0, child: Text('60s')),
+                                  DropdownMenuItem(value: 120.0, child: Text('2m')),
+                                ],
+                                onChanged: (v) async {
+                                  if (v == null) return;
+                                  final messenger = ScaffoldMessenger.of(context);
+                                  setState(() {
+                                    _relocalizeAuto = {
+                                      'enabled': relocalizeEnabled,
+                                      'interval_s': v
+                                    };
+                                  });
+                                  final ok = await conn.setRelocalizeAuto(enabled: relocalizeEnabled, intervalS: v);
+                                  if (!ok && mounted) {
+                                    setState(() {
+                                      _relocalizeAuto = {
+                                        'enabled': relocalizeEnabled,
+                                        'interval_s': currentInterval
+                                      };
+                                    });
+                                    messenger.showSnackBar(
+                                      const SnackBar(content: Text('Failed to update interval')),
+                                    );
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                        ],
+                        Text(
+                          'Periodically trigger AMCL update to re-settle the particle filter against scan drift (Localization mode only).',
+                          style: TextStyle(fontSize: 11, color: colors.textTertiary),
                         ),
                       ],
                     );
