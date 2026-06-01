@@ -135,17 +135,20 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 5 cm: realistic precision for the open-loop L298N chassis. The
-      # previous 3 cm was below what an encoder-less, open-loop drive can
-      # repeatably settle on — the car hunted around the goal, never
-      # covered the progress-checker movement radius, and got aborted.
-      # Do NOT tighten below 0.05 until the encoder PI velocity loop
-      # (F2 follow-up) lands.
-      xy_goal_tolerance: 0.05
-      # 0.06 rad (~3.5°): tightened for parking-grade heading. With
-      # R_min now at 0.50 m the planner can settle on goal yaw without
-      # the old 0.12 rad slop.
-      yaw_goal_tolerance: 0.06
+      # 6 cm (0.05 → 0.06 on 2026-06-01): the tolerance must match what the
+      # chassis can REPEATABLY settle on, not a wish. Below the achievable
+      # precision the goal is never satisfied, FollowPath fails, and the BT
+      # drops into the BackUp/retry recovery loop — which is exactly the
+      # "10-15 maneuvers" symptom. Re-tighten toward 0.05 only after the
+      # encoder-PI creep tune lets the car do a slow controlled final approach.
+      xy_goal_tolerance: 0.06
+      # 0.09 rad (~5.2°), loosened from 0.06 (~3.4°) on 2026-06-01. LiDAR-only
+      # AMCL (DifferentialMotionModel, no IMU) on a small featureless map has
+      # ~±3-5° yaw noise, so 3.4° was UNREACHABLE → endless yaw-hunting + the
+      # recovery loop. 5° is the realistic open-loop ceiling and matches the
+      # accepted target; the car now settles first-try instead of wiggling.
+      # ±2° needs an IMU+EKF (or a marker dock), not a tighter number here.
+      yaw_goal_tolerance: 0.09
     
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
     FollowPath:
@@ -213,14 +216,17 @@ controller_server:
       # 0.60 m: shortened from 1.5 m. The previous long slow tail caused
       # the chassis to spend ~10 s creeping at sub-stall speeds, which
       # masked goal-overshoot under open-loop motor scaling. 0.60 m
-      # keeps cruise velocity up until the last 60 cm, then ramps down
-      # to the new floor at min_approach_linear_velocity. With the
-      # 8 cm DirectionalStop bumper there's still plenty of runway to
-      # decelerate before the bumper trips.
-      approach_velocity_scaling_dist: 0.60
-      # Final approach remains above the movement band, then the bridge's
-      # 0.10 m/s creep gate produces a clean stop instead of a low-duty crawl.
-      min_approach_linear_velocity: 0.16
+      # keeps cruise velocity up until the last N cm, then ramps down
+      # to the new floor at min_approach_linear_velocity. 0.60 → 1.0 on
+      # 2026-06-01: start decelerating a full metre out so the chassis
+      # arrives slow and gentle instead of braking hard in the last 60 cm
+      # and overshooting the goal (a source of end-of-park hunting).
+      approach_velocity_scaling_dist: 1.0
+      # 0.16 → 0.12 on 2026-06-01: slower final creep = less overshoot at the
+      # goal. Still above the bridge's 0.10 m/s creep gate, so it produces a
+      # clean stop rather than a low-duty crawl. Lower toward ~0.08 only after
+      # the encoder-PI creep tune (see plan Kova 2) makes sub-0.10 stable.
+      min_approach_linear_velocity: 0.12
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
       # DUBIN's forward-only paths produced contorted loops that satisfied
@@ -458,18 +464,21 @@ planner_server:
       # controller agree on geometry, eliminating the corner-cutting
       # contact pattern.
       minimum_turning_radius: 0.50
-      # 1.2 → 1.5 on 2026-05-13: operator reported the planner was
-      # reaching for reverse on simple goals that should be forward-only.
-      # 1.5 is a moderate bump that still permits real 3-point parks
-      # when geometry demands them, just makes them less reflexive.
-      # Pull back toward 1.2 if 3-point park goals start failing.
-      reverse_penalty: 1.5
-      # 0.4 → 0.6 on 2026-05-13 in lockstep with the reverse_penalty
-      # bump: each cusp itself now costs more, so a forward-only
-      # solution wins even when its arc is somewhat longer than a
-      # cusp-heavy alternative. Combined effect: visible drop in
-      # gratuitous cusp use without losing the genuine K-turn cases.
-      change_penalty: 0.6
+      # 1.2 → 1.5 on 2026-05-13, then 1.5 → 3.0 on 2026-06-01: the car was
+      # still reversing straight to the goal and only turning once parked
+      # instead of driving a forward arc that turns while approaching. 3.0
+      # strongly biases the planner to forward curved approaches; reverse is
+      # kept only as a last resort for genuinely tight geometry (Reeds-Shepp
+      # still permits it). Pull back toward 1.5–2.0 if real 3-point park
+      # goals start failing because reverse got too expensive.
+      reverse_penalty: 3.0
+      # 0.4 → 0.6 (2026-05-13), then 0.6 → 1.0 (2026-06-01): each direction
+      # change (cusp) now costs more, so the planner prefers fewer-cusp
+      # solutions — a forward arc wins over a cusp-heavy K-turn even when the
+      # arc is somewhat longer. Directly attacks the "many maneuvers" symptom
+      # at the per-plan level (paired with reverse_penalty 3.0). Pull back
+      # toward 0.6 if legitimate tight 3-point parks stop being found.
+      change_penalty: 1.0
       # 1.05 (was briefly 1.0 in V2). A small straight-line bias gives
       # the A* heuristic a clearer "prefer straight when straight fits"
       # signal, which translates to faster planning and fewer empty
