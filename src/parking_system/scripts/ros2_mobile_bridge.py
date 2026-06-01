@@ -36,10 +36,15 @@ Runtime Python deps (pip): flask, flask-sock, numpy, opencv-python.
 
 import json
 import os
+import queue
+import re
+import shutil
+import signal
 import subprocess
 import threading
 import time
 import io
+import uuid
 from collections import deque
 from math import cos, sin, isinf, isnan, hypot, ceil, pi as MATH_PI
 
@@ -81,7 +86,7 @@ try:
     from slam_toolbox.srv import Reset as SlamReset
 except ImportError:
     SlamReset = None
-from flask import Flask, Response, jsonify, request, send_file
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory
 from flask_sock import Sock
 
 try:
@@ -93,6 +98,11 @@ try:
     from parking_system import build_urdf as _build_urdf
 except Exception:  # pragma: no cover
     _build_urdf = None
+
+try:
+    from ament_index_python.packages import get_package_share_directory
+except Exception:  # pragma: no cover
+    get_package_share_directory = None
 
 # Persistent app data (waypoints + runtime overrides). Lives outside the ROS
 # workspace so it survives `colcon build --symlink-install` clobbering and is
@@ -106,6 +116,33 @@ RELOCALIZE_AUTO_PATH = os.path.join(AUTONEXA_DATA_DIR, 'relocalize_auto.json')
 # Launch-time flag for encoder->EKF odometry fusion. Read by the launch files
 # (use_ekf arg default); written here. Toggling requires a relaunch.
 USE_EKF_PATH = os.path.join(AUTONEXA_DATA_DIR, 'use_ekf.txt')
+
+
+def _resolve_desktop_web_dir() -> str:
+    """Find the static desktop console directory in install or source trees."""
+    candidates = []
+    if get_package_share_directory is not None:
+        try:
+            candidates.append(
+                os.path.join(
+                    get_package_share_directory('parking_system'),
+                    'web_desktop',
+                )
+            )
+        except Exception:
+            pass
+    candidates.append(
+        os.path.abspath(
+            os.path.join(os.path.dirname(__file__), os.pardir, 'web_desktop')
+        )
+    )
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[-1]
+
+
+DESKTOP_WEB_DIR = _resolve_desktop_web_dir()
 
 # Parameter-tuner whitelist — only these nodes can be reached from the app's
 # generic /api/params endpoint. Keeps the surface small and predictable.
@@ -146,6 +183,184 @@ HEALTH_TOPICS = (
     ('/plan',                  0.2, 'Nav2 plan'),
 )
 
+# Guarded desktop command console. The browser can request only these named
+# profiles; no raw shell text is accepted, and every external command is run
+# with shell=False after argument validation. Motion-producing commands are
+# intentionally absent so all driving remains mode-gated through /ws/control.
+COMMAND_TOPIC_RE = re.compile(r'^/[A-Za-z0-9_][A-Za-z0-9_/]*$')
+
+COMMAND_PROFILES = {
+    'ros_node_list': {
+        'group': 'ROS graph',
+        'label': 'ROS nodes',
+        'description': 'List visible ROS nodes.',
+        'argv': ['ros2', 'node', 'list'],
+        'max_runtime_s': 8,
+        'args': [],
+    },
+    'ros_topic_list': {
+        'group': 'ROS graph',
+        'label': 'ROS topics',
+        'description': 'List visible ROS topics.',
+        'argv': ['ros2', 'topic', 'list'],
+        'max_runtime_s': 8,
+        'args': [],
+    },
+    'ros_service_list': {
+        'group': 'ROS graph',
+        'label': 'ROS services',
+        'description': 'List visible ROS services.',
+        'argv': ['ros2', 'service', 'list'],
+        'max_runtime_s': 8,
+        'args': [],
+    },
+    'topic_info': {
+        'group': 'Topic tools',
+        'label': 'Topic info',
+        'description': 'Show publishers, subscribers, and type for one topic.',
+        'argv': ['ros2', 'topic', 'info', '{topic}'],
+        'max_runtime_s': 8,
+        'args': [
+            {'name': 'topic', 'label': 'Topic', 'type': 'topic',
+             'default': '/scan'},
+        ],
+    },
+    'topic_hz': {
+        'group': 'Topic tools',
+        'label': 'Topic hz',
+        'description': 'Measure a topic rate for a bounded time window.',
+        'argv': ['ros2', 'topic', 'hz', '{topic}'],
+        'max_runtime_s': 12,
+        'runtime_arg': 'duration_s',
+        'args': [
+            {'name': 'topic', 'label': 'Topic', 'type': 'topic',
+             'default': '/scan'},
+            {'name': 'duration_s', 'label': 'Seconds', 'type': 'int',
+             'min': 4, 'max': 30, 'default': 8},
+        ],
+    },
+    'diagnose_scan_quality': {
+        'group': 'Diagnostics',
+        'label': 'Scan quality',
+        'description': 'Run parking_system scan-quality diagnostics.',
+        'argv': ['ros2', 'run', 'parking_system', 'diagnose_scan_quality.py'],
+        'max_runtime_s': 20,
+        'args': [],
+    },
+    'diagnose_localization': {
+        'group': 'Diagnostics',
+        'label': 'Localization',
+        'description': 'Run parking_system localization diagnostics.',
+        'argv': ['ros2', 'run', 'parking_system', 'diagnose_localization.py'],
+        'max_runtime_s': 20,
+        'args': [],
+    },
+    'diagnose_tf_tree': {
+        'group': 'Diagnostics',
+        'label': 'TF tree',
+        'description': 'Run parking_system TF-tree diagnostics.',
+        'argv': ['ros2', 'run', 'parking_system', 'diagnose_tf_tree.py'],
+        'max_runtime_s': 20,
+        'args': [],
+    },
+    'diagnose_control_chain': {
+        'group': 'Diagnostics',
+        'label': 'Control chain',
+        'description': 'Run parking_system control-chain diagnostics.',
+        'argv': ['ros2', 'run', 'parking_system', 'diagnose_control_chain.py'],
+        'max_runtime_s': 30,
+        'args': [],
+    },
+    'print_robot_position': {
+        'group': 'Diagnostics',
+        'label': 'Robot position',
+        'description': 'Print the current map-frame robot pose.',
+        'argv': ['ros2', 'run', 'parking_system', 'print_robot_position.py'],
+        'max_runtime_s': 12,
+        'args': [],
+    },
+    'ros_log_tail': {
+        'group': 'Logs',
+        'label': 'ROS latest log',
+        'description': 'Tail the newest log file under ~/.ros/log/latest.',
+        'kind': 'log_tail',
+        'max_runtime_s': 5,
+        'args': [
+            {'name': 'lines', 'label': 'Lines', 'type': 'int',
+             'min': 20, 'max': 500, 'default': 120},
+        ],
+    },
+}
+
+
+def _now_stamp() -> float:
+    return round(time.time(), 3)
+
+
+def _validate_command_arg(spec: dict, raw):
+    arg_type = spec.get('type')
+    name = spec.get('name', 'arg')
+    if raw is None or raw == '':
+        raw = spec.get('default')
+    if arg_type == 'topic':
+        value = str(raw or '').strip()
+        if not COMMAND_TOPIC_RE.fullmatch(value):
+            raise ValueError(f'{name} must be an absolute ROS topic name')
+        return value
+    if arg_type == 'int':
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f'{name} must be an integer')
+        min_v = int(spec.get('min', value))
+        max_v = int(spec.get('max', value))
+        if value < min_v or value > max_v:
+            raise ValueError(f'{name} must be in [{min_v}, {max_v}]')
+        return value
+    raise ValueError(f'unsupported arg type for {name}')
+
+
+def _build_command(profile_id: str, args: dict):
+    profile = COMMAND_PROFILES.get(profile_id)
+    if profile is None:
+        raise ValueError(f'unknown profile_id: {profile_id!r}')
+    args = args or {}
+    values = {}
+    for spec in profile.get('args', []):
+        name = spec['name']
+        values[name] = _validate_command_arg(spec, args.get(name))
+    runtime = float(profile.get('max_runtime_s', 10))
+    runtime_arg = profile.get('runtime_arg')
+    if runtime_arg in values:
+        runtime = min(runtime, float(values[runtime_arg]) + 1.0)
+    kind = profile.get('kind', 'external')
+    if kind == 'log_tail':
+        return profile, None, values, runtime
+    argv = []
+    for item in profile.get('argv', []):
+        text = str(item)
+        for key, value in values.items():
+            text = text.replace('{' + key + '}', str(value))
+        argv.append(text)
+    if not argv:
+        raise ValueError('profile has no command')
+    return profile, argv, values, runtime
+
+
+def _public_command_profiles():
+    profiles = []
+    for profile_id, profile in COMMAND_PROFILES.items():
+        profiles.append({
+            'id': profile_id,
+            'group': profile.get('group', ''),
+            'label': profile.get('label', profile_id),
+            'description': profile.get('description', ''),
+            'args': profile.get('args', []),
+            'max_runtime_s': profile.get('max_runtime_s', 10),
+            'kind': profile.get('kind', 'external'),
+        })
+    return profiles
+
 # Optional: ArUco detection
 try:
     import cv2.aruco as aruco
@@ -161,6 +376,7 @@ except ImportError:
 class MobileBridgeNode(Node):
     def __init__(self):
         super().__init__('mobile_bridge')
+        self._bridge_start_time = time.time()
 
         # --- Stored data (thread-safe via locks) ---
         self._scan_lock = threading.Lock()
@@ -301,6 +517,14 @@ class MobileBridgeNode(Node):
         # Adds/removes are handled inside the per-connection handler.
         self._ws_lock = threading.Lock()
         self._ws_telemetry_clients = set()
+
+        # --- Desktop guarded command console --------------------------------
+        # Per-websocket handlers enforce one active process per browser tab.
+        # The shared audit log is intentionally small and in-memory; it is
+        # enough to see what was run from the console without creating another
+        # persistent operator-data file.
+        self._command_audit_lock = threading.Lock()
+        self._command_audit = deque(maxlen=100)
 
         # --- Telemetry from Pico ---
         self._telemetry_lock = threading.Lock()
@@ -820,22 +1044,27 @@ class MobileBridgeNode(Node):
                 self._clear_pico_estop()
             twist.linear.x = y * max_vx * sl
             # Wheel-direction-consistent joystick: push-right always = front
-            # wheels physically right, regardless of forward/reverse.
+            # wheels physically right, regardless of forward/reverse (RC-car
+            # feel). ROS convention: +angular.z = CCW = body rotates left,
+            # joystick +X = right push, so wz_cmd = -x maps push-right to a
+            # right command.
             #
-            # ROS convention: +angular.z = CCW = body rotates left. Joystick:
-            # +X = right push. So wz_cmd = -x maps push-right to body-right
-            # while going forward. The bridge's Ackermann IK is
-            # delta = atan(L * wz / vx); when vx<0 the denominator flips
-            # sign and so does delta — physically correct for body-frame wz
-            # but the *opposite* of what a driver pushing the stick right
-            # expects (RC-car convention: stick right = wheels right). We
-            # pre-flip wz here on reverse so the resulting wheel direction
-            # stays aligned with the joystick. Nav2's /cmd_vel is unaffected
-            # because Nav2 publishes through controller_server, not this path.
-            wz_cmd = -x * max_wz * sl
-            if y < 0:
-                wz_cmd = -wz_cmd
-            twist.angular.z = wz_cmd
+            # NOTE: wz is NOT scaled by speed_limit (sl). The speed slider must
+            # limit forward SPEED only, not steering authority — scaling wz by
+            # sl shrank the steering range so a kept-low speed slider meant the
+            # wheels never reached full lock ("tam dönmüyor"). Full stick =>
+            # full steering at any speed setting.
+            #
+            # NO reverse pre-flip: the old `if y < 0: wz_cmd = -wz_cmd` flipped
+            # the sign whenever the throttle axis dipped below zero, so a steady
+            # "full left" with the stick grazing y≈0 made wz flip +/-, which the
+            # bridge turned into a servo that slammed left<->right (the manual
+            # jitter bug). RC-style steering is now produced directly in
+            # nav2_pico_bridge for the manual source (stick -> wheel angle, no
+            # speed/direction dependence), so a consistent wz sign here is both
+            # correct and jitter-free. Nav2's /cmd_vel is unaffected (it does not
+            # go through this path).
+            twist.angular.z = -x * max_wz  # full steering authority, not sl-scaled * sl
 
         with self._safety_lock:
             safety = self._safety_mode
@@ -963,6 +1192,142 @@ class MobileBridgeNode(Node):
     def get_desktop_jpeg(self):
         with self._desktop_lock:
             return self._desktop_jpeg, self._desktop_version, self._desktop_stamp
+
+    # --- Desktop console / system status ---
+
+    def get_command_profiles(self) -> dict:
+        return {
+            'profiles': _public_command_profiles(),
+            'audit': self.get_command_audit(),
+        }
+
+    def get_command_audit(self) -> list:
+        with self._command_audit_lock:
+            return list(self._command_audit)
+
+    def audit_command(self, entry: dict) -> None:
+        safe = {
+            'timestamp': _now_stamp(),
+            'run_id': entry.get('run_id', ''),
+            'profile_id': entry.get('profile_id', ''),
+            'args': entry.get('args', {}),
+            'return_code': entry.get('return_code'),
+            'reason': entry.get('reason', ''),
+        }
+        with self._command_audit_lock:
+            self._command_audit.appendleft(safe)
+
+    def get_system_status(self) -> dict:
+        mem = self._read_meminfo()
+        disk = shutil.disk_usage(os.path.expanduser('~'))
+        temp_c = self._read_cpu_temp_c()
+        try:
+            load = list(os.getloadavg())
+        except (AttributeError, OSError):
+            load = []
+        try:
+            node_count = len(self.get_node_names())
+            ros_graph_ok = True
+        except Exception:
+            node_count = 0
+            ros_graph_ok = False
+        return {
+            'bridge_uptime_s': round(time.time() - self._bridge_start_time, 1),
+            'loadavg': load,
+            'memory': mem,
+            'disk_home': {
+                'total': disk.total,
+                'used': disk.used,
+                'free': disk.free,
+                'percent': round((disk.used / disk.total) * 100.0, 1)
+                if disk.total else 0.0,
+            },
+            'temperature_c': temp_c,
+            'ros_available': shutil.which('ros2') is not None,
+            'ros_graph_ok': ros_graph_ok,
+            'ros_node_count': node_count,
+            'desktop_web_dir': DESKTOP_WEB_DIR,
+            'camera_running': self._camera_running,
+        }
+
+    def _read_meminfo(self) -> dict:
+        values = {}
+        try:
+            with open('/proc/meminfo', 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    name, rest = line.split(':', 1)
+                    parts = rest.strip().split()
+                    if parts:
+                        values[name] = int(parts[0]) * 1024
+        except (OSError, ValueError):
+            return {}
+        total = values.get('MemTotal', 0)
+        avail = values.get('MemAvailable', 0)
+        used = max(0, total - avail)
+        return {
+            'total': total,
+            'available': avail,
+            'used': used,
+            'percent': round((used / total) * 100.0, 1) if total else 0.0,
+        }
+
+    def _read_cpu_temp_c(self):
+        for path in (
+            '/sys/class/thermal/thermal_zone0/temp',
+            '/sys/class/hwmon/hwmon0/temp1_input',
+        ):
+            try:
+                with open(path, 'r', encoding='utf-8') as fh:
+                    raw = fh.read().strip()
+                if not raw:
+                    continue
+                value = float(raw)
+                return round(value / 1000.0 if value > 200 else value, 1)
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def tail_latest_ros_log(self, lines: int) -> dict:
+        log_root = os.path.realpath(os.path.expanduser('~/.ros/log'))
+        latest = os.path.realpath(os.path.join(log_root, 'latest'))
+        prefix = log_root + os.sep
+        if latest != log_root and not latest.startswith(prefix):
+            return {'ok': False, 'error': 'latest log path escapes ~/.ros/log'}
+        if not os.path.isdir(latest):
+            return {'ok': False, 'error': '~/.ros/log/latest does not exist'}
+
+        candidates = []
+        for root, dirs, names in os.walk(latest):
+            real_root = os.path.realpath(root)
+            if real_root != log_root and not real_root.startswith(prefix):
+                dirs[:] = []
+                continue
+            for name in names:
+                path = os.path.realpath(os.path.join(root, name))
+                if path != log_root and not path.startswith(prefix):
+                    continue
+                try:
+                    if os.path.isfile(path):
+                        candidates.append((os.path.getmtime(path), path))
+                except OSError:
+                    continue
+        if not candidates:
+            return {'ok': False, 'error': 'no log files under latest'}
+
+        _, newest = max(candidates)
+        tail = deque(maxlen=lines)
+        try:
+            with open(newest, 'r', encoding='utf-8', errors='replace') as fh:
+                for line in fh:
+                    tail.append(line)
+        except OSError as exc:
+            return {'ok': False, 'error': str(exc)}
+        shown_path = newest.replace(os.path.expanduser('~'), '~', 1)
+        return {
+            'ok': True,
+            'path': shown_path,
+            'text': ''.join(tail),
+        }
 
     # --- Health stats ---
 
@@ -2997,6 +3362,21 @@ def api_health():
     return jsonify({'topics': bridge_node.get_health()})
 
 
+@flask_app.route('/api/system_status')
+def api_system_status():
+    return jsonify(bridge_node.get_system_status())
+
+
+@flask_app.route('/api/command_profiles')
+def api_command_profiles():
+    return jsonify(bridge_node.get_command_profiles())
+
+
+@flask_app.route('/api/command_audit')
+def api_command_audit():
+    return jsonify({'audit': bridge_node.get_command_audit()})
+
+
 # ---------------------------------------------------------------------------
 #  Desktop screenshot stream (1 Hz)
 # ---------------------------------------------------------------------------
@@ -3019,9 +3399,309 @@ def api_desktop_shot():
     return Response(jpeg, mimetype='image/jpeg')
 
 
+def _ws_send_json(ws, payload: dict) -> bool:
+    payload.setdefault('timestamp', _now_stamp())
+    try:
+        ws.send(json.dumps(payload))
+        return True
+    except Exception:
+        return False
+
+
+def _terminate_process(proc: subprocess.Popen, force: bool = False) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == 'posix':
+            os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
+        elif force:
+            proc.kill()
+        else:
+            proc.terminate()
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _drain_command_queue(ws, out_q: queue.Queue, run_id: str) -> bool:
+    ok = True
+    while True:
+        try:
+            stream, text = out_q.get_nowait()
+        except queue.Empty:
+            break
+        ok = _ws_send_json(ws, {
+            'type': 'output',
+            'run_id': run_id,
+            'stream': stream,
+            'text': text,
+            'return_code': None,
+        }) and ok
+    return ok
+
+
+def _run_external_command(ws, request_id: str, profile_id: str,
+                          argv: list, values: dict, runtime_s: float) -> None:
+    run_id = uuid.uuid4().hex[:12]
+    if len(argv) >= 3 and argv[:3] == ['ros2', 'topic', 'pub']:
+        _ws_send_json(ws, {
+            'type': 'error',
+            'request_id': request_id,
+            'text': 'motion publishing is not available from this console',
+        })
+        return
+
+    if not _ws_send_json(ws, {
+        'type': 'started',
+        'request_id': request_id,
+        'run_id': run_id,
+        'profile_id': profile_id,
+        'argv': argv,
+        'stream': 'system',
+        'text': '',
+        'return_code': None,
+    }):
+        return
+
+    out_q = queue.Queue()
+
+    def _reader(pipe, stream_name):
+        try:
+            for line in iter(pipe.readline, ''):
+                if not line:
+                    break
+                out_q.put((stream_name, line))
+        except Exception as exc:
+            out_q.put(('stderr', f'[reader error] {exc}\n'))
+        finally:
+            try:
+                pipe.close()
+            except Exception:
+                pass
+
+    proc = None
+    return_code = 127
+    reason = ''
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            shell=False,
+            start_new_session=(os.name == 'posix'),
+            env=dict(os.environ),
+        )
+        threading.Thread(
+            target=_reader, args=(proc.stdout, 'stdout'), daemon=True).start()
+        threading.Thread(
+            target=_reader, args=(proc.stderr, 'stderr'), daemon=True).start()
+
+        deadline = time.time() + max(1.0, runtime_s)
+        while proc.poll() is None:
+            if not _drain_command_queue(ws, out_q, run_id):
+                reason = 'client_disconnected'
+                _terminate_process(proc)
+                break
+            if time.time() >= deadline:
+                reason = 'timeout'
+                _ws_send_json(ws, {
+                    'type': 'output',
+                    'run_id': run_id,
+                    'stream': 'system',
+                    'text': f'[timeout after {runtime_s:.0f}s]\n',
+                    'return_code': None,
+                })
+                _terminate_process(proc)
+                break
+            try:
+                raw = ws.receive(timeout=0.05)
+            except Exception:
+                reason = 'client_disconnected'
+                _terminate_process(proc)
+                break
+            if raw is None:
+                continue
+            try:
+                msg = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            op = str(msg.get('op', '')).lower()
+            if op in ('stop', 'kill'):
+                reason = op
+                _ws_send_json(ws, {
+                    'type': 'output',
+                    'run_id': run_id,
+                    'stream': 'system',
+                    'text': '[stop requested]\n',
+                    'return_code': None,
+                })
+                _terminate_process(proc, force=(op == 'kill'))
+                break
+            if op == 'start':
+                _ws_send_json(ws, {
+                    'type': 'error',
+                    'request_id': msg.get('request_id', ''),
+                    'run_id': run_id,
+                    'text': 'a command is already running in this tab',
+                })
+
+        if proc.poll() is None:
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                reason = reason or 'killed'
+                _terminate_process(proc, force=True)
+        try:
+            return_code = proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired:
+            return_code = -9
+        _drain_command_queue(ws, out_q, run_id)
+    except FileNotFoundError as exc:
+        reason = 'not_found'
+        _ws_send_json(ws, {
+            'type': 'output',
+            'run_id': run_id,
+            'stream': 'stderr',
+            'text': f'{exc}\n',
+            'return_code': None,
+        })
+    except Exception as exc:
+        reason = 'error'
+        _ws_send_json(ws, {
+            'type': 'output',
+            'run_id': run_id,
+            'stream': 'stderr',
+            'text': f'{exc}\n',
+            'return_code': None,
+        })
+    finally:
+        if proc is not None and proc.poll() is None:
+            _terminate_process(proc, force=True)
+        bridge_node.audit_command({
+            'run_id': run_id,
+            'profile_id': profile_id,
+            'args': values,
+            'return_code': return_code,
+            'reason': reason,
+        })
+        _ws_send_json(ws, {
+            'type': 'done',
+            'request_id': request_id,
+            'run_id': run_id,
+            'profile_id': profile_id,
+            'stream': 'system',
+            'text': '',
+            'return_code': return_code,
+            'reason': reason,
+        })
+
+
+def _run_log_tail_command(ws, request_id: str, profile_id: str,
+                          values: dict) -> None:
+    run_id = uuid.uuid4().hex[:12]
+    _ws_send_json(ws, {
+        'type': 'started',
+        'request_id': request_id,
+        'run_id': run_id,
+        'profile_id': profile_id,
+        'stream': 'system',
+        'text': '',
+        'return_code': None,
+    })
+    result = bridge_node.tail_latest_ros_log(int(values.get('lines', 120)))
+    return_code = 0 if result.get('ok') else 1
+    if result.get('ok'):
+        text = f"[{result.get('path')}]\n{result.get('text', '')}"
+        stream = 'stdout'
+    else:
+        text = result.get('error', 'log tail failed') + '\n'
+        stream = 'stderr'
+    _ws_send_json(ws, {
+        'type': 'output',
+        'run_id': run_id,
+        'stream': stream,
+        'text': text,
+        'return_code': None,
+    })
+    bridge_node.audit_command({
+        'run_id': run_id,
+        'profile_id': profile_id,
+        'args': values,
+        'return_code': return_code,
+        'reason': '',
+    })
+    _ws_send_json(ws, {
+        'type': 'done',
+        'request_id': request_id,
+        'run_id': run_id,
+        'profile_id': profile_id,
+        'stream': 'system',
+        'text': '',
+        'return_code': return_code,
+    })
+
+
 # =============================================================================
 #  WebSocket endpoints — joystick (high-rate) + telemetry push
 # =============================================================================
+
+@sock.route('/ws/command')
+def ws_command(ws):
+    bridge_node.get_logger().info('WS /ws/command connected')
+    try:
+        while True:
+            raw = ws.receive(timeout=30)
+            if raw is None:
+                continue
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                _ws_send_json(ws, {
+                    'type': 'error',
+                    'text': 'invalid JSON request',
+                })
+                continue
+            op = str(data.get('op', '')).lower()
+            request_id = str(data.get('request_id', ''))
+            if op == 'start':
+                profile_id = str(data.get('profile_id', ''))
+                try:
+                    profile, argv, values, runtime_s = _build_command(
+                        profile_id, data.get('args') or {})
+                except ValueError as exc:
+                    _ws_send_json(ws, {
+                        'type': 'error',
+                        'request_id': request_id,
+                        'profile_id': profile_id,
+                        'text': str(exc),
+                    })
+                    continue
+                if profile.get('kind') == 'log_tail':
+                    _run_log_tail_command(ws, request_id, profile_id, values)
+                else:
+                    _run_external_command(
+                        ws, request_id, profile_id, argv, values, runtime_s)
+            elif op in ('stop', 'kill'):
+                _ws_send_json(ws, {
+                    'type': 'idle',
+                    'request_id': request_id,
+                    'text': 'no command is running',
+                })
+            else:
+                _ws_send_json(ws, {
+                    'type': 'error',
+                    'request_id': request_id,
+                    'text': "op must be 'start', 'stop', or 'kill'",
+                })
+    except Exception as exc:
+        bridge_node.get_logger().info(f'WS /ws/command closed: {exc}')
+
 
 @sock.route('/ws/control')
 def ws_control(ws):
@@ -3141,12 +3821,34 @@ def video_feed():
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
+@flask_app.route('/desktop')
+@flask_app.route('/desktop/')
+def desktop_index():
+    if not os.path.isdir(DESKTOP_WEB_DIR):
+        return jsonify({
+            'error': 'desktop web assets not installed',
+            'path': DESKTOP_WEB_DIR,
+        }), 404
+    return send_from_directory(DESKTOP_WEB_DIR, 'index.html')
+
+
+@flask_app.route('/desktop/<path:filename>')
+def desktop_asset(filename):
+    if not os.path.isdir(DESKTOP_WEB_DIR):
+        return jsonify({
+            'error': 'desktop web assets not installed',
+            'path': DESKTOP_WEB_DIR,
+        }), 404
+    return send_from_directory(DESKTOP_WEB_DIR, filename)
+
+
 @flask_app.route('/')
 def index():
     return '''<!doctype html>
 <html><head><title>AutoNexa ROS2 Bridge</title></head>
 <body style="font-family:sans-serif;background:#111;color:#eee;padding:20px">
 <h1>AutoNexa ROS2 Mobile Bridge</h1>
+<p><a href="/desktop">Open Desktop Operator Console</a></p>
 <p>Endpoints:</p>
 <ul>
 <li><a href="/api/status">/api/status</a> — combined status</li>
@@ -3179,10 +3881,13 @@ def index():
 <li>POST /api/relocalize — set robot pose (x,y,yaw)</li>
 <li>GET/POST /api/params?node=&lt;name&gt; — live param tuner (whitelist only)</li>
 <li><a href="/api/health">/api/health</a> — topic rates / staleness</li>
+<li><a href="/api/system_status">/api/system_status</a> — Pi + bridge status</li>
+<li><a href="/api/command_profiles">/api/command_profiles</a> — guarded desktop command profiles</li>
 <li><a href="/api/desktop_shot">/api/desktop_shot</a> — 1 Hz GNOME desktop JPEG (Wayland-friendly)</li>
 <li><a href="/api/desktop_version">/api/desktop_version</a> — ETag counter for desktop_shot</li>
 <li>WS /ws/control — joystick stream (input-only)</li>
 <li>WS /ws/telemetry — server-pushed telemetry snapshots @ 10 Hz</li>
+<li>WS /ws/command — guarded command runner for the desktop console</li>
 <li><a href="/video_feed">/video_feed</a> — camera MJPEG</li>
 </ul>
 </body></html>'''

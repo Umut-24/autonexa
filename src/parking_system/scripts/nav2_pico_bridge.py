@@ -87,6 +87,7 @@ RUNTIME_TUNABLE = (
     'max_aw_radps2',
     'max_steer_rate_radps',
     'min_vx_creep',
+    'steer_ref_speed_mps',
     'track_width_m',
     'manual_priority_window_s',
     # nav_bypass_active is intentionally in neither tuple. It's a transient
@@ -163,6 +164,12 @@ class Nav2PicoBridge(Node):
         # 0.15 gate, while Nav2's controller floors keep normal cruising above
         # the unstable low-speed band.
         self.declare_parameter('min_vx_creep', 0.10)
+        # Reference speed for the Ackermann steering inverse. The denominator of
+        # atan(L*wz/vx) is floored to this magnitude so steering stays continuous
+        # and proportional to wz at low/zero speed instead of snapping to max,
+        # and the drive direction (for reverse_steer_polarity) only commits past
+        # +-this band — killing the mid-manoeuvre steering sign flips.
+        self.declare_parameter('steer_ref_speed_mps', 0.06)
 
         self.declare_parameter('wheelbase_m', 0.25)
         self.declare_parameter('track_width_m', 0.20)
@@ -225,6 +232,9 @@ class Nav2PicoBridge(Node):
         self.max_ax = float(self.get_parameter('max_ax_mps2').value)
         self.max_aw = float(self.get_parameter('max_aw_radps2').value)
         self.min_vx_creep = float(self.get_parameter('min_vx_creep').value)
+        self.steer_ref_speed = float(self.get_parameter('steer_ref_speed_mps').value)
+        # Committed drive direction for the steering inverse (hysteresis state).
+        self._steer_dir = 1
 
         self.wheelbase = float(self.get_parameter('wheelbase_m').value)
         self.track_width = float(self.get_parameter('track_width_m').value)
@@ -580,6 +590,11 @@ class Nav2PicoBridge(Node):
                 if not 0.0 <= float(p.value) <= 0.5:
                     return SetParametersResult(successful=False, reason='min_vx_creep out of range')
                 self.min_vx_creep = float(p.value)
+            elif p.name == 'steer_ref_speed_mps':
+                if not 0.01 <= float(p.value) <= 0.5:
+                    return SetParametersResult(
+                        successful=False, reason='steer_ref_speed_mps out of range [0.01, 0.5]')
+                self.steer_ref_speed = float(p.value)
             elif p.name == 'track_width_m':
                 if not 0.05 <= float(p.value) <= 1.0:
                     return SetParametersResult(
@@ -640,24 +655,37 @@ class Nav2PicoBridge(Node):
         return self._vx_to_speed_pulses(v_left), self._vx_to_speed_pulses(v_right)
 
     def _vx_wz_to_steer(self, vx: float, wz: float) -> float:
-        """Standard Ackermann inverse. Mirrors firmware ackermann.c:23.
+        """Ackermann inverse with a reference-speed floor + direction hysteresis.
 
-        delta = atan(L * wz / vx) is correct for ROS body-frame wz in both
-        directions: when vx<0 and wz>0 (body rotating left while reversing)
-        the atan denominator goes negative and delta comes out negative —
-        wheels physically point right, which is exactly what's needed to
-        pivot the body left in reverse. This chassis defaults
-        reverse_steer_polarity to -1 because floor tests showed reverse
-        maneuvering was swapped after the forward steering correction.
+        delta = atan(L * wz / vx) is the body-frame Ackermann inverse, but it is
+        speed-dependent and BLOWS UP / is discontinuous as vx -> 0. The chassis
+        spends most of a park/manoeuvre in exactly that low-speed band, and the
+        old code papered over it with a hard pivot branch (snap to +-max steer
+        when |vx|<0.01). That snap, plus the reverse_steer_polarity flip the
+        instant vx grazed negative, made the servo flip sign mid-manoeuvre even
+        when the intent was steady (the "steers right while parking" bug).
+
+        Two changes remove that:
+          1) Reference-speed floor: clamp the denominator magnitude to
+             steer_ref_speed so steer = atan(L*wz/v_eff) stays continuous and
+             proportional to wz at all speeds — no snap-to-max.
+          2) Direction hysteresis: the drive direction used for the floor sign
+             and for the reverse_steer_polarity flip only commits past
+             +-steer_ref_speed and is HELD inside the band. So a transient vx
+             dip toward/below zero during a forward manoeuvre no longer triggers
+             a spurious reverse flip. reverse_steer_polarity (value -1) still
+             applies, but only for a genuinely committed reverse.
         """
-        if abs(vx) < 0.01:
-            if abs(wz) < 0.01:
-                return 0.0
-            # vx≈0 with wz≠0 is a pivot request — Ackermann can't do it.
-            # Match firmware behavior: command max steering toward sign(wz).
-            return self.servo_max_steer if wz > 0 else -self.servo_max_steer
-        steer = math.atan(self.wheelbase * wz / vx)
-        if vx < 0.0:
+        ref = self.steer_ref_speed
+        # Commit drive direction only past +-ref; hold within the dead band.
+        if vx > ref:
+            self._steer_dir = 1
+        elif vx < -ref:
+            self._steer_dir = -1
+        # else: keep self._steer_dir (last committed direction)
+        v_eff = self._steer_dir * max(abs(vx), ref)
+        steer = math.atan(self.wheelbase * wz / v_eff)
+        if self._steer_dir < 0:
             steer *= self.reverse_steer_polarity
         return clamp(steer, -self.servo_max_steer, +self.servo_max_steer)
 
@@ -777,13 +805,36 @@ class Nav2PicoBridge(Node):
         elif self._cusp_cooldown_end is not None:
             self._cusp_cooldown_end = None
 
-        steer = self._vx_wz_to_steer(self.output.vx, self.output.wz)
+        if source == 'manual':
+            # Direct / RC-style steering for the manual (OFF safety) bypass:
+            # map the joystick's wz straight to a steering angle, independent of
+            # speed and with no reverse flip. Stick-left -> wheels point left,
+            # always — the intuitive feel for hand-driving the car into a spot,
+            # and it sidesteps the speed-dependent atan entirely (no jitter).
+            #
+            # Use the RAW desired wz, NOT self.output.wz: output.wz is ramped by
+            # the angular accel cap (max_aw), which would make the servo crawl to
+            # full lock over >1 s ("direksiyon yavaş dönüyor"). The accel cap is
+            # for smoothing the chassis' yaw rate, not the steering servo, so for
+            # manual we want the wheels to follow the stick immediately.
+            manual_wz = desired.wz
+            if self.max_wz > 1.0e-6:
+                steer = clamp(
+                    (manual_wz / self.max_wz) * self.servo_max_steer,
+                    -self.servo_max_steer, +self.servo_max_steer)
+            else:
+                steer = 0.0
+        else:
+            steer = self._vx_wz_to_steer(self.output.vx, self.output.wz)
         # Servo slew-rate limiter — runs in steering-angle space (rad) so it
         # respects the actual mechanical limit of the servo, not the µs scale.
         # Applied here, after Ackermann math, so it bounds the output the
         # firmware sees regardless of how fast the upstream wz changes.
+        # SKIPPED for manual: hand-driving wants the servo to respond as fast as
+        # the hardware allows, not crawl at max_steer_rate (1.5 rad/s ≈ 0.35 s to
+        # full lock). The servo's own mechanical slew is the only limit in manual.
         steer_dt = (now - self._last_steer_t).nanoseconds * 1e-9
-        if steer_dt > 0.0 and self.max_steer_rate > 0.0:
+        if source != 'manual' and steer_dt > 0.0 and self.max_steer_rate > 0.0:
             max_delta = self.max_steer_rate * min(steer_dt, dt * 4.0)
             steer = self._apply_rate_limit(self._last_steer_sent_rad, steer, max_delta)
         self._last_steer_sent_rad = steer
