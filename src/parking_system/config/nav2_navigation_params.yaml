@@ -135,20 +135,16 @@ controller_server:
     general_goal_checker:
       stateful: true
       plugin: "nav2_controller::SimpleGoalChecker"
-      # 6 cm (0.05 → 0.06 on 2026-06-01): the tolerance must match what the
-      # chassis can REPEATABLY settle on, not a wish. Below the achievable
-      # precision the goal is never satisfied, FollowPath fails, and the BT
-      # drops into the BackUp/retry recovery loop — which is exactly the
-      # "10-15 maneuvers" symptom. Re-tighten toward 0.05 only after the
-      # encoder-PI creep tune lets the car do a slow controlled final approach.
-      xy_goal_tolerance: 0.06
-      # 0.09 rad (~5.2°), loosened from 0.06 (~3.4°) on 2026-06-01. LiDAR-only
-      # AMCL (DifferentialMotionModel, no IMU) on a small featureless map has
-      # ~±3-5° yaw noise, so 3.4° was UNREACHABLE → endless yaw-hunting + the
-      # recovery loop. 5° is the realistic open-loop ceiling and matches the
-      # accepted target; the car now settles first-try instead of wiggling.
-      # ±2° needs an IMU+EKF (or a marker dock), not a tighter number here.
-      yaw_goal_tolerance: 0.09
+      # 5 cm (0.06 → 0.05 on 2026-06-02, operator choice): tightened back for
+      # precision. The car hunts/iterates near the goal at this tolerance
+      # (chassis can't settle finely at the low-speed floor) but the operator
+      # accepts that for now — the real fix is the encoder-PI creep tune later.
+      xy_goal_tolerance: 0.05
+      # 0.06 rad (~3.4°), tightened back from 0.09 on 2026-06-02 (operator
+      # choice: keep precision, accept the goal-approach hunting). True ±2°
+      # still needs an IMU+EKF / marker dock; this just stops the controller
+      # from accepting a sloppier heading.
+      yaw_goal_tolerance: 0.06
     
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.
     FollowPath:
