@@ -1119,6 +1119,24 @@ class MobileBridgeNode(Node):
         res = future.result()
         return list(res.result.names)
 
+    def detect_ctrl_speed_param(self, force: bool = False) -> str:
+        """Speed-cap param name for whichever controller is active:
+        MPPI -> 'FollowPath.vx_max', RPP -> 'FollowPath.desired_linear_vel'.
+        Cached; pass force=True to re-detect after a relaunch into the other
+        controller. Falls back to the MPPI key (current default) without
+        caching when the controller isn't up yet."""
+        cached = getattr(self, '_ctrl_speed_param', None)
+        if cached is not None and not force:
+            return cached
+        names = self.list_remote_params('/controller_server')
+        if 'FollowPath.vx_max' in names:
+            self._ctrl_speed_param = 'FollowPath.vx_max'
+        elif 'FollowPath.desired_linear_vel' in names:
+            self._ctrl_speed_param = 'FollowPath.desired_linear_vel'
+        else:
+            return 'FollowPath.vx_max'
+        return self._ctrl_speed_param
+
     def get_remote_params(self, node: str, names: list, timeout: float = 1.5) -> dict:
         cli = self._param_client(node, 'get')
         if not cli.wait_for_service(timeout_sec=timeout):
@@ -2772,17 +2790,19 @@ def api_ekf_mode():
 
 @flask_app.route('/api/nav2_speed', methods=['GET', 'POST'])
 def api_nav2_speed():
-    """Live-tune Nav2's linear speed cap. Sets RPP
-    FollowPath.desired_linear_vel and velocity_smoother max_velocity[0] in
+    """Live-tune Nav2's linear speed cap. Sets the ACTIVE controller's
+    speed-cap param (MPPI FollowPath.vx_max or RPP
+    FollowPath.desired_linear_vel) and velocity_smoother max_velocity[0] in
     lockstep so the smoother doesn't override the controller. Persists to
     runtime_overrides.yaml under the respective node sections."""
+    param = bridge_node.detect_ctrl_speed_param()
     if request.method == 'GET':
-        ctrl = bridge_node.get_remote_params(
-            '/controller_server', ['FollowPath.desired_linear_vel'])
+        ctrl = bridge_node.get_remote_params('/controller_server', [param])
         sm = bridge_node.get_remote_params(
             '/velocity_smoother', ['max_velocity'])
-        desired = ctrl.get('FollowPath.desired_linear_vel')
+        desired = ctrl.get(param)
         return jsonify({
+            'controller_speed_param': param,
             'controller_desired_linear_vel': desired,
             # Backward-compatible field name for the current Flutter client.
             'controller_max_vel_x': desired,
@@ -2797,19 +2817,23 @@ def api_nav2_speed():
         return jsonify({'error': 'max_vel_x must be a number'}), 400
     if not 0.05 <= target <= 0.50:
         return jsonify({'error': 'max_vel_x must be in [0.05, 0.50]'}), 400
-    ctrl = bridge_node.set_remote_params(
-        '/controller_server', {'FollowPath.desired_linear_vel': target})
+    ctrl = bridge_node.set_remote_params('/controller_server', {param: target})
+    # If the active controller changed since last detection (relaunch into the
+    # other controller), the param name is now wrong — re-detect once + retry.
+    if not (ctrl.get(param) or {}).get('ok', False):
+        param = bridge_node.detect_ctrl_speed_param(force=True)
+        ctrl = bridge_node.set_remote_params('/controller_server', {param: target})
     # velocity_smoother expects a 3-vector [vx, vy, wz]; preserve current vy/wz.
     cur = bridge_node.get_remote_params('/velocity_smoother', ['max_velocity'])
     vec = list(cur.get('max_velocity') or [target, 0.0, 0.5])
     vec[0] = target
     sm = bridge_node.set_remote_params(
         '/velocity_smoother', {'max_velocity': [float(v) for v in vec]})
-    bridge_node.persist_runtime_overrides(
-        'controller_server', {'FollowPath.desired_linear_vel': target})
+    bridge_node.persist_runtime_overrides('controller_server', {param: target})
     bridge_node.persist_runtime_overrides(
         'velocity_smoother', {'max_velocity': [float(v) for v in vec]})
     return jsonify({'controller': ctrl, 'smoother': sm,
+                    'controller_speed_param': param,
                     'controller_desired_linear_vel': target,
                     'controller_max_vel_x': target,
                     'smoother_max_velocity': vec})

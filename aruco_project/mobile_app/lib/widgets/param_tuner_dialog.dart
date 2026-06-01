@@ -30,7 +30,7 @@ class ParamTunerDialog extends StatefulWidget {
 
 const _whitelist = <String, String>{
   '/nav2_pico_bridge': 'Pico bridge',
-  '/controller_server': 'Nav2 Controller (RPP)',
+  '/controller_server': 'Nav2 Controller (MPPI/RPP)',
   '/planner_server': 'Nav2 Planner',
   '/velocity_smoother': 'Velocity Smoother',
   '/global_costmap/global_costmap': 'Global Costmap',
@@ -56,7 +56,29 @@ const _quickParams = <String, List<String>>{
     'servo_us_min',
     'servo_us_max',
   ],
+  // Superset of MPPI + RPP params. The tuner intersects this list against the
+  // live ListParameters response, so only the active controller's params
+  // render (MPPI params vanish under RPP and vice-versa) — no per-launch
+  // app config needed.
   '/controller_server': [
+    // --- MPPI (default controller) ---
+    'FollowPath.vx_max',
+    'FollowPath.vx_min',
+    'FollowPath.wz_max',
+    'FollowPath.vx_std',
+    'FollowPath.wz_std',
+    'FollowPath.time_steps',
+    'FollowPath.model_dt',
+    'FollowPath.batch_size',
+    'FollowPath.temperature',
+    'FollowPath.AckermannConstraints.min_turning_r',
+    'FollowPath.CostCritic.cost_weight',
+    'FollowPath.PathAlignCritic.cost_weight',
+    'FollowPath.PathFollowCritic.cost_weight',
+    'FollowPath.GoalCritic.cost_weight',
+    'FollowPath.PreferForwardCritic.cost_weight',
+    'FollowPath.PathAngleCritic.cost_weight',
+    // --- RPP (fallback controller) ---
     'FollowPath.desired_linear_vel',
     'FollowPath.lookahead_dist',
     'FollowPath.min_lookahead_dist',
@@ -72,6 +94,7 @@ const _quickParams = <String, List<String>>{
     'FollowPath.min_approach_linear_velocity',
     'FollowPath.use_rotate_to_heading',
     'FollowPath.allow_reversing',
+    // --- shared (both controllers) ---
     'general_goal_checker.xy_goal_tolerance',
     'general_goal_checker.yaw_goal_tolerance',
   ],

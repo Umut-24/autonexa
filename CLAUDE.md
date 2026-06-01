@@ -16,7 +16,7 @@ The Flutter app is now a full operator console (the user typically has no monito
 - **Map / Nav2 reset from app** — Map tab ⋮ menu: "Clear obstacles" (calls `clear_entirely_global_costmap` + `clear_entirely_local_costmap`) and "Restart mapping" (slam_toolbox lifecycle deactivate→cleanup→configure→activate; bumps map version so the app refetches blank PNG).
 - **Pose reset / relocalize** — long-press on the Map tab publishes a `PoseWithCovarianceStamped` on `/initialpose` so AMCL or SLAM Toolbox snaps to the user's claimed pose.
 - **Manual waypoints** — Parking tab now has a "Manual Spots" sub-tab. Save current pose as `park` / `summon` / `home`. Stored in `~/.autonexa/waypoints.json` with a per-map fingerprint (`width,height,resolution,origin,crc32`). After a SLAM restart the fingerprint changes and stale waypoints are flagged.
-- **Live Nav2 max-speed slider** — Settings → Nav2 Max Speed. POSTs to `/api/nav2_speed`, which calls `SetParameters` against `/controller_server` (`FollowPath.max_vel_x`) and `/velocity_smoother` (`max_velocity[0]`) in lockstep + persists.
+- **Live Nav2 max-speed slider** — Settings → Nav2 Max Speed. POSTs to `/api/nav2_speed`, which calls `SetParameters` against `/controller_server` (the active controller's speed cap — `FollowPath.vx_max` under MPPI, `FollowPath.desired_linear_vel` under RPP; auto-detected) and `/velocity_smoother` (`max_velocity[0]`) in lockstep + persists.
 - **Topic health panel** — Diagnostics tab shows expected-Hz vs observed EWMA rate per topic (`/scan`, `/map`, `/odom`, `/cmd_vel_safe`, `/pico/joint_feedback`, `/plan`) with green/yellow/red dots.
 - **Generic param tuner** — Diagnostics tab → "Open param tuner". Whitelisted nodes only (`/nav2_pico_bridge`, `/controller_server`, `/planner_server`, `/velocity_smoother`, `/global_costmap/global_costmap`, `/local_costmap/local_costmap`). Numeric edits persist to `runtime_overrides.yaml` under the node's section.
 
@@ -31,7 +31,7 @@ Persistent operator data lives in `~/.autonexa/` outside the ROS workspace:
 |-------|-----------|
 | OS / SBC | Ubuntu 24.04 (Noble) on Raspberry Pi 5 |
 | Robotics framework | ROS2 Jazzy |
-| Navigation | Nav2 — `NavfnPlanner` (global) + `DWBLocalPlanner` (local, 10 Hz) |
+| Navigation | Nav2 — `SmacPlannerHybrid` (global) + switchable local controller: `MPPIController` (default) / Regulated Pure Pursuit (fallback, `controller:=rpp`) |
 | SLAM | SLAM Toolbox (`async_slam_toolbox_node`, mapping mode, 2 cm/pixel) |
 | Odometry | `ros2_laser_scan_matcher` (ICP scan-to-scan → `odom→base_link` TF + `/odom`) |
 | Sensor fusion | `robot_localization` EKF skeleton ready (inactive until IMU added) |
@@ -182,6 +182,7 @@ ros2 launch parking_system ekf_fusion.launch.py
 | `enforce_single_publisher` | `true` | Bridge self-terminates if duplicate `/pico/*` publishers detected |
 | `bridge_lock_file` | `/tmp/cmd_vel_to_pico_bridge.lock` | fcntl lock for the bridge |
 | `use_rviz` | `true` |  |
+| `controller` | `mppi` | Local controller: `mppi` (default, obstacle-aware sampling MPC, `config/controller_mppi.yaml`) or `rpp` (Regulated Pure Pursuit fallback, FollowPath block in `nav2_navigation_params.yaml`). Switchable with no rebuild. Both launch files expose this. |
 | `bridge_cmd_vel_topic` | `/cmd_vel_safe` | Velocity topic consumed by the bridge |
 | `use_ekf` | from `~/.autonexa/use_ekf.txt` (else `false`) | Fuse `/pico/odom` (wheel) + scan-match odom via a `robot_localization` EKF that owns `odom→base_link` TF. When false (default), `laser_scan_matcher` owns the TF as before. Toggle via app `/api/ekf_mode` + relaunch. Same arg on `nav2_amcl_navigation`. |
 
@@ -205,7 +206,7 @@ ros2 run parking_system record_control_chain_bag.py  # standardized rosbag
 
 ```
 Goal (RViz 2D Nav Goal / mobile app)
-  → BT Navigator → NavfnPlanner (global, /map) → DWBLocalPlanner (10 Hz)
+  → BT Navigator → SmacPlannerHybrid (global, /map) → MPPIController (default) or RPP (controller:=rpp)
   → /cmd_vel → velocity_smoother (20 Hz, 1.5 m/s², 2.0 rad/s²)
   → /cmd_vel_smoothed → collision_monitor (1.2 s lookahead, FootprintApproach)
   → /cmd_vel_safe → cmd_vel_to_pico_bridge.py (30 Hz, clamp + accel-limit + 200 ms timeout)
@@ -263,7 +264,22 @@ For the bench-test CLI build (`autonexa_pico.uf2`) — a separate ASCII line pro
 | `allow_unknown` | `false` | Robot won't plan into unmapped space — survey first, then goal |
 | RPP lookahead | 0.40 m (min 0.30, max 0.60) | Shortened for 1-2 m testbed; prevents carrot landing beyond turns |
 
-Controller is Regulated Pure Pursuit (RPP) with SMAC Hybrid-A* planner (REEDS_SHEPP, `allow_reversing: true`).
+Planner is SMAC Hybrid-A* (REEDS_SHEPP, `allow_reversing: true`). The local
+controller is **switchable** via the `controller` launch arg:
+- **`mppi` (default)** — `nav2_mppi_controller::MPPIController`, an obstacle-aware
+  sampling MPC (Ackermann motion model, `config/controller_mppi.yaml`). It keeps
+  clearance from walls *while continuing to drive*, so it doesn't need the binary
+  collision-monitor stop. This is why the AMCL launch can leave collision_monitor
+  disabled — MPPI's `CostCritic` + the Pico-bridge clamps/200 ms watchdog/E-STOP are
+  the obstacle-safety layers. **MPPI is the heaviest Nav2 node — benchmark CPU +
+  `/cmd_vel` Hz on the Pi 5 (see TEST.md) before trusting tuning; back off
+  `batch_size`/`time_steps`/`controller_frequency` if it can't hold rate.**
+- **`rpp` (fallback)** — Regulated Pure Pursuit (the `FollowPath` block in
+  `nav2_navigation_params.yaml`); the tuning values in the table above apply to it.
+  Use `controller:=rpp` if MPPI can't sustain the control rate on the Pi.
+
+Requires both controller packages installed on the Pi:
+`sudo apt install ros-jazzy-nav2-mppi-controller ros-jazzy-nav2-regulated-pure-pursuit-controller`.
 
 ## Pico Bridge (cmd_vel → micro-ROS)
 
@@ -336,7 +352,7 @@ Layers 5A and 5B share the 200 ms threshold but are independent — if USB CDC d
 | `/api/waypoints` | GET/POST | List / upsert manual park/summon/home spots (with map fingerprint) |
 | `/api/waypoints/<name>` | DELETE | Remove |
 | `/api/waypoints/<name>/navigate` | POST | Republish stored pose on `/goal_pose` |
-| `/api/nav2_speed` | GET/POST | `controller_server.FollowPath.max_vel_x` + `velocity_smoother.max_velocity[0]` in lockstep |
+| `/api/nav2_speed` | GET/POST | active controller speed cap (`FollowPath.vx_max` MPPI / `FollowPath.desired_linear_vel` RPP, auto-detected) + `velocity_smoother.max_velocity[0]` in lockstep |
 | `/api/planner_mode` | GET/POST | `standard` (single SMAC goal) / `multipoint` (on ABORT, stage via an intermediate waypoint). Persisted in `~/.autonexa/planner_mode.txt` |
 | `/api/relocalize_auto` | GET/POST | Periodic AMCL `request_nomotion_update` to re-settle the filter (localization mode only). `{enabled, interval_s}` persisted in `relocalize_auto.json`; default off |
 | `/api/ekf_mode` | GET/POST | Toggle encoder→EKF odom fusion (`use_ekf` launch flag in `use_ekf.txt`); takes effect on next relaunch |

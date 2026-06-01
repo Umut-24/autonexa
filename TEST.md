@@ -13,6 +13,11 @@ All commands run on the **Raspberry Pi 5** unless marked otherwise.
 # Source ROS2 on every new terminal
 source /opt/ros/jazzy/setup.bash
 source ~/intelligent_parking_ws/install/setup.bash
+
+# Nav2 controllers (both required for the switchable controller:=mppi|rpp arg).
+# MPPI is the default; RPP is the fallback.
+sudo apt install ros-jazzy-nav2-mppi-controller \
+                 ros-jazzy-nav2-regulated-pure-pursuit-controller
 ```
 
 ---
@@ -361,8 +366,22 @@ curl http://localhost:5000/api/status
 ## Stage 8 — Autonomous navigation (RViz goal)
 
 ```bash
+# Default controller is MPPI (obstacle-aware). Add controller:=rpp to fall back
+# to Regulated Pure Pursuit (no rebuild) if MPPI can't hold rate on the Pi.
 ros2 launch parking_system nav2_live_slam.launch.py use_pico_bridge:=true use_rviz:=true
+ros2 launch parking_system nav2_live_slam.launch.py controller:=rpp use_pico_bridge:=true use_rviz:=true
 ```
+
+> **MPPI benchmark gate (run once on the Pi 5 before trusting MPPI tuning).**
+> MPPI is the heaviest Nav2 node. While a goal is executing, measure:
+> `pidstat -p $(pgrep -f controller_server) 1` (CPU) and `ros2 topic hz /cmd_vel`
+> (rate). **Accept:** `/cmd_vel` ≥ 8 Hz sustained, no multi-second dropouts,
+> controller_server < ~120% CPU, lifecycle stays `active`. **Back-off ladder if it
+> fails (edit `config/controller_mppi.yaml`):** `batch_size` 1000→800→600 →
+> `time_steps` 40→30→24 → `controller_frequency`+`model_dt` 10/0.1→8/0.125 →
+> `CostCritic.consider_footprint` true→false. If `configure()` trips the lifecycle
+> bond at startup, raise `bond_timeout` 10.0→20.0 in the launch file. Otherwise use
+> `controller:=rpp`.
 
 1. **Build an initial map:** push the robot around by hand for ~30–60 seconds until the room outline appears in RViz
 2. Place robot on the floor in a known position
@@ -378,8 +397,9 @@ ros2 launch parking_system nav2_live_slam.launch.py use_pico_bridge:=true use_rv
 
 **Fail / fix:**
 - No path planned → Nav2 planner failed. Check costmap: `ros2 topic echo /global_costmap/costmap_updates --once`
-- Path planned but robot doesn't move → controller or bridge issue. Check `ros2 topic hz /cmd_vel`
-- Robot oscillates / overshoots → tune DWB parameters in `config/nav2_navigation_params.yaml` (`max_vel_x`, `decel_lim_x`)
+- Path planned but robot doesn't move → controller or bridge issue. Check `ros2 topic hz /cmd_vel`. Under MPPI, also confirm the rate meets the benchmark gate above (a starved controller_server publishes slowly/erratically).
+- Robot oscillates / overshoots → **MPPI:** tune critic weights in `config/controller_mppi.yaml` (raise `PathAlignCritic.cost_weight` to hug the path, lower `vx_max`); **RPP** (`controller:=rpp`): tune `FollowPath.lookahead_dist` / `desired_linear_vel` in `config/nav2_navigation_params.yaml`.
+- Robot won't drive close past a wall / halts → MPPI's `CostCritic.cost_weight` too high (lower it), or you're on `controller:=rpp` where collision behavior differs. Note: collision_monitor is disabled in the AMCL launch by design.
 
 ---
 
@@ -400,7 +420,16 @@ ros2 launch parking_system nav2_live_slam.launch.py use_pico_bridge:=true use_rv
 2. While robot is moving, tap the **E-STOP** button → robot stops, Nav2 cancels plan
 3. Tap GO → joystick control resumes
 
-**Pass:** Tap-to-navigate works. E-STOP cancels autonomous navigation.
+**Also verify the app controls work under MPPI:**
+1. Settings → Nav2 Max Speed slider → confirm it changes speed (under MPPI it sets
+   `FollowPath.vx_max`, under RPP `FollowPath.desired_linear_vel`; velocity_smoother
+   tracks in lockstep and the value persists across relaunch).
+2. Diagnostics → Open param tuner → Nav2 Controller (MPPI/RPP) → confirm the MPPI quick
+   params show (vx_max, batch_size, critic weights…) and a live critic-weight edit takes
+   effect. Launch with `controller:=rpp` and confirm the RPP params show instead.
+
+**Pass:** Tap-to-navigate works. E-STOP cancels autonomous navigation. App speed slider +
+param tuner operate on whichever controller is active.
 
 ---
 

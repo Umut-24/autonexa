@@ -25,7 +25,7 @@ import os
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, ExecuteProcess
 from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import AndSubstitution, LaunchConfiguration, NotSubstitution, PathJoinSubstitution
+from launch.substitutions import AndSubstitution, EqualsSubstitution, LaunchConfiguration, NotSubstitution, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -82,6 +82,11 @@ def generate_launch_description():
     serial_port_arg = DeclareLaunchArgument('serial_port', default_value='/dev/ttyUSB0')
     serial_baudrate_arg = DeclareLaunchArgument('serial_baudrate', default_value='460800')
     use_rviz_arg = DeclareLaunchArgument('use_rviz', default_value='true')
+    controller_arg = DeclareLaunchArgument(
+        'controller', default_value='mppi',
+        description="Local controller plugin: 'mppi' (default, obstacle-aware "
+                    "sampling MPC) or 'rpp' (Regulated Pure Pursuit fallback). "
+                    "Switchable at launch with no rebuild.")
     map_yaml_arg = DeclareLaunchArgument(
         'map_yaml',
         default_value=default_map_yaml,
@@ -294,12 +299,33 @@ def generate_launch_description():
         parameters=[configured_nav2_params]
     )
 
-    controller_server = Node(
+    # Switchable local controller. Exactly one of these launches (mutually
+    # exclusive via the 'controller' arg). Both keep name='controller_server'
+    # so the single lifecycle_manager node_names list needs no change.
+    #   - RPP: uses the FollowPath block in nav2_navigation_params.yaml as-is.
+    #   - MPPI: layers controller_mppi.yaml AFTER the base so its
+    #     controller_server block overrides the RPP one (the base file's
+    #     RPP FollowPath.* keys remain but MPPI ignores undeclared params).
+    use_mppi = EqualsSubstitution(LaunchConfiguration('controller'), 'mppi')
+    use_rpp = EqualsSubstitution(LaunchConfiguration('controller'), 'rpp')
+    mppi_params_file = PathJoinSubstitution([pkg_dir, 'config', 'controller_mppi.yaml'])
+
+    controller_server_rpp = Node(
         package='nav2_controller',
         executable='controller_server',
         name='controller_server',
         output='screen',
+        condition=IfCondition(use_rpp),
         parameters=[configured_nav2_params]
+    )
+
+    controller_server_mppi = Node(
+        package='nav2_controller',
+        executable='controller_server',
+        name='controller_server',
+        output='screen',
+        condition=IfCondition(use_mppi),
+        parameters=[configured_nav2_params, mppi_params_file]
     )
 
     smoother_server = Node(
@@ -509,6 +535,7 @@ def generate_launch_description():
         serial_port_arg,
         serial_baudrate_arg,
         use_rviz_arg,
+        controller_arg,
         map_yaml_arg,
         initial_pose_x_arg,
         initial_pose_y_arg,
@@ -540,7 +567,8 @@ def generate_launch_description():
         map_server,
         amcl,
         planner_server,
-        controller_server,
+        controller_server_rpp,
+        controller_server_mppi,
         smoother_server,
         behavior_server,
         bt_navigator,
