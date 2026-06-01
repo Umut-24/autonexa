@@ -4,7 +4,7 @@ Nav2 → Pico ASCII serial bridge for the AutoNexa CLI firmware.
 
 Subscribes /cmd_vel, applies vx/wz limits + acceleration caps + 200 ms
 watchdog, computes Ackermann inverse kinematics, and writes
-SPEED + SERVO_PWM lines over /dev/ttyACM0 at 30 Hz.
+SPEEDS + SERVO_PWM lines over /dev/ttyACM0 at 30 Hz.
 
 Calibrated servo center and the hard servo bounds [us_min, us_max] live
 in this bridge (RPi5 side), so the Pico's CLI firmware
@@ -24,8 +24,8 @@ turns are correct but reverse-left/reverse-right are swapped.
 
 Lifecycle:
     on launch: open serial → send `ENABLE` (if auto_enable=true)
-    every tick:  send `SPEED <n>` then (if changed) `SERVO_PWM <us>`
-    on watchdog: ramp output to (0, 0); next tick sends SPEED 0
+    every tick:  send `SPEEDS <left> <right>` then (if changed) `SERVO_PWM <us>`
+    on watchdog: ramp output to (0, 0); next tick sends SPEEDS 0 0
     on shutdown: send `STOP` → `DISABLE` → `SERVO_PWM <center>`
 """
 import fcntl
@@ -42,6 +42,7 @@ from rclpy.executors import ExternalShutdownException
 from rcl_interfaces.msg import SetParametersResult
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
+from std_msgs.msg import String
 
 try:
     import serial
@@ -86,6 +87,7 @@ RUNTIME_TUNABLE = (
     'max_aw_radps2',
     'max_steer_rate_radps',
     'min_vx_creep',
+    'track_width_m',
     'manual_priority_window_s',
     # nav_bypass_active is intentionally in neither tuple. It's a transient
     # runtime mode, not a configuration choice: the mobile bridge sets it
@@ -144,39 +146,34 @@ class Nav2PicoBridge(Node):
         # matches what ros2_mobile_bridge + the EKF config already expect.
         self.declare_parameter('publish_wheel_odom', True)
         self.declare_parameter('wheel_odom_topic', '/pico/odom')
+        self.declare_parameter('publish_motor_debug', True)
+        self.declare_parameter('motor_debug_topic', '/pico/motor_debug')
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('publish_rate_hz', 30.0)
         self.declare_parameter('command_timeout_s', 0.20)
 
-        # 0.30 → 0.15 m/s on 2026-05-13. The chassis was never reaching
-        # 0.30 in real driving anyway, and capping the bridge layer this
-        # tight means even if controller / smoother caps drift open the
-        # chassis can't accumulate dangerous momentum into a wall.
-        # App's live speed slider still has comfortable headroom above
-        # the 0.08 m/s cruise.
-        self.declare_parameter('max_vx_mps', 0.15)
+        self.declare_parameter('max_vx_mps', 0.25)
         self.declare_parameter('max_wz_radps', 0.8)
-        # Acceleration caps tightened again (was 0.5 / 0.7) to match the
-        # smoother's new 0.15 / 0.35 ramps. The bridge layer is just the
-        # final clamp; mismatch between layers was adding micro-jitter
-        # that contributed to the perceived "P-gain too high" snake.
-        self.declare_parameter('max_ax_mps2', 0.30)
+        self.declare_parameter('max_ax_mps2', 0.60)
         self.declare_parameter('max_aw_radps2', 0.50)
 
-        # Deadband gate: the L298N firmware uses a kick-start to break
-        # static friction, then sustains at MOTOR_MIN_RUN_PCT (~30%).
-        # Sub-creep vx still gets SPEED 0 to avoid micro-lurching at the
-        # goal approach. Raised from 0.02 to 0.05 to match the new RPP
-        # min_approach_linear_velocity floor of 0.07: anything the
-        # controller commands above its floor passes through, anything
-        # below is silenced rather than stalling the motor open-loop.
-        self.declare_parameter('min_vx_creep', 0.05)
+        # Commands below the floor-load movement band are silenced before they
+        # reach the Pico. 0.10 starts the firmware kick earlier than the old
+        # 0.15 gate, while Nav2's controller floors keep normal cruising above
+        # the unstable low-speed band.
+        self.declare_parameter('min_vx_creep', 0.10)
 
         self.declare_parameter('wheelbase_m', 0.25)
-        # 100 = vx 0.30 m/s -> SPEED 30 -> 100% PWM duty on the L298N path.
-        # Was 63.7 for the old Hiwonder closed-loop "pulses/10ms" semantic.
-        self.declare_parameter('vel_to_speed_scale', 100.0)
+        self.declare_parameter('track_width_m', 0.20)
+        # 120 = 30 / MOTOR_V_MAX_MPS(0.25). The firmware is now CLOSED-LOOP: it
+        # maps SPEED -> a TARGET wheel speed (target = SPEED/30 * MOTOR_V_MAX_MPS)
+        # and a velocity PI hits it. So for the commanded vx to equal the actual
+        # speed end-to-end, scale must = max_speed_pulses / MOTOR_V_MAX_MPS:
+        #   SPEED = vx*120 ; target = SPEED/30*0.25 = vx.  (vx 0.25 -> SPEED 30.)
+        # KEEP THIS IN LOCKSTEP with pico config.h MOTOR_V_MAX_MPS: if that
+        # changes, set scale = 30 / MOTOR_V_MAX_MPS. (Was 100 = open-loop duty map.)
+        self.declare_parameter('vel_to_speed_scale', 120.0)
         self.declare_parameter('max_speed_pulses', 30)
 
         self.declare_parameter('servo_center_us', 1650)
@@ -188,19 +185,15 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('servo_us_min', 1125)
         self.declare_parameter('servo_us_max', 2175)
         self.declare_parameter('servo_max_steer_rad', 0.5236)
-        # Default -1 on this chassis: empirically the linkage geometry inverts
-        # the firmware's intended sign so that ROS-positive wz (left turn)
-        # needs us > center, not us < center. Override to +1 if the hardware
-        # is rewired the other way.
-        self.declare_parameter('servo_polarity', -1)
-        # +1 is the mathematically correct value for ROS body-frame wz:
-        # delta = atan(L * wz / vx) already produces the right Ackermann
-        # steer for both forward and reverse, so the post-multiply is
-        # identity. Manual-joystick wheel-direction-consistency under
-        # reverse is handled upstream in ros2_mobile_bridge.publish_control
-        # (the joystick wz is pre-flipped on reverse), NOT here. Override
-        # to -1 only if a linkage rebuild later inverts the reverse path.
-        self.declare_parameter('reverse_steer_polarity', 1)
+        # Default +1 on this chassis (hardware-verified 2026-06-01): ROS-positive
+        # wz (left turn) maps to servo us < center, matching _steer_to_servo_us's
+        # documented convention. Was -1, which steered the wrong way in both the
+        # joystick and Nav2 (same code path). Override to -1 only if a linkage
+        # rebuild later inverts the forward steering direction.
+        self.declare_parameter('servo_polarity', +1)
+        # -1 matches this chassis' reverse maneuvering; live-SLAM, AMCL, and
+        # standalone bridge launch files all pass the same default.
+        self.declare_parameter('reverse_steer_polarity', -1)
         # +1 = ROS-positive vx drives the chassis forward (standard).
         # -1 = forward/back swapped (use when motor wiring is reversed or the
         # LiDAR-defined map frame is yaw-flipped). Calibration wizard in the
@@ -234,6 +227,7 @@ class Nav2PicoBridge(Node):
         self.min_vx_creep = float(self.get_parameter('min_vx_creep').value)
 
         self.wheelbase = float(self.get_parameter('wheelbase_m').value)
+        self.track_width = float(self.get_parameter('track_width_m').value)
         self.vel_scale = float(self.get_parameter('vel_to_speed_scale').value)
         self.max_speed = int(self.get_parameter('max_speed_pulses').value)
 
@@ -313,6 +307,11 @@ class Nav2PicoBridge(Node):
         if self.publish_wheel_odom:
             self._wheel_odom_pub = self.create_publisher(
                 Odometry, str(self.get_parameter('wheel_odom_topic').value), 10)
+        self.publish_motor_debug = bool(self.get_parameter('publish_motor_debug').value)
+        self._motor_debug_pub = None
+        if self.publish_motor_debug:
+            self._motor_debug_pub = self.create_publisher(
+                String, str(self.get_parameter('motor_debug_topic').value), 10)
 
         if not self.dry_run:
             self._open_serial()
@@ -381,7 +380,7 @@ class Nav2PicoBridge(Node):
         # Start the RX thread that parses the Pico's TEL telemetry and
         # republishes wheel odometry. pyserial tolerates read on this
         # thread while _send() writes on the timer thread.
-        if self.publish_wheel_odom:
+        if self.publish_wheel_odom or self.publish_motor_debug:
             self._rx_thread = threading.Thread(
                 target=self._rx_loop, name='pico_tel_rx', daemon=True)
             self._rx_thread.start()
@@ -421,6 +420,15 @@ class Nav2PicoBridge(Node):
             line = raw.decode('ascii', errors='ignore').strip()
             if line.startswith('TEL '):
                 self._publish_tel_odom(line[4:])
+            elif line.startswith('MOT '):
+                self._publish_motor_debug(line)
+
+    def _publish_motor_debug(self, line: str) -> None:
+        if self._motor_debug_pub is None:
+            return
+        msg = String()
+        msg.data = line
+        self._motor_debug_pub.publish(msg)
 
     def _publish_tel_odom(self, payload: str) -> None:
         """Parse the CSV body of a TEL line and publish nav_msgs/Odometry.
@@ -572,6 +580,11 @@ class Nav2PicoBridge(Node):
                 if not 0.0 <= float(p.value) <= 0.5:
                     return SetParametersResult(successful=False, reason='min_vx_creep out of range')
                 self.min_vx_creep = float(p.value)
+            elif p.name == 'track_width_m':
+                if not 0.05 <= float(p.value) <= 1.0:
+                    return SetParametersResult(
+                        successful=False, reason='track_width_m out of range [0.05, 1.0]')
+                self.track_width = float(p.value)
             elif p.name == 'servo_center_us':
                 if not 800 <= int(p.value) <= 2200:
                     return SetParametersResult(successful=False, reason='servo_center_us out of range')
@@ -615,6 +628,17 @@ class Nav2PicoBridge(Node):
         s = int(round(self.vx_polarity * vx * self.vel_scale))
         return clamp(s, -self.max_speed, +self.max_speed)
 
+    def _vx_steer_to_wheel_speeds(self, vx: float, steer: float) -> tuple[int, int]:
+        """Convert body vx + actual commanded steering angle to rear-wheel
+        SPEED targets. Using per-wheel targets avoids rear-axle scrub in turns,
+        which is especially costly on this torque-limited L298N drivetrain."""
+        if abs(vx) < 1.0e-6:
+            return 0, 0
+        wz_eff = vx * math.tan(steer) / self.wheelbase
+        v_left = vx - wz_eff * (self.track_width / 2.0)
+        v_right = vx + wz_eff * (self.track_width / 2.0)
+        return self._vx_to_speed_pulses(v_left), self._vx_to_speed_pulses(v_right)
+
     def _vx_wz_to_steer(self, vx: float, wz: float) -> float:
         """Standard Ackermann inverse. Mirrors firmware ackermann.c:23.
 
@@ -622,9 +646,9 @@ class Nav2PicoBridge(Node):
         directions: when vx<0 and wz>0 (body rotating left while reversing)
         the atan denominator goes negative and delta comes out negative —
         wheels physically point right, which is exactly what's needed to
-        pivot the body left in reverse. So reverse_steer_polarity defaults
-        to +1 (identity); manual-joystick driver-intuition fixes live in
-        ros2_mobile_bridge.publish_control, not here.
+        pivot the body left in reverse. This chassis defaults
+        reverse_steer_polarity to -1 because floor tests showed reverse
+        maneuvering was swapped after the forward steering correction.
         """
         if abs(vx) < 0.01:
             if abs(wz) < 0.01:
@@ -753,7 +777,6 @@ class Nav2PicoBridge(Node):
         elif self._cusp_cooldown_end is not None:
             self._cusp_cooldown_end = None
 
-        speed = self._vx_to_speed_pulses(gated_vx)
         steer = self._vx_wz_to_steer(self.output.vx, self.output.wz)
         # Servo slew-rate limiter — runs in steering-angle space (rad) so it
         # respects the actual mechanical limit of the servo, not the µs scale.
@@ -766,11 +789,12 @@ class Nav2PicoBridge(Node):
         self._last_steer_sent_rad = steer
         self._last_steer_t = now
         servo_us = self._steer_to_servo_us(steer)
+        speed_left, speed_right = self._vx_steer_to_wheel_speeds(gated_vx, steer)
 
-        # SPEED every tick — feeds the firmware's 200 ms watchdog
-        # (safety_feed_watchdog() is called by the SPEED handler).
-        self._send(f"SPEED {speed}")
-        self._last_speed_sent = speed
+        # SPEEDS every tick — feeds the firmware's 200 ms watchdog
+        # (safety_feed_watchdog() is called by the SPEEDS handler).
+        self._send(f"SPEEDS {speed_left} {speed_right}")
+        self._last_speed_sent = (speed_left, speed_right)
         # SERVO_PWM only on change to save serial bandwidth (and because
         # the SERVO_PWM handler does not feed the watchdog anyway).
         if servo_us != self._last_us_sent:

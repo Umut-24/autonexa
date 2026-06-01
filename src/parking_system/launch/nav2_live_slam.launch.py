@@ -123,11 +123,10 @@ def generate_launch_description():
     )
     min_vx_creep_arg = DeclareLaunchArgument(
         'min_vx_creep',
-        default_value='0.03',
-        description='|vx| below this -> SPEED 0 in the ASCII bridge. Lowered 0.05 -> 0.03 now that the '
-                    'firmware kick-start (encoder-aware) replaces the old permanent 60% PWM floor: the '
-                    'motors can sustain slow motion, so the chain no longer has to silence sub-stall '
-                    'commands. Lets the controller realise finer approach/creep speeds. Tune on hardware.'
+        default_value='0.10',
+        description='|vx| below this -> SPEEDS 0 0 in the ASCII bridge. 0.10 lets the Pico start-assist '
+                    'kick engage earlier than the old 0.15 gate; Nav2 controller floors keep normal '
+                    'driving above the unstable low-speed band.'
     )
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
     # Symmetric ±500 µs around the 1650 center — the previous 1100/1900
@@ -135,7 +134,7 @@ def generate_launch_description():
     # to ~2× more steering on left turns than right.
     servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1150')
     servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='2150')
-    servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='-1')
+    servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='+1')  # +1: hardware-verified 2026-06-01 (was -1, steering was reversed)
     reverse_steer_polarity_arg = DeclareLaunchArgument(
         'reverse_steer_polarity',
         default_value='-1',
@@ -222,9 +221,9 @@ def generate_launch_description():
     # --- Odometry: scan matcher, optionally fused with wheel odom via EKF ---
     # use_ekf OFF (default): the scan matcher owns odom->base_link TF and
     #   publishes /odom directly — exactly today's behavior.
-    # use_ekf ON: the scan matcher publishes only /odom_icp (no TF); the EKF
-    #   fuses /odom_icp (ICP pose) + /pico/odom (wheel velocity) and owns the
-    #   odom->base_link TF, publishing the fused result on /odom.
+    # use_ekf ON: the scan matcher publishes raw /odom_icp_raw (no TF), a small
+    #   relay drops any cold-start NaN sample and republishes clean /odom_icp;
+    #   the EKF fuses /odom_icp + /pico/odom and owns odom->base_link.
     laser_scan_matcher = Node(
         package='ros2_laser_scan_matcher',
         executable='laser_scan_matcher',
@@ -253,10 +252,23 @@ def generate_launch_description():
             'odom_frame': 'odom',
             'laser_frame': 'laser_link',
             'publish_tf': False,          # EKF owns the TF in this mode
-            'publish_odom': '/odom_icp',  # feeds the EKF as odom1
+            'publish_odom': '/odom_icp_raw',
             'use_sim_time': False,
         }],
         remappings=[('scan', '/scan')]
+    )
+
+    odom_nan_filter = Node(
+        package='parking_system',
+        executable='odom_nan_filter.py',
+        name='odom_nan_filter',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_ekf')),
+        parameters=[{
+            'input_topic': '/odom_icp_raw',
+            'output_topic': '/odom_icp',
+            'use_sim_time': False,
+        }],
     )
 
     # robot_localization EKF — only started when use_ekf is true. Fuses
@@ -484,12 +496,13 @@ def generate_launch_description():
             'serial_baud':       115200,
             'publish_rate_hz':   30.0,
             'command_timeout_s': 0.20,
-            'max_vx_mps':        0.30,
+            'max_vx_mps':        0.25,
             'max_wz_radps':      0.8,
-            'max_ax_mps2':       0.8,
-            'max_aw_radps2':     1.2,
+            'max_ax_mps2':       0.60,
+            'max_aw_radps2':     0.50,
             'min_vx_creep':      LaunchConfiguration('min_vx_creep'),
             'wheelbase_m':       0.25,
+            'track_width_m':     0.20,
             'servo_center_us':   LaunchConfiguration('servo_center_us'),
             'servo_us_min':      LaunchConfiguration('servo_us_min'),
             'servo_us_max':      LaunchConfiguration('servo_us_max'),
@@ -581,6 +594,7 @@ def generate_launch_description():
         lidar,
         laser_scan_matcher,
         laser_scan_matcher_ekf,
+        odom_nan_filter,
         ekf_node,
         slam_toolbox,
         lifecycle_manager_slam,

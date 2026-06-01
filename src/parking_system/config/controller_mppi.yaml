@@ -49,24 +49,45 @@ controller_server:
 
     FollowPath:
       plugin: "nav2_mppi_controller::MPPIController"
-      # --- optimizer / horizon ---
-      time_steps: 40            # horizon = time_steps * model_dt = 4.0 s
+      # --- optimizer / horizon (DOWNSIZED for Pi-5) ---
+      # Was batch 1000 x time_steps 40 x 8 critics @ 10 Hz — too heavy for the
+      # Pi 5, so the controller fell behind 10 Hz, commands arrived late, the
+      # bridge's 200 ms timeout zeroed them, and the drive stalled while the
+      # servo flailed on stale/jumpy wz. Cut ~6x: batch 1000->384, steps 40->24
+      # (horizon 4.0 s -> 2.4 s, plenty for a 1-2 m testbed). Verify it now
+      # holds rate: `ros2 topic hz /cmd_vel` should read ~10 Hz under a goal.
+      time_steps: 24            # horizon = time_steps * model_dt = 2.4 s
       model_dt: 0.1             # == 1/controller_frequency
-      batch_size: 1000          # primary Pi-5 CPU knob (back-off: 800 / 600)
+      batch_size: 384           # primary Pi-5 CPU knob (raise toward 600 if CPU allows)
       iteration_count: 1
       temperature: 0.3          # softmax selectiveness (lower = greedier)
       gamma: 0.015
       # Sampling noise std-devs. vy unused on a non-holonomic chassis.
-      vx_std: 0.1
+      # vx_std lowered 0.1 -> 0.05: at the old value the velocity samples
+      # sprayed across nearly the whole [vx_min, vx_max] band, so the weighted
+      # mean vx dithered around zero and flipped sign — which trips the Pico
+      # bridge's creep gate (vx<0.05 -> SPEED 0) and 500 ms cusp-hold over and
+      # over, pinning SPEED at 0 so the kick-start never completes and the car
+      # never moves. A tighter vx_std keeps the command decisive/forward.
+      vx_std: 0.05
       vy_std: 0.0
-      wz_std: 0.3
+      # wz_std lowered 0.3 -> 0.15: the steering servo follows wz directly, so a
+      # noisy wz makes the servo flail. At low vx the Ackermann IK (delta =
+      # atan(L*wz/vx)) is hypersensitive, amplifying any wz jitter to near
+      # full-lock — tighter wz sampling keeps the steering steady.
+      wz_std: 0.15
       # --- velocity / accel limits (lockstep with velocity_smoother) ---
-      vx_max: 0.10              # == velocity_smoother.max_velocity[0]; speed slider tunes this
-      vx_min: -0.10             # reverse allowed (K-turn / back-in parking)
+      # 0.25 m/s matches the calibrated firmware speed scale
+      # (SPEED 30 == MOTOR_V_MAX_MPS 0.25). Reverse is allowed for parking cusps
+      # but capped slightly lower.
+      vx_max: 0.25              # == velocity_smoother.max_velocity[0]; speed slider tunes this
+      vx_min: -0.20             # reverse allowed (K-turn / back-in), above move floor
       vy_max: 0.0
       wz_max: 0.5               # <= velocity_smoother wz cap (0.5)
-      ax_max: 0.15
-      ax_min: -0.15
+      # Faster ramp through the bridge's 0.10 m/s creep gate so the Pico
+      # start-assist sees a decisive command quickly.
+      ax_max: 0.60
+      ax_min: -0.60
       ay_max: 0.0
       az_max: 0.35
       # --- path handling ---
@@ -91,7 +112,7 @@ controller_server:
       critics: [
         "ConstraintCritic", "CostCritic", "GoalCritic", "GoalAngleCritic",
         "PreferForwardCritic", "PathAlignCritic", "PathFollowCritic",
-        "PathAngleCritic"
+        "PathAngleCritic", "VelocityDeadbandCritic"
       ]
       ConstraintCritic:
         enabled: true
@@ -151,3 +172,8 @@ controller_server:
         threshold_to_consider: 0.5
         max_angle_to_furthest: 1.0
         mode: 2
+      VelocityDeadbandCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 35.0
+        deadband_velocities: [0.12, 0.0, 0.0]

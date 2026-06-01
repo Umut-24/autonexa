@@ -74,6 +74,10 @@ try:
     from nav2_msgs.srv import ClearEntireCostmap
 except ImportError:
     ClearEntireCostmap = None
+try:
+    from slam_toolbox.srv import Reset as SlamReset
+except ImportError:
+    SlamReset = None
 from flask import Flask, Response, jsonify, request, send_file
 from flask_sock import Sock
 
@@ -407,6 +411,14 @@ class MobileBridgeNode(Node):
                 'nav2_msgs missing — /api/clear_costmaps will be unavailable')
         self._slam_change_state = self.create_client(
             ChangeState, '/slam_toolbox/change_state')
+        # Dedicated in-place map/pose-graph reset (keeps the node ACTIVE; does
+        # not fight lifecycle_manager_slam the way a deactivate/cleanup cycle
+        # does). Preferred path for restart_mapping().
+        if SlamReset is not None:
+            self._slam_reset = self.create_client(
+                SlamReset, '/slam_toolbox/reset')
+        else:
+            self._slam_reset = None
 
         # --- AMCL no-motion update client + timer (Part E) ---
         # nav2_amcl advertises this Empty service globally as
@@ -1280,22 +1292,55 @@ class MobileBridgeNode(Node):
         res = future.result()
         return {'ok': bool(res.success)}
 
+    def _slam_reset_call(self, timeout: float = 8.0) -> dict:
+        """Call /slam_toolbox/reset (slam_toolbox/srv/Reset). Wipes the
+        pose graph + occupancy map in place while the node stays ACTIVE."""
+        if self._slam_reset is None:
+            return {'ok': False, 'reason': 'slam_toolbox/srv/Reset unavailable'}
+        if not self._slam_reset.wait_for_service(timeout_sec=2.0):
+            return {'ok': False, 'reason': '/slam_toolbox/reset not advertised'}
+        req = SlamReset.Request()
+        req.pause_new_measurements = False
+        future = self._slam_reset.call_async(req)
+        deadline = time.time() + timeout
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.01)
+        if not future.done():
+            return {'ok': False, 'reason': 'timeout'}
+        res = future.result()
+        # RESULT_SUCCESS == 0.
+        return {'ok': res.result == SlamReset.Response.RESULT_SUCCESS,
+                'result': int(res.result)}
+
     def restart_mapping(self) -> dict:
-        """Cycle SLAM Toolbox through deactivate -> cleanup -> configure ->
-        activate. Drops the current map and starts fresh. Costmaps cleared
-        as well so the planner doesn't carry stale obstacles into the new
-        map frame."""
-        steps = []
-        for tid, label in (
-            (Transition.TRANSITION_DEACTIVATE, 'deactivate'),
-            (Transition.TRANSITION_CLEANUP, 'cleanup'),
-            (Transition.TRANSITION_CONFIGURE, 'configure'),
-            (Transition.TRANSITION_ACTIVATE, 'activate'),
-        ):
-            r = self._slam_change(tid)
-            steps.append({'step': label, **r})
-            if not r.get('ok'):
-                break
+        """Drop the current map and start fresh.
+
+        Preferred path is the dedicated /slam_toolbox/reset service, which
+        clears the pose graph + map in place while SLAM Toolbox stays ACTIVE.
+        The previous deactivate->cleanup->configure->activate lifecycle cycle
+        fought lifecycle_manager_slam and routinely timed out on the slow
+        cleanup teardown — so the map never actually reset even though the app
+        bumped its version. Falls back to that cycle only if the reset service
+        isn't available. Costmaps are cleared either way so the planner doesn't
+        carry stale obstacles into the fresh map."""
+        reset = self._slam_reset_call()
+        steps = [{'step': 'reset', **reset}]
+        if not reset.get('ok') and self._slam_reset is not None and \
+                reset.get('reason') == '/slam_toolbox/reset not advertised':
+            # Older slam_toolbox without the reset service: fall back to the
+            # lifecycle cycle (best-effort).
+            for tid, label in (
+                (Transition.TRANSITION_DEACTIVATE, 'deactivate'),
+                (Transition.TRANSITION_CLEANUP, 'cleanup'),
+                (Transition.TRANSITION_CONFIGURE, 'configure'),
+                (Transition.TRANSITION_ACTIVATE, 'activate'),
+            ):
+                r = self._slam_change(tid, timeout=8.0)
+                steps.append({'step': label, **r})
+                if not r.get('ok'):
+                    break
+        ok = any(s['step'] == 'reset' and s.get('ok') for s in steps) or \
+            any(s['step'] == 'activate' and s.get('ok') for s in steps)
         # Drop costmap obstacles; their map frame is about to change anyway.
         cm = self.clear_costmaps()
         # Bump map_version so the app refetches a blank PNG immediately.
@@ -1303,7 +1348,7 @@ class MobileBridgeNode(Node):
             self._map_version += 1
             self._map_png = None
             self._map_fingerprint = self._new_map_session_fingerprint()
-        return {'steps': steps, 'costmaps': cm}
+        return {'ok': ok, 'steps': steps, 'costmaps': cm}
 
     # --- Robot dimension live-edit + goal inflation escape ---
 
@@ -2815,8 +2860,8 @@ def api_nav2_speed():
         target = float(data['max_vel_x'])
     except (TypeError, ValueError):
         return jsonify({'error': 'max_vel_x must be a number'}), 400
-    if not 0.05 <= target <= 0.50:
-        return jsonify({'error': 'max_vel_x must be in [0.05, 0.50]'}), 400
+    if not 0.16 <= target <= 0.25:
+        return jsonify({'error': 'max_vel_x must be in [0.16, 0.25]'}), 400
     ctrl = bridge_node.set_remote_params('/controller_server', {param: target})
     # If the active controller changed since last detection (relaunch into the
     # other controller), the param name is now wrong — re-detect once + retry.

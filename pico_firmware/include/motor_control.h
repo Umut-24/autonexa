@@ -4,6 +4,21 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef struct {
+    float target_left_mps;
+    float target_right_mps;
+    float measured_left_mps;
+    float measured_right_mps;
+    int8_t duty_left_pct;
+    int8_t duty_right_pct;
+    bool started_left;
+    bool started_right;
+    bool stall_left;
+    bool stall_right;
+    bool cutoff_left;
+    bool cutoff_right;
+} motor_debug_t;
+
 /**
  * Motor control abstraction layer.
  *
@@ -50,14 +65,29 @@ void motor_control_stop(void);
 bool motor_control_is_enabled(void);
 
 /**
- * Feed measured per-tick encoder deltas so motor_control_apply() knows
- * whether each wheel is actually rolling. Drives the encoder-aware
- * kick-start (break static friction from rest, then honor proportional
- * duty). Call once per control loop iteration BEFORE motor_control_apply().
- * @param d_enc_left   left-wheel encoder edges since last tick (signed)
- * @param d_enc_right  right-wheel encoder edges since last tick (signed)
+ * Feed the measured per-wheel linear speed (m/s, signed) from the encoders so
+ * the closed-loop velocity PI in motor_control_apply() can regulate each wheel
+ * to its target. Internally low-pass filtered (MOTOR_VEL_LPF_ALPHA). Call once
+ * per control loop iteration BEFORE motor_control_apply().
+ * @param v_left_mps   left-wheel measured linear speed [m/s] (signed)
+ * @param v_right_mps  right-wheel measured linear speed [m/s] (signed)
  */
-void motor_control_update_feedback(int32_t d_enc_left, int32_t d_enc_right);
+void motor_control_update_feedback(float v_left_mps, float v_right_mps);
+
+/**
+ * Live-set the closed-loop velocity-PI gains + deadband feedforward (bench
+ * tuning without reflashing; resets the integrators). Bake winners into config.h.
+ * @param kp         P gain (duty% per m/s error)
+ * @param ki         I gain (duty% per m/s*s error)
+ * @param ff_offset  static deadband feedforward duty % (sign of target)
+ */
+void motor_control_set_pi(float kp, float ki, float ff_offset);
+
+/** Read the current velocity-PI gains (any pointer may be NULL). */
+void motor_control_get_pi(float *kp, float *ki, float *ff_offset);
+
+/** Read latest closed-loop debug state for serial telemetry. */
+void motor_control_get_debug(motor_debug_t *debug);
 
 /**
  * Apply current motor commands to hardware.

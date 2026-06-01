@@ -138,6 +138,20 @@ static void process_serial_command(const char *cmd)
         safety_feed_watchdog();
         printf("OK SPEED_R %d\n", speed_right);
     }
+    else if (strncmp(cmd, "SPEEDS ", 7) == 0) {
+        int left, right;
+        if (sscanf(cmd + 7, "%d %d", &left, &right) == 2) {
+            speed_left  = (int8_t)left;
+            speed_right = (int8_t)right;
+            motor_control_set_speeds(speed_left, speed_right);
+            safety_feed_watchdog();
+            printf("OK SPEEDS %d %d\n",
+                   motor_control_get_speed_left(),
+                   motor_control_get_speed_right());
+        } else {
+            printf("ERR SPEEDS usage: SPEEDS <left> <right>\n");
+        }
+    }
     else if (strncmp(cmd, "SPEED ", 6) == 0) {
         int8_t spd = (int8_t)atoi(cmd + 6);
         speed_left  = spd;
@@ -189,6 +203,24 @@ static void process_serial_command(const char *cmd)
         } else {
             printf("ERR RAW_PWM usage: RAW_PWM <m1> <m2> <m3> <m4>\n");
         }
+    }
+
+    /* === Closed-loop velocity-PI live tuning (bench) ===
+     * "PI <kp> <ki> <ff>" sets gains; "PI" alone reports them. Lets the PI be
+     * tuned without reflashing; bake the winners into config.h. */
+    else if (strncmp(cmd, "PI ", 3) == 0) {
+        float kp, ki, ff;
+        if (sscanf(cmd + 3, "%f %f %f", &kp, &ki, &ff) == 3) {
+            motor_control_set_pi(kp, ki, ff);
+            printf("OK PI kp=%.1f ki=%.1f ff=%.1f\n", kp, ki, ff);
+        } else {
+            printf("ERR PI usage: PI <kp> <ki> <ff_offset_pct>\n");
+        }
+    }
+    else if (strcmp(cmd, "PI") == 0) {
+        float kp, ki, ff;
+        motor_control_get_pi(&kp, &ki, &ff);
+        printf("PI kp=%.1f ki=%.1f ff=%.1f\n", kp, ki, ff);
     }
 
     /* === RAW_PID and I2C debug verbs are not supported on L298N === */
@@ -252,7 +284,8 @@ static void process_serial_command(const char *cmd)
         printf("  SERVO_SWEEP          - Sweep GP%d through 1000/1500/2000 us\n", SERVO_PIN);
         printf("  SERVO_PIN_TEST       - Toggle GP%d high/low for electrical debug\n", SERVO_PIN);
         printf("  SERVO_PIN_HOLD       - Hold GP%d high 10s, then low 10s\n", SERVO_PIN);
-        printf("  SPEED <-30..30>      - Both motors (open-loop PWM, scaled to 0..100%%)\n");
+        printf("  SPEED <-30..30>      - Both motors (closed-loop target speed)\n");
+        printf("  SPEEDS <L> <R>       - Atomic per-wheel speed targets\n");
         printf("  SPEED_L <-30..30>    - Left motor speed\n");
         printf("  SPEED_R <-30..30>    - Right motor speed\n");
         printf("  STEER <rad>          - Steering angle\n");
@@ -311,6 +344,27 @@ static void print_telemetry(void)
            odom.vx, odom.wz,
            safety_is_estopped(),
            safety_is_timed_out());
+
+    motor_debug_t dbg;
+    motor_control_get_debug(&dbg);
+    /* MOT <ms>,<targetL>,<targetR>,<measL>,<measR>,<dutyL>,<dutyR>,
+     *     <startedL>,<startedR>,<stallL>,<stallR>,<cutoffL>,<cutoffR>
+     * This is the floor-test truth source for distinguishing PI saturation,
+     * stall cutoff, and power/torque-limited starts. */
+    printf("MOT %lu,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d,%d,%d,%d\n",
+           (unsigned long)to_ms_since_boot(get_absolute_time()),
+           dbg.target_left_mps,
+           dbg.target_right_mps,
+           dbg.measured_left_mps,
+           dbg.measured_right_mps,
+           dbg.duty_left_pct,
+           dbg.duty_right_pct,
+           dbg.started_left,
+           dbg.started_right,
+           dbg.stall_left,
+           dbg.stall_right,
+           dbg.cutoff_left,
+           dbg.cutoff_right);
 }
 
 #endif /* !USE_MICRO_ROS */
@@ -419,10 +473,10 @@ int main(void)
         /* 3) Safety check */
         safety_update();
 
-        /* 4) Feed measured wheel motion to the encoder-aware kick-start,
-         *    then apply motor commands. The feedback call must precede
-         *    apply() so the kick logic sees this tick's rolling state. */
-        motor_control_update_feedback(d_l, d_r);
+        /* 4) Feed measured per-wheel speed to the closed-loop velocity PI,
+         *    then apply motor commands. The feedback call must precede apply()
+         *    so the PI regulates on this tick's measured speed. */
+        motor_control_update_feedback(v_l, v_r);
         motor_control_apply();
 
 #ifdef USE_MICRO_ROS

@@ -137,15 +137,14 @@ def generate_launch_description():
     )
     min_vx_creep_arg = DeclareLaunchArgument(
         'min_vx_creep',
-        default_value='0.03',
-        description='|vx| below this -> SPEED 0 in the ASCII bridge. Lowered 0.05 -> 0.03 now that the '
-                    'firmware kick-start replaces the old permanent 60% PWM floor (the motors can '
-                    'sustain slow motion). Tune on hardware.'
+        default_value='0.10',
+        description='|vx| below this -> SPEEDS 0 0 in the ASCII bridge. Matches live-SLAM and lets '
+                    'the Pico start-assist kick engage before the old 0.15 gate would pass motion.'
     )
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
     servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1150')
     servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='2150')
-    servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='-1')
+    servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='+1')
     reverse_steer_polarity_arg = DeclareLaunchArgument(
         'reverse_steer_polarity',
         default_value='-1',
@@ -229,8 +228,8 @@ def generate_launch_description():
     # /scan (the map was built on raw /scan too, so this stays consistent).
     # laser_scan_matcher still owns odom -> base_link (AMCL only publishes
     # map -> odom, so the two TF producers don't fight) — UNLESS use_ekf is
-    # on, in which case the EKF owns odom -> base_link and the matcher just
-    # feeds it /odom_icp. See nav2_live_slam.launch.py for the same pattern.
+    # on, in which case the EKF owns odom -> base_link and the matcher feeds
+    # /odom_icp_raw through odom_nan_filter before EKF fusion.
     laser_scan_matcher = Node(
         package='ros2_laser_scan_matcher',
         executable='laser_scan_matcher',
@@ -252,11 +251,24 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_ekf')),
         parameters=[
             laser_scan_matcher_params_file,
-            # Override the yaml: don't own TF, publish ICP odom to /odom_icp
-            # for the EKF to fuse with /pico/odom.
-            {'use_sim_time': False, 'publish_tf': False, 'publish_odom': '/odom_icp'},
+            # Override the yaml: don't own TF, publish raw ICP odom for the
+            # NaN filter to clean before EKF fusion.
+            {'use_sim_time': False, 'publish_tf': False, 'publish_odom': '/odom_icp_raw'},
         ],
         remappings=[('scan', '/scan')]
+    )
+
+    odom_nan_filter = Node(
+        package='parking_system',
+        executable='odom_nan_filter.py',
+        name='odom_nan_filter',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_ekf')),
+        parameters=[{
+            'input_topic': '/odom_icp_raw',
+            'output_topic': '/odom_icp',
+            'use_sim_time': False,
+        }],
     )
 
     ekf_params_file = PathJoinSubstitution([pkg_dir, 'config', 'ekf_2d_no_imu.yaml'])
@@ -468,12 +480,13 @@ def generate_launch_description():
             'serial_baud':       115200,
             'publish_rate_hz':   30.0,
             'command_timeout_s': 0.20,
-            'max_vx_mps':        0.30,
+            'max_vx_mps':        0.25,
             'max_wz_radps':      0.8,
-            'max_ax_mps2':       0.8,
-            'max_aw_radps2':     1.2,
+            'max_ax_mps2':       0.60,
+            'max_aw_radps2':     0.50,
             'min_vx_creep':      LaunchConfiguration('min_vx_creep'),
             'wheelbase_m':       0.25,
+            'track_width_m':     0.20,
             'servo_center_us':   LaunchConfiguration('servo_center_us'),
             'servo_us_min':      LaunchConfiguration('servo_us_min'),
             'servo_us_max':      LaunchConfiguration('servo_us_max'),
@@ -563,6 +576,7 @@ def generate_launch_description():
         lidar,
         laser_scan_matcher,
         laser_scan_matcher_ekf,
+        odom_nan_filter,
         ekf_node,
         map_server,
         amcl,

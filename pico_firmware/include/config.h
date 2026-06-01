@@ -71,33 +71,54 @@
 #define MOTOR_SPEED_MAX      30      /* SPEED 30  -> 100% PWM duty         */
 #define MOTOR_SPEED_MIN     -30      /* SPEED -30 -> 100% reverse duty     */
 
-/* ── Static-friction kick-start (encoder-aware) ──────────────────────
- * The JGB37 motors need a brief high-duty pulse to break static friction
- * from rest, but once rolling they sustain motion at far lower duty.
+/* ── Closed-loop wheel-velocity control (encoder PI) ─────────────────
+ * The drive is now CLOSED-LOOP (motor_control.c velocity_pi). Every prior
+ * open-loop scheme (fixed deadband floor, then an adaptive run-duty ramp) was a
+ * kludge around the missing feedback: PWM duty has no fixed relationship to real
+ * m/s under load, so a commanded speed was never actually achieved. With the
+ * quadrature encoders wired, each wheel is now regulated to a TARGET SPEED:
  *
- * The OLD firmware snapped *every* non-zero command up to a permanent 60%
- * floor (MOTOR_DEADBAND_PCT). With Nav2 only ever commanding SPEED 0-10
- * (duty <=33%), that made the drive bang-bang — stopped, or ~60% duty —
- * and silently defeated every Nav2 slow-down / approach / creep command:
- * the chassis could not decelerate for a wall (=> crashes) or settle on a
- * parking/summon goal (=> overshoot + hunting).
+ *   target_mps = (SPEED / MOTOR_SPEED_MAX) * MOTOR_V_MAX_MPS   (signed)
+ *   err        = target_mps - measured_wheel_mps   (from encoders)
+ *   duty       = MOTOR_VEL_KP*err + integral(MOTOR_VEL_KI*err)  -> clamp +-100%
  *
- * New policy (motor_control.c motor_control_apply): when a wheel is stopped
- * and a non-zero speed is commanded, drive MOTOR_KICK_PCT for MOTOR_KICK_MS
- * to break stiction; once the encoders report the wheel rolling, honor the
- * real proportional duty (floored to MOTOR_MIN_RUN_PCT so the command still
- * produces motion). SPEED 0 always coasts to a stop. "Rolling" is judged
- * from the quadrature encoders via motor_control_update_feedback().
+ * Per-wheel loops with a common target also equalize the L/R motor asymmetry
+ * (left is stronger) -> no veer. Integral anti-windup freezes the integrator
+ * when the duty saturates. SPEED 0 coasts and resets the loop.
+ *
+ * Two open-loop helpers are kept around the PI:
+ *   - START FEEDFORWARD: a one-shot MOTOR_KICK_PCT pulse for up to MOTOR_KICK_MS
+ *     to break static friction from rest before the PI takes over (the encoder
+ *     ends it early once moving). Static friction can exceed what the PI ramps
+ *     to in one tick, so the kick guarantees a clean break-away.
+ *   - STALL CUTOFF: if commanded but the encoder shows not-moving past the kick
+ *     for > MOTOR_STALL_CUTOFF_MS (the PI will have wound duty to saturation),
+ *     CUT to 0 (coast). A blocked / over-loaded wheel must not sit energized:
+ *     stall current through the current-limitless L298N overheats the motor +
+ *     bridge (the audible "beep"). Re-arms on the next SPEED 0.
  *
  * RAW_PWM still bypasses all of this — it applies the literal duty.
  *
- * Tuning (on-hardware): MOTOR_MIN_RUN_PCT must be >= the duty that keeps a
- * rolling wheel rolling, otherwise the wheel stalls just below it, the
- * encoder reads "stopped", and the kick re-fires -> visible lurching. */
-#define MOTOR_KICK_PCT         80   /* kick-pulse duty % to break stiction */
-#define MOTOR_KICK_MS          120  /* kick-pulse duration [ms]            */
-#define MOTOR_MIN_RUN_PCT      22   /* lowest duty % that sustains rolling */
-#define MOTOR_ENC_MOVING_EDGES 2    /* |edges/tick| above this => moving   */
+ * Tuning: MOTOR_V_MAX_MPS = bench-measured top wheel speed at 100% duty ON THE
+ * FLOOR (loaded) so SPEED 30 == the real top speed. Kp/Ki tuned for a fast,
+ * non-oscillating step. Starting values below are first guesses pending the
+ * on-hardware step-response tune. */
+#define MOTOR_V_MAX_MPS        0.25f /* loaded top wheel speed @100% duty [m/s] (MEASURE) */
+/* Static deadband feedforward: a base duty (sign of target) applied whenever a
+ * non-zero speed is commanded, so the duty starts near the sustain instead of 0.
+ * Without it a pure PI has to wind the integral up through the whole dead zone
+ * (slow start, low-speed hunting, false stall cutoffs). The PI then only trims
+ * the residual; the integral can go negative to slow below the offset. */
+#define MOTOR_FF_OFFSET_PCT    45.0f /* floor-load deadband feedforward duty %           */
+#define MOTOR_VEL_KP           180.0f /* P gain: duty% per (m/s) error                    */
+#define MOTOR_VEL_KI           900.0f /* I gain: duty% per (m/s*s) error                  */
+#define MOTOR_VEL_MOVING_MPS   0.02f /* |wheel m/s| above this => "moving"               */
+#define MOTOR_VEL_LPF_ALPHA    0.4f  /* EWMA on measured wheel speed (0=slow,1=raw)      */
+#define MOTOR_KICK_PCT         100  /* start-feedforward duty % to break stiction        */
+#define MOTOR_KICK_MS          400  /* one-shot start-feedforward max duration [ms]       */
+#define MOTOR_START_MIN_DUTY_PCT 75 /* min duty during loaded start-assist after kick     */
+#define MOTOR_START_ASSIST_MS  1200 /* keep start duty floor while still below move speed */
+#define MOTOR_STALL_CUTOFF_MS  1600 /* commanded+not-moving longer than this -> cut to 0  */
 
 /* ---------- Servo (Steering) — LD-1501MG ---------- */
 #define SERVO_PIN            15      /* GPIO 15 (servo debug wiring)       */

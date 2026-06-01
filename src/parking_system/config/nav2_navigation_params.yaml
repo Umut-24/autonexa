@@ -151,12 +151,9 @@ controller_server:
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
-      # 0.08 m/s default (was 0.10). User reported the chassis never
-      # actually reaches 0.10 in practice, and the slower cruise means
-      # less momentum the bumper has to dissipate at goal approach.
-      # App slider still lets the user live-tune via Settings → Nav2
-      # Max Speed when they want to push harder.
-      desired_linear_vel: 0.08
+      # 0.22 m/s cruise: high enough to stay out of the floor-load deadband,
+      # below the 0.25 m/s closed-loop top-speed scale.
+      desired_linear_vel: 0.22
 
       # SNAKE FIX (primary): push the carrot well outside the chassis
       # footprint. With small lookahead the steering command was a steep
@@ -209,12 +206,9 @@ controller_server:
       # is already crawling by the time it hits the cusp.
       regulated_linear_scaling_min_radius: 1.20
 
-      # Curve-floor speed 0.05 m/s — lowered to match the new
-      # DirectionalStop linear_min creep window (0.05 m/s). The regulator
-      # can dip the chassis below the bumper-trigger threshold when a
-      # curve actually demands it, which is exactly how parking-style
-      # final-approach cusps need to feel.
-      regulated_linear_scaling_min_speed: 0.05
+      # Keep curve-regulated speeds above the drivetrain's usable movement band;
+      # lower values get gated to zero by the bridge and cause stop/start crawl.
+      regulated_linear_scaling_min_speed: 0.16
       # Start the approach taper 1.5 m out (was 0.8 m). The car was
       # 0.60 m: shortened from 1.5 m. The previous long slow tail caused
       # the chassis to spend ~10 s creeping at sub-stall speeds, which
@@ -224,15 +218,9 @@ controller_server:
       # 8 cm DirectionalStop bumper there's still plenty of runway to
       # decelerate before the bumper trips.
       approach_velocity_scaling_dist: 0.60
-      # 0.04 m/s: the firmware kick-start (encoder-aware) now breaks static
-      # friction with a brief high-duty pulse and then sustains slow motion
-      # at MOTOR_MIN_RUN_PCT, so the controller no longer has to command an
-      # artificially high approach speed to avoid stalling. Lowered 0.07 ->
-      # 0.04 (was originally 0.04 before the stall-floor workaround) for a
-      # gentler final approach; paired with the bridge's min_vx_creep at 0.03.
-      # NOTE: actual minimum speed is still bounded by the open-loop sustain
-      # floor until the closed-loop velocity PID (staged follow-up) lands.
-      min_approach_linear_velocity: 0.04
+      # Final approach remains above the movement band, then the bridge's
+      # 0.10 m/s creep gate produces a clean stop instead of a low-duty crawl.
+      min_approach_linear_velocity: 0.16
       # Ackermann chassis: no rotate-in-place. Reversing IS allowed (paired
       # with the planner's REEDS_SHEPP default below) — on a 2x2 m testbed
       # DUBIN's forward-only paths produced contorted loops that satisfied
@@ -555,23 +543,17 @@ velocity_smoother:
     scale_velocities: false
     feedback: "OPEN_LOOP"
 
-    # vx cap dropped to 0.10 m/s in lockstep with the controller's new
-    # 0.08 m/s desired_linear_vel (with a 0.02 m/s headroom buffer above
-    # cruise). wz cap unchanged (0.5 rad/s).
-    max_velocity: [0.10, 0.0, 0.5]
-    min_velocity: [-0.3, 0.0, -0.5]
-    # Acceleration caps softened further (was 0.20/0.45). The bridge's
-    # own 0.30/0.50 caps already shape the ramp; this smoother layer is
-    # just so the controller can't fire a sudden jump. Decel softened
-    # from -1.5 to -1.0 because aggressive braking was contributing to
-    # servo jitter near the goal.
-    max_accel: [0.15, 0.0, 0.35]
+    # Lockstep with MPPI vx_max/RPP cruise and the bridge cap.
+    max_velocity: [0.25, 0.0, 0.5]
+    min_velocity: [-0.20, 0.0, -0.5]
+    # Fast enough to pass the bridge's 0.10 m/s creep gate quickly.
+    max_accel: [0.60, 0.0, 0.50]
     max_decel: [-1.0, 0.0, -1.0]
     odom_topic: "odom"
     odom_duration: 0.1
-    # Smoother deadband removed — let small velocities through. The
-    # bridge's own min_vx_creep (0.05 m/s) handles the final gate.
-    deadband_velocity: [0.0, 0.0, 0.0]
+    # Suppress commands the floor-loaded drivetrain cannot turn into useful
+    # motion; the bridge's 0.10 m/s gate is the final hard cutoff.
+    deadband_velocity: [0.08, 0.0, 0.0]
     velocity_timeout: 1.0
 
 collision_monitor:

@@ -14,27 +14,43 @@ static int8_t  speed_left       = 0;
 static int8_t  speed_right      = 0;
 static bool    motors_enabled   = false;
 
-/* ── Encoder-aware kick-start state ─────────────────────────── */
-/* Updated each tick by motor_control_update_feedback() from the measured
- * encoder deltas; read by motor_control_apply()'s kick logic. */
-static bool     wheel_moving_left   = false;
-static bool     wheel_moving_right  = false;
-/* Absolute-time (ms) at which the current kick pulse ends. 0 = no kick
- * armed (re-armed the next time the wheel is found stopped with a command). */
+/* ── Closed-loop velocity-PI state ──────────────────────────── */
+/* Measured per-wheel linear speed (m/s, signed), low-pass filtered. Updated each
+ * tick by motor_control_update_feedback() from the encoder-derived velocities. */
+static float    v_meas_left   = 0.0f;
+static float    v_meas_right  = 0.0f;
+/* PI integrator per wheel (carries duty %; holds the steady-state duty a load
+ * needs so err -> 0 at the target speed). */
+static float    integ_left    = 0.0f;
+static float    integ_right   = 0.0f;
+/* started_* latches the in-progress move so the one-shot start feedforward (kick)
+ * fires once per move from rest; cleared on SPEED 0. */
+static bool     started_left  = false;
+static bool     started_right = false;
+static uint32_t start_since_left_ms  = 0;
+static uint32_t start_since_right_ms = 0;
+/* Absolute-time (ms) the current kick feedforward pulse ends. */
 static uint32_t kick_until_left_ms  = 0;
 static uint32_t kick_until_right_ms = 0;
+/* Absolute-time (ms) the current stall began (commanded + past kick + measured
+ * not-moving). 0 = not stalling. Past MOTOR_STALL_CUTOFF_MS the duty is cut to 0
+ * to protect the motor + current-limitless L298N from stall heat. */
+static uint32_t stall_since_left_ms  = 0;
+static uint32_t stall_since_right_ms = 0;
+/* Live-tunable PI gains + deadband feedforward (init from config.h, overridable
+ * at runtime via motor_control_set_pi() / the CLI "PI" verb so the loop can be
+ * tuned on the bench without reflashing; bake the winners back into config.h). */
+static float    vel_kp        = MOTOR_VEL_KP;
+static float    vel_ki        = MOTOR_VEL_KI;
+static float    vel_ff_offset = MOTOR_FF_OFFSET_PCT;
+static motor_debug_t latest_debug = {0};
 
 /* ── Velocity-to-speed scale factor ─────────────────────────── */
-/* Open-loop on the L298N — without encoder feedback we can't tie a
- * commanded m/s to an actual rev/s. The scale is a heuristic so that
- * `vx = 0.30 m/s → SPEED 30 → 100% PWM duty`. Refine empirically once
- * encoders are connected. Battery voltage and load both affect actual
- * speed at any given duty.
- *
- *   speed_cli = round(vx_mps * VEL_TO_SPEED_SCALE)        (this file)
- *   pwm_pct   = (speed_cli * 100) / MOTOR_SPEED_MAX       (l298n_driver.c)
+/* Keep VEL/micro-ROS semantics aligned with the ASCII bridge:
+ *   speed_cli = round(vx_mps * 30 / MOTOR_V_MAX_MPS)
+ *   target    = speed_cli / 30 * MOTOR_V_MAX_MPS
  */
-#define VEL_TO_SPEED_SCALE  (100.0f)
+#define VEL_TO_SPEED_SCALE  ((float)MOTOR_SPEED_MAX / MOTOR_V_MAX_MPS)
 
 /* ── API ────────────────────────────────────────────────────── */
 
@@ -110,75 +126,167 @@ bool motor_control_is_enabled(void)
     return motors_enabled;
 }
 
-void motor_control_update_feedback(int32_t d_enc_left, int32_t d_enc_right)
+void motor_control_update_feedback(float v_left_mps, float v_right_mps)
 {
-    int32_t al = (d_enc_left  < 0) ? -d_enc_left  : d_enc_left;
-    int32_t ar = (d_enc_right < 0) ? -d_enc_right : d_enc_right;
-    wheel_moving_left  = (al > MOTOR_ENC_MOVING_EDGES);
-    wheel_moving_right = (ar > MOTOR_ENC_MOVING_EDGES);
+    const float a = MOTOR_VEL_LPF_ALPHA;
+    v_meas_left  = a * v_left_mps  + (1.0f - a) * v_meas_left;
+    v_meas_right = a * v_right_mps + (1.0f - a) * v_meas_right;
 }
 
-/* Encoder-aware kick-start for one channel. Converts the commanded speed to a
- * signed duty %, then:
- *   - SPEED 0       -> 0 (coast/stop), disarm the kick so the next start kicks.
- *   - wheel rolling -> proportional duty, floored to MOTOR_MIN_RUN_PCT; disarm
- *                      the kick.
- *   - wheel stopped -> fire ONE kick pulse (MOTOR_KICK_PCT for MOTOR_KICK_MS,
- *                      used only as a floor so a higher command isn't reduced)
- *                      to break static friction. After the pulse, if the wheel
- *                      still hasn't rolled, BACK OFF to the commanded
- *                      proportional duty (floored to MOTOR_MIN_RUN_PCT) — never
- *                      a sustained high duty.
+/* Closed-loop velocity PI for one wheel. Returns signed duty % in [-100, 100].
  *
- * L298N safety: a blocked wheel must not sit at high duty (the L298N has no
- * current limit and overheats). After the single pulse the duty drops to the
- * low commanded value — strictly cooler than the firmware's old permanent 60%
- * floor. A genuine block is then handled upstream (collision_monitor zeroes the
- * command; the progress checker triggers Nav2 recovery). The kick re-arms only
- * once the wheel actually rolls again (or the command returns to 0). */
-static int kick_duty(int8_t speed, bool wheel_moving, uint32_t *kick_until_ms)
+ *   speed  : commanded SPEED unit (-MOTOR_SPEED_MAX..+MOTOR_SPEED_MAX), mapped to
+ *            a TARGET wheel speed: target = speed/MOTOR_SPEED_MAX * MOTOR_V_MAX_MPS.
+ *   v_meas : measured (filtered) wheel linear speed [m/s], signed.
+ *   integ  : PI integrator (duty %), persists across ticks.
+ *   started/kick_until_ms : one-shot start feedforward (kick) state.
+ *   stall_since_ms        : stall-cutoff timer.
+ *
+ * SPEED 0 coasts and resets the loop. From rest a kick pulse breaks stiction;
+ * then a PI regulates duty to hit the target speed (integral carries the
+ * load-dependent steady-state duty, with conditional anti-windup). If commanded
+ * but the encoder reports not-moving past the kick for > MOTOR_STALL_CUTOFF_MS
+ * (PI saturated), the duty is cut to 0 to protect the motor + L298N from stall
+ * heat; it re-arms on the next SPEED 0. */
+static int velocity_pi(int8_t speed, float v_meas, float *integ, bool *started,
+                       uint32_t *start_since_ms, uint32_t *kick_until_ms,
+                       uint32_t *stall_since_ms, float *target_out,
+                       bool *stall_out, bool *cutoff_out)
 {
+    *target_out = 0.0f;
+    *stall_out = false;
+    *cutoff_out = false;
+
     if (speed == 0) {
-        *kick_until_ms = 0;
-        return 0;
+        *integ          = 0.0f;
+        *started        = false;
+        *start_since_ms = 0;
+        *kick_until_ms  = 0;
+        *stall_since_ms = 0;
+        return 0;   /* coast */
     }
 
-    int target = ((int)speed * 100) / MOTOR_SPEED_MAX;   /* signed duty % */
-    int sign   = (target < 0) ? -1 : 1;
-    int mag    = (target < 0) ? -target : target;
-    if (mag > 100) mag = 100;
+    float target = ((float)speed / (float)MOTOR_SPEED_MAX) * MOTOR_V_MAX_MPS; /* signed m/s */
+    int   tsign  = (target < 0.0f) ? -1 : 1;
+    float err    = target - v_meas;
+    float moving_toward_mps = (float)tsign * v_meas;
+    bool  moving_toward = moving_toward_mps > MOTOR_VEL_MOVING_MPS;
+    float target_abs = fabsf(target);
+    *target_out = target;
 
-    if (wheel_moving) {
-        /* Rolling: proportional duty with a sustain floor; disarm the kick. */
-        *kick_until_ms = 0;
-        if (mag < MOTOR_MIN_RUN_PCT) mag = MOTOR_MIN_RUN_PCT;
-        return sign * mag;
-    }
-
-    /* Stopped with a command: fire a single kick pulse to break stiction. */
     uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (*kick_until_ms == 0) {
-        *kick_until_ms = now + MOTOR_KICK_MS;   /* arm one pulse */
+
+    if (!*started) {
+        *started        = true;
+        *start_since_ms = now;
+        *kick_until_ms  = now + MOTOR_KICK_MS;
+        *integ          = 0.0f;
+        *stall_since_ms = now;
     }
-    if (now < *kick_until_ms) {
-        /* During the pulse: kick floor — never reduce an already-higher cmd. */
-        return sign * (mag > MOTOR_KICK_PCT ? mag : MOTOR_KICK_PCT);
+
+    /* Start feedforward: full kick toward the target until the wheel is confirmed
+     * moving or the pulse elapses. Integral stays frozen during the kick. */
+    if (now < *kick_until_ms && !moving_toward) {
+        return tsign * MOTOR_KICK_PCT;
     }
-    /* Pulse over and still not rolling (likely blocked): back off to the low
-     * commanded duty. Do NOT re-arm here — the kick re-arms via the rolling
-     * branch (wheel started) or the SPEED 0 branch (command cleared). */
-    if (mag < MOTOR_MIN_RUN_PCT) mag = MOTOR_MIN_RUN_PCT;
-    return sign * mag;
+
+    /* Stall cutoff: commanded, past the kick, still not moving -> protect HW. */
+    if (!moving_toward) {
+        if (*stall_since_ms == 0) *stall_since_ms = now;
+        *stall_out = true;
+        if (now - *stall_since_ms > MOTOR_STALL_CUTOFF_MS) {
+            *integ = 0.0f;
+            *cutoff_out = true;
+            return 0;   /* coast until SPEED 0 re-arms */
+        }
+    } else {
+        *stall_since_ms = 0;
+    }
+
+    /* PI + deadband feedforward. dt = 1 / control-loop rate. The FF offset puts
+     * the duty near the sustain so the integral only trims the residual. */
+    const float dt = 1.0f / (float)CONTROL_FREQ_HZ;
+    float ff     = (float)tsign * vel_ff_offset;
+    float p      = vel_kp * err;
+    float duty_f = ff + p + *integ;
+
+    /* Conditional anti-windup: only integrate when not pushing further into a
+     * saturated rail in the same direction as the error. */
+    bool sat_hi = (duty_f >=  100.0f);
+    bool sat_lo = (duty_f <= -100.0f);
+    if (!((sat_hi && err > 0.0f) || (sat_lo && err < 0.0f))) {
+        *integ += vel_ki * err * dt;
+        if (*integ >  100.0f) *integ =  100.0f;
+        if (*integ < -100.0f) *integ = -100.0f;
+    }
+
+    duty_f = ff + p + *integ;
+    if (duty_f >  100.0f) duty_f =  100.0f;
+    if (duty_f < -100.0f) duty_f = -100.0f;
+
+    bool in_start_assist = (now - *start_since_ms) < MOTOR_START_ASSIST_MS;
+    bool still_ramping = moving_toward_mps < (0.60f * target_abs);
+    if (in_start_assist && still_ramping) {
+        float min_start_duty = (float)tsign * (float)MOTOR_START_MIN_DUTY_PCT;
+        if (tsign > 0 && duty_f < min_start_duty) duty_f = min_start_duty;
+        if (tsign < 0 && duty_f > min_start_duty) duty_f = min_start_duty;
+    }
+
+    return (int)duty_f;
+}
+
+void motor_control_set_pi(float kp, float ki, float ff_offset)
+{
+    vel_kp        = kp;
+    vel_ki        = ki;
+    vel_ff_offset = ff_offset;
+    integ_left    = 0.0f;   /* reset integrators so a retune starts clean */
+    integ_right   = 0.0f;
+}
+
+void motor_control_get_pi(float *kp, float *ki, float *ff_offset)
+{
+    if (kp)        *kp        = vel_kp;
+    if (ki)        *ki        = vel_ki;
+    if (ff_offset) *ff_offset = vel_ff_offset;
+}
+
+void motor_control_get_debug(motor_debug_t *debug)
+{
+    if (debug) *debug = latest_debug;
 }
 
 void motor_control_apply(void)
 {
     if (motors_enabled && safety_is_ok()) {
-        int dl = kick_duty(speed_left,  wheel_moving_left,  &kick_until_left_ms);
-        int dr = kick_duty(speed_right, wheel_moving_right, &kick_until_right_ms);
+        bool stall_l, stall_r, cutoff_l, cutoff_r;
+        float target_l, target_r;
+        int dl = velocity_pi(speed_left,  v_meas_left,  &integ_left,
+                             &started_left,  &start_since_left_ms,
+                             &kick_until_left_ms, &stall_since_left_ms,
+                             &target_l, &stall_l, &cutoff_l);
+        int dr = velocity_pi(speed_right, v_meas_right, &integ_right,
+                             &started_right, &start_since_right_ms,
+                             &kick_until_right_ms, &stall_since_right_ms,
+                             &target_r, &stall_r, &cutoff_r);
+        latest_debug.target_left_mps = target_l;
+        latest_debug.target_right_mps = target_r;
+        latest_debug.measured_left_mps = v_meas_left;
+        latest_debug.measured_right_mps = v_meas_right;
+        latest_debug.duty_left_pct = (int8_t)dl;
+        latest_debug.duty_right_pct = (int8_t)dr;
+        latest_debug.started_left = started_left;
+        latest_debug.started_right = started_right;
+        latest_debug.stall_left = stall_l;
+        latest_debug.stall_right = stall_r;
+        latest_debug.cutoff_left = cutoff_l;
+        latest_debug.cutoff_right = cutoff_r;
         /* l298n_set_raw_pwm applies literal duty (m1 = LEFT, m2 = RIGHT),
          * bypassing the driver's old deadband floor. */
         l298n_set_raw_pwm((int8_t)dl, (int8_t)dr);
+    } else {
+        latest_debug.duty_left_pct = 0;
+        latest_debug.duty_right_pct = 0;
     }
 }
 

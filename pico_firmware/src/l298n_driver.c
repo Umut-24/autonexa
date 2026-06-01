@@ -5,6 +5,8 @@
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 
+#include <stdio.h>
+
 /* ── Internal state ──────────────────────────────────────────── */
 
 typedef struct {
