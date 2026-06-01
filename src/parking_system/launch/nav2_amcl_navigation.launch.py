@@ -28,6 +28,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import AndSubstitution, EqualsSubstitution, LaunchConfiguration, NotSubstitution, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import RewrittenYaml
 
@@ -95,6 +96,14 @@ def generate_launch_description():
     initial_pose_x_arg = DeclareLaunchArgument('initial_pose_x', default_value='0.0')
     initial_pose_y_arg = DeclareLaunchArgument('initial_pose_y', default_value='0.0')
     initial_pose_yaw_arg = DeclareLaunchArgument('initial_pose_yaw', default_value='0.0')
+    # AMCL's set_initial_pose param is missed often enough that the robot can
+    # start at (0,0,0) — off a small saved map. This seeder publishes the pose
+    # to /initialpose once AMCL is listening, with no second terminal needed.
+    # Set false to fall back to AMCL's own seeding / manual relocalize.
+    seed_initial_pose_arg = DeclareLaunchArgument(
+        'seed_initial_pose', default_value='true',
+        description='Republish initial_pose_* to /initialpose at startup so '
+                    'AMCL reliably starts at the requested pose (no terminal).')
 
     use_pico_bridge_arg = DeclareLaunchArgument('use_pico_bridge', default_value='true')
     pico_serial_port_arg = DeclareLaunchArgument('pico_serial_port', default_value='/dev/ttyACM0')
@@ -301,6 +310,29 @@ def generate_launch_description():
         name='amcl',
         output='screen',
         parameters=[configured_nav2_params],
+    )
+
+    # Reliable initial-pose seeder: waits for AMCL's /initialpose subscription
+    # then republishes initial_pose_* a few times. Backstops AMCL's flaky
+    # set_initial_pose so the robot never starts at the (0,0,0) off-map default.
+    initial_pose_seeder = Node(
+        package='parking_system',
+        executable='initial_pose_publisher.py',
+        name='initial_pose_publisher',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('seed_initial_pose')),
+        parameters=[{
+            'x': ParameterValue(
+                LaunchConfiguration('initial_pose_x'), value_type=float),
+            'y': ParameterValue(
+                LaunchConfiguration('initial_pose_y'), value_type=float),
+            'yaw': ParameterValue(
+                LaunchConfiguration('initial_pose_yaw'), value_type=float),
+            'frame_id': 'map',
+            'topic': '/initialpose',
+            'publish_count': 3,
+            'publish_period_s': 1.5,
+        }],
     )
 
     planner_server = Node(
@@ -553,6 +585,7 @@ def generate_launch_description():
         initial_pose_x_arg,
         initial_pose_y_arg,
         initial_pose_yaw_arg,
+        seed_initial_pose_arg,
         use_pico_bridge_arg,
         pico_serial_port_arg,
         enforce_single_pub_arg,
@@ -580,6 +613,7 @@ def generate_launch_description():
         ekf_node,
         map_server,
         amcl,
+        initial_pose_seeder,
         planner_server,
         controller_server_rpp,
         controller_server_mppi,

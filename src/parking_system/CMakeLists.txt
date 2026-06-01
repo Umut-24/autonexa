@@ -37,6 +37,7 @@ install(PROGRAMS
   scripts/diagnose_control_chain.py
   scripts/record_control_chain_bag.py
   scripts/odom_nan_filter.py
+  scripts/initial_pose_publisher.py
   scripts/print_robot_position.py
   scripts/nav2_activator.py
   scripts/cmd_vel_to_pico_bridge.py
