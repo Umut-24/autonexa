@@ -150,6 +150,11 @@ def generate_launch_description():
         description='|vx| below this -> SPEEDS 0 0 in the ASCII bridge. Matches live-SLAM and lets '
                     'the Pico start-assist kick engage before the old 0.15 gate would pass motion.'
     )
+    debug_steer_arg = DeclareLaunchArgument(
+        'debug_steer', default_value='false',
+        description='Diagnostic only: nav2_pico_bridge appends per-tick steering '
+                    'state to ~/.autonexa/steer_debug.csv for offline analysis. '
+                    'No effect on control; default false.')
     servo_center_us_arg = DeclareLaunchArgument('servo_center_us', default_value='1650')
     servo_us_min_arg = DeclareLaunchArgument('servo_us_min', default_value='1150')
     servo_us_max_arg = DeclareLaunchArgument('servo_us_max', default_value='2150')
@@ -529,6 +534,7 @@ def generate_launch_description():
             'auto_enable':       True,
             'bridge_lock_file':  LaunchConfiguration('serial_bridge_lock_file'),
             'dry_run':           False,
+            'debug_steer':       LaunchConfiguration('debug_steer'),
         }],
     )
 
@@ -596,6 +602,7 @@ def generate_launch_description():
         use_serial_bridge_arg,
         serial_bridge_lock_file_arg,
         min_vx_creep_arg,
+        debug_steer_arg,
         servo_center_us_arg,
         servo_us_min_arg,
         servo_us_max_arg,

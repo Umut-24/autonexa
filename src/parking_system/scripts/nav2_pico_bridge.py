@@ -216,6 +216,14 @@ class Nav2PicoBridge(Node):
         self.declare_parameter('auto_enable', True)
         self.declare_parameter('bridge_lock_file', '/tmp/nav2_pico_bridge.lock')
         self.declare_parameter('dry_run', False)
+        # Diagnostic-only: when true, append the per-tick steering state to a CSV
+        # so a wrong-direction cusp can be analysed offline (no console needed
+        # during driving). Default false => zero behaviour change, nothing is
+        # written. This is OBSERVATION ONLY; it does not touch control.
+        self.declare_parameter('debug_steer', False)
+        self.declare_parameter(
+            'debug_steer_path',
+            os.path.expanduser('~/.autonexa/steer_debug.csv'))
 
         self.serial_port = str(self.get_parameter('serial_port').value)
         self.serial_baud = int(self.get_parameter('serial_baud').value)
@@ -253,6 +261,26 @@ class Nav2PicoBridge(Node):
         self.auto_enable = bool(self.get_parameter('auto_enable').value)
         self.lock_path = str(self.get_parameter('bridge_lock_file').value)
         self.dry_run = bool(self.get_parameter('dry_run').value)
+
+        # Diagnostic CSV (observation only; default off).
+        self.debug_steer = bool(self.get_parameter('debug_steer').value)
+        self._debug_steer_file = None
+        if self.debug_steer:
+            try:
+                path = os.path.expanduser(
+                    str(self.get_parameter('debug_steer_path').value))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                self._debug_steer_file = open(path, 'w', encoding='utf-8')
+                self._debug_steer_file.write(
+                    't_ms,source,desired_vx,desired_wz,output_vx,output_wz,'
+                    'gated_vx,steer_dir,steer_deg,servo_us,speed_l,speed_r,'
+                    'cooldown\n')
+                self._debug_steer_file.flush()
+                self.get_logger().warning(
+                    f"debug_steer ON — writing steering trace to {path}")
+            except OSError as exc:
+                self.get_logger().error(f"debug_steer open failed: {exc}")
+                self._debug_steer_file = None
 
         if not (self.servo_us_min <= self.servo_center <= self.servo_us_max):
             raise RuntimeError(
@@ -852,6 +880,25 @@ class Nav2PicoBridge(Node):
             self._send(f"SERVO_PWM {servo_us}")
             self._last_us_sent = servo_us
 
+        # Diagnostic trace (observation only; no effect on control). desired_*
+        # is the command the bridge received (/cmd_vel_safe etc.); the rest is
+        # exactly what was just sent. Lets us tell whether a wrong-direction
+        # cusp is the controller's command or the bridge's translation.
+        if self._debug_steer_file is not None:
+            cooldown = (self._cusp_cooldown_end is not None
+                        and now < self._cusp_cooldown_end)
+            try:
+                self._debug_steer_file.write(
+                    f"{now.nanoseconds // 1_000_000},{source},"
+                    f"{desired.vx:.4f},{desired.wz:.4f},"
+                    f"{self.output.vx:.4f},{self.output.wz:.4f},"
+                    f"{gated_vx:.4f},{self._steer_dir:+d},"
+                    f"{math.degrees(steer):.2f},{servo_us},"
+                    f"{speed_left},{speed_right},{int(cooldown)}\n")
+                self._debug_steer_file.flush()
+            except OSError:
+                pass
+
     # ── Shutdown ─────────────────────────────────────────────────
     def shutdown_safe_state(self) -> None:
         if self._shutting_down:
@@ -875,6 +922,12 @@ class Nav2PicoBridge(Node):
             except Exception:
                 pass
             self._serial = None
+        if self._debug_steer_file is not None:
+            try:
+                self._debug_steer_file.close()
+            except Exception:
+                pass
+            self._debug_steer_file = None
         self._release_lock()
 
 
