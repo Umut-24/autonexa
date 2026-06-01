@@ -32,7 +32,16 @@ DEFAULT_DIMENSIONS: Dict[str, float] = {
     "lidar_z":        0.07,
     "camera_x":       0.10,
     "camera_z":       0.05,
-    "footprint_padding": 0.03,  # 3 cm uniform berth vs walls + dynamic obstacles
+    # 0.03 -> 0.05 on 2026-06-02: this is the planner's ONLY margin around newly
+    # observed dynamic obstacles — the global obstacle_layer runs AFTER inflation
+    # (deliberately, so live wall returns don't compound the static wall halo and
+    # trap a near-wall park), so new obstacles are bare lethal cells with NO
+    # inflation halo. At 3 cm the planned path passed within ~3 cm of a new
+    # obstacle and, with ~5 cm localisation drift + RPP corner-cutting, the car
+    # clipped it. 5 cm restores a real berth. Kept light on purpose: padding also
+    # pads the footprint vs walls, so a big bump would tighten near-wall parking
+    # on the 2x2 m testbed. Wall inflation (0.16) is untouched.
+    "footprint_padding": 0.05,  # 5 cm uniform berth — primary new-obstacle margin
 }
 
 # All dims are required keys in the output. wheelbase / footprint_padding are
