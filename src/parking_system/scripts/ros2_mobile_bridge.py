@@ -58,6 +58,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from rclpy.time import Time
+import tf2_ros
+from tf2_ros import TransformException
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Twist
@@ -230,6 +233,18 @@ class MobileBridgeNode(Node):
         self._pose_lock = threading.Lock()
         self._pose = {'x_m': 0.0, 'y_m': 0.0, 'yaw_rad': 0.0, 'stamp': 0.0}
         self._pose_source = 'none'   # 'amcl', 'odom', 'none'
+
+        # Map-frame pose comes from the map->base_link TF (AMCL/SLAM map->odom
+        # composed with the scan-matcher/EKF odom->base_link). This is always
+        # correct in the map frame and tracks continuously, even when AMCL is
+        # idle (stationary) and stops republishing /amcl_pose. Raw /odom is an
+        # odom-frame pose and is only a last-resort fallback for manual /
+        # bridge-only mode where there is no map frame at all — see _odom_cb.
+        self._map_frame = 'map'
+        self._base_frame = 'base_link'
+        self._last_tf_ok = 0.0       # wall-clock of the last good map->base_link
+        self._tf_buffer = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
 
         self._marker_lock = threading.Lock()
         self._markers = {}           # {id: {x_m, y_m, bearing_deg, distance_m}}
@@ -443,6 +458,9 @@ class MobileBridgeNode(Node):
         # --- Watchdog timer: zero cmd_vel if no control command recently ---
         self._watchdog_timer = self.create_timer(0.1, self._watchdog_cb)
 
+        # --- Pose timer: serve map->base_link TF as the robot pose (~15 Hz) ---
+        self._pose_tf_timer = self.create_timer(1.0 / 15.0, self._update_pose_from_tf)
+
         # --- Camera (optional) ---
         self._camera_lock = threading.Lock()
         self._latest_frame = None
@@ -491,6 +509,28 @@ class MobileBridgeNode(Node):
             self._map_grid = grid
             self._map_version += 1
 
+    def _update_pose_from_tf(self):
+        """Primary pose source: look up map->base_link and serve it as the
+        robot pose. This is the true map-frame pose in every mode (AMCL,
+        live-SLAM, EKF) and keeps tracking continuously between AMCL updates,
+        so a stationary robot never reverts to the odom-frame (0,0,0) the way
+        the old /amcl_pose-then-/odom fallback did. Runs at ~15 Hz off a timer;
+        the lookup is non-blocking (latest available transform)."""
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                self._map_frame, self._base_frame, Time())
+        except TransformException:
+            # No map frame yet (manual / bridge-only mode, or AMCL not up).
+            # _odom_cb provides the fallback after _last_tf_ok goes stale.
+            return
+        t = tf.transform.translation
+        yaw = self._quat_to_yaw(tf.transform.rotation)
+        now = time.time()
+        with self._pose_lock:
+            self._pose = {'x_m': t.x, 'y_m': t.y, 'yaw_rad': yaw, 'stamp': now}
+            self._pose_source = 'amcl'
+            self._last_tf_ok = now
+
     def _amcl_cb(self, msg: PoseWithCovarianceStamped):
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
@@ -504,9 +544,13 @@ class MobileBridgeNode(Node):
 
     def _odom_cb(self, msg: Odometry):
         self._mark_health('/odom')
-        # Only use odom if AMCL hasn't provided a pose recently
+        # Raw /odom is an ODOM-frame pose. Only serve it when no map->base_link
+        # TF has been available for 2 s — i.e. genuine manual / bridge-only
+        # mode with no map frame. While AMCL/SLAM are up, _update_pose_from_tf
+        # owns the pose (map frame); using odom here would serve an odom-frame
+        # pose as if it were map-frame (the off-map (0,0,0) bug).
         with self._pose_lock:
-            if self._pose_source == 'amcl' and (time.time() - self._pose['stamp']) < 2.0:
+            if (time.time() - self._last_tf_ok) < 2.0:
                 return
         x = msg.pose.pose.position.x
         y = msg.pose.pose.position.y
