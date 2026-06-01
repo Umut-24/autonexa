@@ -1009,6 +1009,31 @@ class ConnectionService extends ChangeNotifier {
     }
   }
 
+  /// Persist the current SLAM map via the bridge's map_saver_cli
+  /// (POST /api/lock_map). Returns the saved .yaml path on success, or null
+  /// on failure. The map keeps mapping afterwards — this is a snapshot, not a
+  /// lifecycle change.
+  Future<String?> saveMap() async {
+    if (_baseUrl == null) return null;
+    try {
+      // map_saver_cli writes the .pgm + .yaml synchronously; give it room.
+      final resp = await http.post(Uri.parse('$_baseUrl/api/lock_map'))
+          .timeout(const Duration(seconds: 35));
+      if (resp.statusCode != 200) {
+        logger.error('save_map: HTTP ${resp.statusCode} ${resp.body}',
+            LogCategory.navigation);
+        return null;
+      }
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      final yaml = body['yaml'] as String?;
+      logger.info('Map saved: $yaml', LogCategory.navigation);
+      return yaml;
+    } catch (e) {
+      logger.error('save_map: $e', LogCategory.navigation);
+      return null;
+    }
+  }
+
   // --- Nav2 max linear speed (Part E) ---
 
   Future<bool> setNav2MaxSpeed(double mps) async {

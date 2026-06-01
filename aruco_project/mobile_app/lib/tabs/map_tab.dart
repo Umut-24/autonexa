@@ -430,6 +430,30 @@ class _MapTabState extends State<MapTab> {
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
+            leading: const Icon(Icons.save_alt_rounded, color: AppColors.success),
+            title: const Text('Save map'),
+            subtitle: const Text(
+                'Snapshot the current SLAM map to ~/.autonexa/maps. Mapping continues.'),
+            onTap: () async {
+              Navigator.pop(ctx);
+              final messenger = ScaffoldMessenger.of(context);
+              messenger.showSnackBar(const SnackBar(
+                  content: Text('Saving map…'),
+                  duration: Duration(seconds: 30)));
+              final yamlPath = await conn.saveMap();
+              if (!context.mounted) return;
+              messenger.hideCurrentSnackBar();
+              if (yamlPath != null) {
+                final name = yamlPath.split('/').last;
+                messenger.showSnackBar(
+                    SnackBar(content: Text('Map saved: $name')));
+              } else {
+                messenger.showSnackBar(const SnackBar(
+                    content: Text('Map save failed')));
+              }
+            },
+          ),
+          ListTile(
             leading: const Icon(Icons.refresh_rounded, color: AppColors.info),
             title: const Text('Clear obstacles'),
             subtitle:
