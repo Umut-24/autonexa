@@ -21,11 +21,15 @@ ament_python_install_package(parking_system
   PACKAGE_DIR scripts)
 
 # Install launch files
+# web_desktop holds the pre-built Flutter web bundle (built with
+# --base-href /desktop/) that ros2_mobile_bridge.py serves at /desktop so the
+# operator console opens same-origin (no CORS) at http://<host>:5000/desktop.
 install(DIRECTORY
   launch
   config
   rviz
   urdf
+  web_desktop
   DESTINATION share/${PROJECT_NAME}/
 )
 
