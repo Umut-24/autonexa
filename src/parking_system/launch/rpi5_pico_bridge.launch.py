@@ -114,6 +114,9 @@ def generate_launch_description():
         name='mobile_bridge',
         output='screen',
         condition=IfCondition(LaunchConfiguration('use_mobile_bridge')),
+        parameters=[{
+            'active_map_yaml': '',
+        }],
     )
 
     return LaunchDescription([

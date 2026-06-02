@@ -94,6 +94,10 @@ class MapInfo {
   final double resolution;
   final double originX;
   final double originY;
+  final String mapId;
+  final String mapMode;
+  final String mapYaml;
+  final String manifest;
 
   const MapInfo({
     this.width = 0,
@@ -101,6 +105,10 @@ class MapInfo {
     this.resolution = 0.05,
     this.originX = 0,
     this.originY = 0,
+    this.mapId = '',
+    this.mapMode = '',
+    this.mapYaml = '',
+    this.manifest = '',
   });
 
   factory MapInfo.fromJson(Map<String, dynamic> json) {
@@ -110,6 +118,10 @@ class MapInfo {
       resolution: (json['resolution'] ?? 0.05).toDouble(),
       originX: (json['origin_x'] ?? 0).toDouble(),
       originY: (json['origin_y'] ?? 0).toDouble(),
+      mapId: (json['map_id'] ?? json['map_fingerprint'] ?? '').toString(),
+      mapMode: (json['map_mode'] ?? '').toString(),
+      mapYaml: (json['map_yaml'] ?? '').toString(),
+      manifest: (json['manifest'] ?? '').toString(),
     );
   }
 }

@@ -69,7 +69,10 @@ class NamedWaypoint {
   final double x;
   final double y;
   final double yaw;
+  final String mapId;
   final String mapFingerprint;
+  final String mapYaml;
+  final String manifest;
   final bool stale;
 
   const NamedWaypoint({
@@ -78,19 +81,26 @@ class NamedWaypoint {
     required this.x,
     required this.y,
     required this.yaw,
+    this.mapId = '',
     this.mapFingerprint = '',
+    this.mapYaml = '',
+    this.manifest = '',
     this.stale = false,
   });
 
   factory NamedWaypoint.fromJson(Map<String, dynamic> j) {
     final pose = (j['pose'] as Map?) ?? {};
+    final mapId = (j['map_id'] ?? j['map_fingerprint'] ?? '').toString();
     return NamedWaypoint(
       name: (j['name'] ?? '').toString(),
       kind: (j['kind'] ?? 'custom').toString(),
       x: (pose['x'] ?? 0).toDouble(),
       y: (pose['y'] ?? 0).toDouble(),
       yaw: (pose['yaw'] ?? 0).toDouble(),
-      mapFingerprint: (j['map_fingerprint'] ?? '').toString(),
+      mapId: mapId,
+      mapFingerprint: mapId,
+      mapYaml: (j['map_yaml'] ?? '').toString(),
+      manifest: (j['manifest'] ?? '').toString(),
       stale: j['stale'] == true,
     );
   }

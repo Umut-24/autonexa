@@ -45,6 +45,7 @@ import threading
 import time
 import io
 import uuid
+import hashlib
 from collections import deque
 from math import cos, sin, isinf, isnan, hypot, ceil, pi as MATH_PI
 
@@ -377,6 +378,12 @@ class MobileBridgeNode(Node):
     def __init__(self):
         super().__init__('mobile_bridge')
         self._bridge_start_time = time.time()
+        self.declare_parameter('active_map_yaml', '')
+        try:
+            _active_map_yaml_param = str(
+                self.get_parameter('active_map_yaml').value or '').strip()
+        except Exception:
+            _active_map_yaml_param = ''
 
         # --- Stored data (thread-safe via locks) ---
         self._scan_lock = threading.Lock()
@@ -540,15 +547,22 @@ class MobileBridgeNode(Node):
         self._safety_lock = threading.Lock()
         self._safety_mode = 'soft'
 
-        # --- Map fingerprint (Part D) ---
-        # Lets waypoints know if a new mapping session started. This stays
-        # stable while live SLAM expands/resizes the map, so saved spots do
-        # not become stale just because the robot drove away from them.
-        self._map_fingerprint = self._new_map_session_fingerprint()
-
-        # --- Waypoints (Part D) ---
+        # --- Map packages + waypoints (Part D) ---
+        # Live SLAM starts with a session id. Saved/AMCL maps replace it with
+        # a stable map_id computed from the .yaml + referenced image, and the
+        # sidecar manifest beside that map owns the active parking spots.
         self._waypoints_lock = threading.Lock()
         self._waypoints = []   # list[dict]; persisted to WAYPOINTS_PATH
+        self._legacy_waypoints = []  # preserved central DB / diagnostics
+        self._map_fingerprint = self._new_map_session_fingerprint()
+        self._map_mode = 'live_slam'
+        self._active_map_yaml = ''
+        self._active_map_pgm = ''
+        self._active_manifest_path = ''
+        self._active_map_hash = ''
+        self._active_map_metadata = {}
+        self._active_map_created_at = ''
+        self._pending_active_map_yaml = _active_map_yaml_param
 
         # --- Topic health stats (Part G3) ---
         # EWMA rate per monitored topic so /api/health can report green /
@@ -696,6 +710,11 @@ class MobileBridgeNode(Node):
         except OSError as exc:
             self.get_logger().warning(f'cannot create {AUTONEXA_DATA_DIR}: {exc}')
         self._load_waypoints()
+        if self._pending_active_map_yaml:
+            self._activate_saved_map_package(self._pending_active_map_yaml,
+                                             load_spots=True)
+        else:
+            self._activate_live_session_waypoints()
 
         # Continuous near-wall safety monitor (items 3 + 4).
         self._near_wall_thread = threading.Thread(
@@ -1369,6 +1388,119 @@ class MobileBridgeNode(Node):
 
     # --- Waypoints ---
 
+    @staticmethod
+    def _utc_now() -> str:
+        return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+
+    @staticmethod
+    def _abs_user_path(path: str) -> str:
+        return os.path.abspath(os.path.expanduser(path or ''))
+
+    @staticmethod
+    def _manifest_path_for_yaml(yaml_path: str) -> str:
+        base, _ = os.path.splitext(yaml_path)
+        return base + '.autonexa.json'
+
+    @staticmethod
+    def _sha256_file(path: str) -> str:
+        h = hashlib.sha256()
+        with open(path, 'rb') as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+                h.update(chunk)
+        return h.hexdigest()
+
+    @staticmethod
+    def _parse_map_yaml(yaml_path: str) -> dict:
+        with open(yaml_path, 'r', encoding='utf-8') as fh:
+            text = fh.read()
+        if yaml is not None:
+            doc = yaml.safe_load(text) or {}
+            if isinstance(doc, dict):
+                return doc
+        # Tiny fallback for nav2 map YAMLs if PyYAML is unavailable.
+        doc = {}
+        for line in text.splitlines():
+            line = line.split('#', 1)[0].strip()
+            if ':' not in line:
+                continue
+            key, val = line.split(':', 1)
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key == 'origin':
+                nums = re.findall(r'-?\d+(?:\.\d+)?', val)
+                doc[key] = [float(n) for n in nums[:3]]
+            elif key in ('resolution', 'occupied_thresh', 'free_thresh'):
+                try:
+                    doc[key] = float(val)
+                except ValueError:
+                    doc[key] = val
+            elif key == 'negate':
+                try:
+                    doc[key] = int(val)
+                except ValueError:
+                    doc[key] = val
+            elif key == 'image':
+                doc[key] = val
+        return doc
+
+    def _map_package_from_yaml(self, yaml_path: str) -> dict:
+        yaml_abs = self._abs_user_path(yaml_path)
+        doc = self._parse_map_yaml(yaml_abs)
+        image_name = str(doc.get('image') or
+                         (os.path.splitext(os.path.basename(yaml_abs))[0] + '.pgm'))
+        image_abs = image_name if os.path.isabs(image_name) else \
+            os.path.abspath(os.path.join(os.path.dirname(yaml_abs), image_name))
+        image_sha = self._sha256_file(image_abs) if os.path.exists(image_abs) else ''
+        origin = doc.get('origin') if isinstance(doc.get('origin'), list) else [0.0, 0.0, 0.0]
+        metadata = {
+            'resolution': float(doc.get('resolution', 0.0) or 0.0),
+            'origin': [float(v) for v in (origin + [0.0, 0.0, 0.0])[:3]],
+            'negate': int(doc.get('negate', 0) or 0),
+            'occupied_thresh': float(doc.get('occupied_thresh', 0.0) or 0.0),
+            'free_thresh': float(doc.get('free_thresh', 0.0) or 0.0),
+            'image_sha256': image_sha,
+        }
+        map_hash = hashlib.sha256(
+            json.dumps(metadata, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()
+        return {
+            'map_id': f'map:{map_hash[:16]}',
+            'map_hash': map_hash,
+            'yaml': yaml_abs,
+            'pgm': image_abs,
+            'manifest': self._manifest_path_for_yaml(yaml_abs),
+            'metadata': metadata,
+        }
+
+    def _active_map_identity(self) -> dict:
+        with self._map_lock:
+            return {
+                'map_id': self._map_fingerprint,
+                'map_fingerprint': self._map_fingerprint,
+                'map_mode': self._map_mode,
+                'map_yaml': self._active_map_yaml,
+                'pgm': self._active_map_pgm,
+                'manifest': self._active_manifest_path,
+                'map_hash': self._active_map_hash,
+            }
+
+    def _stamp_waypoint_for_active_map(self, wp: dict) -> dict:
+        ident = self._active_map_identity()
+        entry = dict(wp)
+        entry['map_id'] = ident['map_id']
+        entry['map_fingerprint'] = ident['map_id']
+        entry['map_mode'] = ident['map_mode']
+        if ident.get('map_yaml'):
+            entry['map_yaml'] = ident['map_yaml']
+        if ident.get('manifest'):
+            entry['manifest'] = ident['manifest']
+        return entry
+
+    @staticmethod
+    def _waypoint_key(wp: dict) -> tuple:
+        return (str(wp.get('name') or ''),
+                str(wp.get('map_id') or wp.get('map_fingerprint') or ''))
+
     def _load_waypoints(self) -> None:
         if not os.path.exists(WAYPOINTS_PATH):
             return
@@ -1381,7 +1513,7 @@ class MobileBridgeNode(Node):
         wps = doc.get('waypoints')
         if isinstance(wps, list):
             with self._waypoints_lock:
-                self._waypoints = wps
+                self._legacy_waypoints = [dict(w) for w in wps if isinstance(w, dict)]
             self.get_logger().info(f'loaded {len(wps)} waypoint(s) from {WAYPOINTS_PATH}')
 
     def _save_waypoints(self) -> None:
@@ -1390,7 +1522,14 @@ class MobileBridgeNode(Node):
         except OSError:
             pass
         with self._waypoints_lock:
-            doc = {'schema_version': 1, 'waypoints': list(self._waypoints)}
+            active = [dict(w) for w in self._waypoints]
+            active_keys = {self._waypoint_key(w) for w in active}
+            legacy = [
+                dict(w) for w in self._legacy_waypoints
+                if self._waypoint_key(w) not in active_keys
+            ]
+            self._legacy_waypoints = legacy + active
+            doc = {'schema_version': 2, 'waypoints': list(self._legacy_waypoints)}
         try:
             tmp = WAYPOINTS_PATH + '.tmp'
             with open(tmp, 'w', encoding='utf-8') as fh:
@@ -1398,6 +1537,118 @@ class MobileBridgeNode(Node):
             os.replace(tmp, WAYPOINTS_PATH)
         except OSError as exc:
             self.get_logger().error(f'waypoints save failed: {exc}')
+
+    def _activate_live_session_waypoints(self) -> None:
+        """Use old unscoped waypoints as temporary live-session spots.
+
+        This preserves pre-map-package data long enough for the operator to
+        save a map, at which point the spots are moved into that map manifest.
+        """
+        with self._waypoints_lock:
+            active = []
+            for wp in self._legacy_waypoints:
+                mid = str(wp.get('map_id') or wp.get('map_fingerprint') or '')
+                if not mid or not mid.startswith('map:'):
+                    active.append(self._stamp_waypoint_for_active_map(wp))
+            self._waypoints = active
+
+    def _load_manifest_doc(self, manifest_path: str) -> dict:
+        if not manifest_path or not os.path.exists(manifest_path):
+            return {}
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as fh:
+                doc = json.load(fh)
+            return doc if isinstance(doc, dict) else {}
+        except (OSError, ValueError) as exc:
+            self.get_logger().warning(f'map manifest load failed: {exc}')
+            return {}
+
+    def _save_active_manifest(self) -> None:
+        ident = self._active_map_identity()
+        if not ident.get('map_yaml') or not ident.get('manifest'):
+            return
+        existing = self._load_manifest_doc(ident['manifest'])
+        created = existing.get('created_at') or self._active_map_created_at or self._utc_now()
+        with self._waypoints_lock:
+            spots = [self._stamp_waypoint_for_active_map(w) for w in self._waypoints]
+        doc = {
+            'schema_version': 1,
+            'map_id': ident['map_id'],
+            'map_hash': ident.get('map_hash', ''),
+            'map_mode': 'saved_map',
+            'yaml': ident['map_yaml'],
+            'pgm': ident.get('pgm', ''),
+            'manifest': ident['manifest'],
+            'metadata': dict(self._active_map_metadata),
+            'created_at': created,
+            'updated_at': self._utc_now(),
+            'spots': spots,
+        }
+        try:
+            os.makedirs(os.path.dirname(ident['manifest']), exist_ok=True)
+            tmp = ident['manifest'] + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(doc, fh, indent=2)
+            os.replace(tmp, ident['manifest'])
+            self._save_waypoints()
+        except OSError as exc:
+            self.get_logger().error(f'map manifest save failed: {exc}')
+
+    def _activate_saved_map_package(self, yaml_path: str,
+                                    load_spots: bool = True) -> dict:
+        try:
+            pkg = self._map_package_from_yaml(yaml_path)
+        except Exception as exc:
+            self.get_logger().warning(
+                f'active map package unavailable for {yaml_path!r}: {exc}')
+            return {}
+
+        manifest = self._load_manifest_doc(pkg['manifest'])
+        manifest_id = str(manifest.get('map_id') or '')
+        manifest_compatible = not manifest_id or manifest_id == pkg['map_id']
+        if manifest_id and not manifest_compatible:
+            self.get_logger().warning(
+                f'ignoring manifest spots for changed map: '
+                f'{manifest_id} != {pkg["map_id"]}')
+        created = manifest.get('created_at') or self._utc_now()
+        with self._map_lock:
+            self._map_mode = 'amcl'
+            self._map_fingerprint = pkg['map_id']
+            self._active_map_yaml = pkg['yaml']
+            self._active_map_pgm = pkg['pgm']
+            self._active_manifest_path = pkg['manifest']
+            self._active_map_hash = pkg['map_hash']
+            self._active_map_metadata = dict(pkg['metadata'])
+            self._active_map_created_at = created
+
+        if load_spots:
+            spots = (manifest.get('spots') or manifest.get('waypoints') or []) \
+                if manifest_compatible else []
+            active = []
+            if isinstance(spots, list):
+                for wp in spots:
+                    if isinstance(wp, dict):
+                        active.append(self._stamp_waypoint_for_active_map(wp))
+            with self._waypoints_lock:
+                self._waypoints = active
+            self.get_logger().info(
+                f'active map package {self._map_fingerprint}: '
+                f'{len(active)} spot(s) from {pkg["manifest"]}')
+        return pkg
+
+    def _promote_active_session_to_saved_map(self, yaml_path: str) -> dict:
+        pkg = self._activate_saved_map_package(yaml_path, load_spots=False)
+        if not pkg:
+            return {}
+        with self._waypoints_lock:
+            self._waypoints = [
+                self._stamp_waypoint_for_active_map(w)
+                for w in self._waypoints
+            ]
+        with self._map_lock:
+            self._map_mode = 'saved_map'
+        self._save_active_manifest()
+        return pkg
 
     def _current_fingerprint(self) -> str:
         with self._map_lock:
@@ -1407,15 +1658,31 @@ class MobileBridgeNode(Node):
     def _new_map_session_fingerprint() -> str:
         return f"session={int(time.time() * 1000)}"
 
-    def list_waypoints(self) -> list:
-        fp = self._current_fingerprint()
+    def list_waypoints(self, include_stale: bool = False) -> list:
+        ident = self._active_map_identity()
+        fp = ident['map_id']
         with self._waypoints_lock:
-            wps = list(self._waypoints)
+            active = [dict(w) for w in self._waypoints]
+            legacy = [dict(w) for w in self._legacy_waypoints]
         out = []
-        for wp in wps:
-            entry = dict(wp)
-            entry['stale'] = bool(fp) and entry.get('map_fingerprint') != fp
+        seen = set()
+        for wp in active:
+            entry = self._stamp_waypoint_for_active_map(wp)
+            entry['stale'] = False
             out.append(entry)
+            seen.add(self._waypoint_key(entry))
+        if include_stale:
+            for wp in legacy:
+                key = self._waypoint_key(wp)
+                if key in seen:
+                    continue
+                entry = dict(wp)
+                mid = str(entry.get('map_id') or entry.get('map_fingerprint') or '')
+                entry['map_id'] = mid
+                entry['map_fingerprint'] = mid
+                entry['stale'] = bool(fp) and mid != fp
+                out.append(entry)
+                seen.add(key)
         return out
 
     def upsert_waypoint(self, name: str, kind: str, pose: dict) -> dict:
@@ -1427,17 +1694,27 @@ class MobileBridgeNode(Node):
         x = float(pose.get('x', 0.0))
         y = float(pose.get('y', 0.0))
         yaw = float(pose.get('yaw', 0.0))
+        created_at = self._utc_now()
+        with self._waypoints_lock:
+            existing = next((w for w in self._waypoints
+                             if w.get('name') == name), None)
+            if existing and existing.get('created_at'):
+                created_at = existing.get('created_at')
         entry = {
             'name': name,
             'kind': kind,
             'pose': {'x': x, 'y': y, 'yaw': yaw},
-            'map_fingerprint': self._current_fingerprint(),
-            'created_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'created_at': created_at,
+            'updated_at': self._utc_now(),
         }
+        entry = self._stamp_waypoint_for_active_map(entry)
         with self._waypoints_lock:
             self._waypoints = [w for w in self._waypoints if w.get('name') != name]
             self._waypoints.append(entry)
-        self._save_waypoints()
+        if self._active_map_identity().get('manifest'):
+            self._save_active_manifest()
+        else:
+            self._save_waypoints()
         return entry
 
     def delete_waypoint(self, name: str) -> bool:
@@ -1446,13 +1723,22 @@ class MobileBridgeNode(Node):
             self._waypoints = [w for w in self._waypoints if w.get('name') != name]
             removed = len(self._waypoints) < before
         if removed:
-            self._save_waypoints()
+            if self._active_map_identity().get('manifest'):
+                self._save_active_manifest()
+            else:
+                self._save_waypoints()
         return removed
 
     def navigate_to_waypoint(self, name: str) -> bool:
+        active_id = self._current_fingerprint()
         with self._waypoints_lock:
             wp = next((w for w in self._waypoints if w.get('name') == name), None)
         if wp is None:
+            return False
+        wp_id = str(wp.get('map_id') or wp.get('map_fingerprint') or '')
+        if wp_id and wp_id != active_id:
+            self.get_logger().warning(
+                f'refusing stale waypoint {name!r}: {wp_id} != {active_id}')
             return False
         pose = wp.get('pose') or {}
         return self.send_nav_goal(
@@ -1757,6 +2043,15 @@ class MobileBridgeNode(Node):
             self._map_version += 1
             self._map_png = None
             self._map_fingerprint = self._new_map_session_fingerprint()
+            self._map_mode = 'live_slam'
+            self._active_map_yaml = ''
+            self._active_map_pgm = ''
+            self._active_manifest_path = ''
+            self._active_map_hash = ''
+            self._active_map_metadata = {}
+            self._active_map_created_at = ''
+        with self._waypoints_lock:
+            self._waypoints = []
         return {'ok': ok, 'steps': steps, 'costmaps': cm}
 
     # --- Robot dimension live-edit + goal inflation escape ---
@@ -2428,7 +2723,19 @@ class MobileBridgeNode(Node):
 
     def get_map_info(self):
         with self._map_lock:
-            return dict(self._map_info) if self._map_info else None
+            if not self._map_info:
+                return None
+            info = dict(self._map_info)
+            info.update({
+                'map_id': self._map_fingerprint,
+                'map_fingerprint': self._map_fingerprint,
+                'map_mode': self._map_mode,
+                'map_yaml': self._active_map_yaml,
+                'pgm': self._active_map_pgm,
+                'manifest': self._active_manifest_path,
+                'map_hash': self._active_map_hash,
+            })
+            return info
 
     def get_map_version(self):
         with self._map_lock:
@@ -3018,7 +3325,9 @@ def api_restart_mapping():
 @flask_app.route('/api/waypoints', methods=['GET', 'POST'])
 def api_waypoints():
     if request.method == 'GET':
-        return jsonify({'waypoints': bridge_node.list_waypoints(),
+        include_stale = str(request.args.get('include_stale', '')).lower() \
+            in ('1', 'true', 'yes', 'on')
+        return jsonify({'waypoints': bridge_node.list_waypoints(include_stale),
                         'fingerprint': bridge_node._current_fingerprint()})
     data = request.get_json(silent=True) or {}
     name = data.get('name', '')
@@ -3057,7 +3366,10 @@ def _spot_from_waypoint(wp: dict) -> dict:
         'name': name,
         'kind': 'map_static',
         'stale': bool(wp.get('stale')),
+        'map_id': wp.get('map_id') or wp.get('map_fingerprint', ''),
         'map_fingerprint': wp.get('map_fingerprint', ''),
+        'map_yaml': wp.get('map_yaml', ''),
+        'manifest': wp.get('manifest', ''),
         # Phase 2 intentionally navigates to this staging pose only. Later
         # phases add final_pose / ArUco docking precision.
         'staging_pose': pose,
@@ -3167,11 +3479,24 @@ def api_lock_map():
             'stderr': proc.stderr[-2000:],
             'command': cmd,
         }), 500
+    yaml_path = prefix + '.yaml'
+    pgm_path = prefix + '.pgm'
+    try:
+        pkg = bridge_node._promote_active_session_to_saved_map(yaml_path)
+    except Exception as exc:
+        return jsonify({
+            'error': f'map saved but package manifest failed: {exc}',
+            'yaml': yaml_path,
+            'pgm': pgm_path,
+            'stdout': proc.stdout[-2000:],
+        }), 500
     return jsonify({
         'status': 'ok',
         'map_prefix': prefix,
-        'yaml': prefix + '.yaml',
-        'pgm': prefix + '.pgm',
+        'yaml': yaml_path,
+        'pgm': pgm_path,
+        'map_id': pkg.get('map_id', ''),
+        'manifest': pkg.get('manifest', ''),
         'stdout': proc.stdout[-2000:],
     })
 
