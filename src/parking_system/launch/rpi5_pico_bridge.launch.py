@@ -20,6 +20,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, NotSubstitution
 from launch_ros.actions import Node
+from launch_ros.descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -44,6 +45,12 @@ def generate_launch_description():
     use_mobile_bridge_arg = DeclareLaunchArgument(
         'use_mobile_bridge', default_value='true',
         description='Launch the HTTP bridge for Flutter app joystick control'
+    )
+    enable_web_terminal_arg = DeclareLaunchArgument(
+        'enable_web_terminal', default_value='true',
+        description='Expose the full web terminal (PTY) in the app. SECURITY: '
+                    'arbitrary shell as the robot user for anyone on the LAN — '
+                    'set false to disable without a code change.'
     )
     use_micropython_bridge_arg = DeclareLaunchArgument(
         'use_micropython_bridge', default_value='false',
@@ -116,6 +123,8 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_mobile_bridge')),
         parameters=[{
             'active_map_yaml': '',
+            'enable_web_terminal': ParameterValue(
+                LaunchConfiguration('enable_web_terminal'), value_type=bool),
         }],
     )
 
@@ -127,6 +136,7 @@ def generate_launch_description():
         bridge_lock_file_arg,
         micropython_lock_file_arg,
         use_mobile_bridge_arg,
+        enable_web_terminal_arg,
         use_micropython_bridge_arg,
         micro_ros_agent,
         legacy_bridge,

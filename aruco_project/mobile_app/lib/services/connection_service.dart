@@ -199,6 +199,7 @@ class ConnectionService extends ChangeNotifier {
   int _consecutiveFailures = 0;
   DateTime? _connectedSince;
   int _commandsSent = 0;
+  bool _webTerminalEnabled = false;
 
   // Getters
   String? get baseUrl => _baseUrl;
@@ -224,6 +225,9 @@ class ConnectionService extends ChangeNotifier {
   int get commandsSent => _commandsSent;
   bool get isConnected => _status == ConnectionStatus.connected;
   String get videoFeedUrl => _baseUrl != null ? '$_baseUrl/video_feed' : '';
+  bool get webTerminalEnabled => _webTerminalEnabled;
+  // ws://host:5000 base for the Terminals tab to open its own /ws/terminal.
+  String? get wsBaseUrl => _wsBase();
 
   /// Connect to the RPi5 bridge.
   Future<bool> connect(String url) async {
@@ -689,6 +693,7 @@ class ConnectionService extends ChangeNotifier {
           mapInfo: fresh.mapInfo,
           markers: fresh.markers,
         );
+        _webTerminalEnabled = json['web_terminal'] == true;
         notifyListeners();
       }
     } catch (_) {}
@@ -1288,6 +1293,87 @@ class ConnectionService extends ChangeNotifier {
       return ok;
     } catch (e) {
       logger.error('relocalize: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
+  /// Soft AMCL re-localize at an operator-picked pose. Same wire shape as
+  /// relocalize() but hits /api/restart_amcl, which seeds a tight-covariance
+  /// /initialpose and pumps a few /request_nomotion_update calls so the
+  /// particle filter re-converges at the picked spot on a symmetric map.
+  Future<bool> restartAmcl(double x, double y, double yaw) async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/restart_amcl'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'x': x, 'y': y, 'yaw': yaw}),
+      ).timeout(const Duration(seconds: 5));
+      final ok = resp.statusCode == 200;
+      if (ok) {
+        _pathTrail.clear();
+        notifyListeners();
+        logger.warn(
+            'AMCL re-localized to (${x.toStringAsFixed(2)}, ${y.toStringAsFixed(2)})',
+            LogCategory.navigation);
+      }
+      return ok;
+    } catch (e) {
+      logger.error('restartAmcl: $e', LogCategory.navigation);
+      return false;
+    }
+  }
+
+  // --- Web terminal (PTY) ---
+
+  /// List active PTY sessions on the bridge. Returns raw maps
+  /// {id, pid, title, started_at, rows, cols, clients, alive}.
+  Future<List<Map<String, dynamic>>> listTerminals() async {
+    if (_baseUrl == null) return [];
+    try {
+      final resp = await http
+          .get(Uri.parse('$_baseUrl/api/terminals'))
+          .timeout(const Duration(seconds: 3));
+      if (resp.statusCode != 200) return [];
+      final j = jsonDecode(resp.body) as Map<String, dynamic>;
+      final list = (j['terminals'] as List?) ?? [];
+      return list.whereType<Map<String, dynamic>>().toList();
+    } catch (e) {
+      logger.error('listTerminals: $e', LogCategory.connection);
+      return [];
+    }
+  }
+
+  /// Spawn a new shell. Returns its session id, or null on failure.
+  Future<String?> spawnTerminal({String? title, int rows = 24, int cols = 80}) async {
+    if (_baseUrl == null) return null;
+    try {
+      final resp = await http
+          .post(Uri.parse('$_baseUrl/api/terminals'),
+              headers: {'Content-Type': 'application/json'},
+              body: jsonEncode({
+                if (title != null) 'title': title,
+                'rows': rows,
+                'cols': cols,
+              }))
+          .timeout(const Duration(seconds: 3));
+      if (resp.statusCode != 200) return null;
+      return (jsonDecode(resp.body)['id'] ?? '').toString();
+    } catch (e) {
+      logger.error('spawnTerminal: $e', LogCategory.connection);
+      return null;
+    }
+  }
+
+  Future<bool> killTerminal(String id) async {
+    if (_baseUrl == null) return false;
+    try {
+      final resp = await http
+          .delete(Uri.parse('$_baseUrl/api/terminals/${Uri.encodeComponent(id)}'))
+          .timeout(const Duration(seconds: 3));
+      return resp.statusCode == 200;
+    } catch (e) {
+      logger.error('killTerminal: $e', LogCategory.connection);
       return false;
     }
   }

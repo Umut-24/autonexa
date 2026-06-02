@@ -18,6 +18,7 @@ import 'tabs/parking_tab.dart';
 import 'tabs/camera_tab.dart';
 import 'tabs/diagnostics_tab.dart';
 import 'tabs/settings_tab.dart';
+import 'tabs/terminals_tab.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -239,6 +240,12 @@ class _MoreSheet extends StatelessWidget {
             'Diagnostics',
             'Event log, network stats, system info',
             () => onNavigate(const DiagnosticsTab()),
+          ),
+          _moreItem(context, colors,
+            Icons.terminal_rounded,
+            'Terminal',
+            'Full shell on the robot (PTY over WebSocket)',
+            () => onNavigate(const TerminalsTab()),
           ),
           _moreItem(context, colors,
             Icons.settings_rounded,

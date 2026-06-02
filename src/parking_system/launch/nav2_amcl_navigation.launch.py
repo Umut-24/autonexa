@@ -28,6 +28,7 @@ from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import AndSubstitution, EqualsSubstitution, LaunchConfiguration, NotSubstitution, PathJoinSubstitution
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch_ros.actions import Node
+from launch_ros.descriptions import ParameterValue
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from nav2_common.launch import RewrittenYaml
@@ -112,6 +113,13 @@ def generate_launch_description():
         default_value='true',
         description='Launch the Flask HTTP bridge (ros2_mobile_bridge) for the Flutter app'
     )
+    enable_web_terminal_arg = DeclareLaunchArgument(
+        'enable_web_terminal',
+        default_value='true',
+        description='Expose the full web terminal (PTY) in the app. SECURITY: '
+                    'arbitrary shell as the robot user for anyone on the LAN — '
+                    'set false to disable without a code change.'
+    )
     enforce_single_pub_arg = DeclareLaunchArgument(
         'enforce_single_publisher',
         default_value='true',
@@ -161,8 +169,11 @@ def generate_launch_description():
     servo_polarity_arg = DeclareLaunchArgument('servo_polarity', default_value='+1')
     reverse_steer_polarity_arg = DeclareLaunchArgument(
         'reverse_steer_polarity',
-        default_value='-1',
-        description='Flip steering sign only while reversing. -1 matches this chassis reverse maneuvering.')
+        default_value='+1',
+        description='Reverse-only steering sign flip. +1 (no flip) is correct '
+                    'on a normal Ackermann chassis: atan(L*wz/vx) already '
+                    'handles reverse. -1 collapsed reversing cusps to one '
+                    'steering hand (the "forward leg steers wrong way" bug).')
     vx_polarity_arg = DeclareLaunchArgument('vx_polarity', default_value='1')
     max_steer_rate_arg = DeclareLaunchArgument(
         'max_steer_rate_radps', default_value='3.0',
@@ -573,6 +584,8 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('use_mobile_bridge')),
         parameters=[{
             'active_map_yaml': LaunchConfiguration('map_yaml'),
+            'enable_web_terminal': ParameterValue(
+                LaunchConfiguration('enable_web_terminal'), value_type=bool),
         }],
     )
 
@@ -611,6 +624,7 @@ def generate_launch_description():
         servo_us_max_arg,
         servo_polarity_arg,
         reverse_steer_polarity_arg,
+        enable_web_terminal_arg,
         vx_polarity_arg,
         max_steer_rate_arg,
         use_ekf_arg,

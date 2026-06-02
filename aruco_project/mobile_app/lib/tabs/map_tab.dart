@@ -39,6 +39,15 @@ class _MapTabState extends State<MapTab> {
   double? _lastTapMy;
   double? _lastTapYaw;
 
+  // AMCL re-localize pose picker. When active, the map taps/drags set a start
+  // pose (tap = position, drag-out = heading) instead of dispatching nav goals,
+  // and an amber ghost is drawn so the operator can line it up with the park
+  // spots before committing it to AMCL.
+  bool _pickPoseMode = false;
+  double? _pickMx;
+  double? _pickMy;
+  double? _pickYaw;
+
   // Decoded map image — rebuilt asynchronously when the PNG bytes change so
   // the painter can blit it directly via canvas.drawImage. Caching by length
   // is good enough as a change-detection cheat (the bridge increments
@@ -154,6 +163,129 @@ class _MapTabState extends State<MapTab> {
       return;
     }
     await _waypointPicker(context, conn);
+  }
+
+  // ── AMCL re-localize pose picker ──────────────────────────────────────────
+
+  void _enterPickPoseMode() {
+    setState(() {
+      _pickPoseMode = true;
+      _pickMx = null;
+      _pickMy = null;
+      _pickYaw = null;
+    });
+  }
+
+  void _exitPickPoseMode() {
+    setState(() {
+      _pickPoseMode = false;
+      _pickMx = null;
+      _pickMy = null;
+      _pickYaw = null;
+    });
+  }
+
+  /// Set the picked position from a tap/press in the map. Heading is left as-is
+  /// (or 0 on first placement) so a plain tap still gives a usable pose.
+  void _setPickPosition(Offset localPos, ConnectionService conn) {
+    final coords = _tapToMapCoords(localPos, conn.robotStatus.mapInfo);
+    if (coords == null) return;
+    setState(() {
+      _pickMx = coords[0];
+      _pickMy = coords[1];
+      _pickYaw ??= 0.0;
+    });
+  }
+
+  /// Drag-out from the picked position sets the heading (atan2 in map meters,
+  /// same convention as nav-goal auto-yaw). Ignored until the press has moved
+  /// far enough to define a direction.
+  void _updatePickHeading(Offset localPos, ConnectionService conn) {
+    if (_pickMx == null || _pickMy == null) return;
+    final coords = _tapToMapCoords(localPos, conn.robotStatus.mapInfo);
+    if (coords == null) return;
+    final dx = coords[0] - _pickMx!;
+    final dy = coords[1] - _pickMy!;
+    if ((dx * dx + dy * dy) < 0.0009) return; // < 3 cm: not a real drag yet
+    setState(() => _pickYaw = math.atan2(dy, dx));
+  }
+
+  Future<void> _confirmPickPose(ConnectionService conn) async {
+    if (_pickMx == null || _pickMy == null) return;
+    final x = _pickMx!;
+    final y = _pickMy!;
+    final yaw = _pickYaw ?? 0.0;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(
+        content: Text('Re-localizing AMCL…'), duration: Duration(seconds: 5)));
+    final ok = await conn.restartAmcl(x, y, yaw);
+    if (!mounted) return;
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(
+        content: Text(ok
+            ? 'AMCL re-localized to (${x.toStringAsFixed(2)}, ${y.toStringAsFixed(2)})'
+            : 'AMCL re-localize failed')));
+    _exitPickPoseMode();
+  }
+
+  /// Bottom overlay shown while picking an AMCL start pose: instruction line,
+  /// live pose readout, and Cancel / Confirm actions. Sits above the gesture
+  /// capture layer so its buttons receive taps.
+  Widget _pickPoseBanner(
+      BuildContext context, ConnectionService conn, ResolvedColors colors) {
+    final hasPos = _pickMx != null;
+    final readout = hasPos
+        ? '(${_pickMx!.toStringAsFixed(2)}, ${_pickMy!.toStringAsFixed(2)})  '
+            'yaw ${((_pickYaw ?? 0.0) * 57.2958).toStringAsFixed(0)}°'
+        : 'Tap where the robot is; drag out to aim its heading.';
+    return Positioned(
+      left: 12,
+      right: 12,
+      bottom: 12,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: colors.surface.withValues(alpha: 0.96),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFFFB300)),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.gps_fixed_rounded,
+                color: Color(0xFFFFB300), size: 18),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('Set AMCL start pose',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: colors.textPrimary)),
+                  Text(readout,
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontFamily: 'monospace',
+                          color: colors.textSecondary)),
+                ],
+              ),
+            ),
+            TextButton(
+                onPressed: _exitPickPoseMode, child: const Text('Cancel')),
+            const SizedBox(width: 4),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFFFFB300),
+                  foregroundColor: Colors.black),
+              onPressed: hasPos ? () => _confirmPickPose(conn) : null,
+              child: const Text('Confirm'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   /// Bottom sheet shown when long-press lands on empty floor — lists every
@@ -424,6 +556,10 @@ class _MapTabState extends State<MapTab> {
   Future<void> _showResetMenu(
       BuildContext context, ConnectionService conn) async {
     final colors = context.read<ThemeProvider>().colors;
+    // In AMCL (localization) mode the relevant action is re-localizing the
+    // particle filter, not wiping the map; in live-SLAM mode it's restarting
+    // mapping. The two launch modes are mutually exclusive, so show one.
+    final isAmcl = (conn.robotStatus.mapInfo?.mapMode ?? '') == 'amcl';
     await showModalBottomSheet(
       context: context,
       backgroundColor: colors.surface,
@@ -478,42 +614,56 @@ class _MapTabState extends State<MapTab> {
               _resetPoseDialog(context, conn);
             },
           ),
-          ListTile(
-            leading:
-                const Icon(Icons.restart_alt_rounded, color: AppColors.warning),
-            title: const Text('Restart mapping'),
-            subtitle: const Text(
-                'Drops the current SLAM map. Robot pose resets to origin.'),
-            onTap: () async {
-              Navigator.pop(ctx);
-              final confirm = await showDialog<bool>(
-                context: context,
-                builder: (c2) => AlertDialog(
-                  title: const Text('Restart mapping?'),
-                  content: const Text(
-                      'The current map will be discarded. Use this when relocating the robot to a new area.'),
-                  actions: [
-                    TextButton(
-                        onPressed: () => Navigator.pop(c2, false),
-                        child: const Text('Cancel')),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.warning),
-                      onPressed: () => Navigator.pop(c2, true),
-                      child: const Text('Restart SLAM'),
-                    ),
-                  ],
-                ),
-              );
-              if (confirm == true) {
-                final ok = await conn.restartMapping();
-                if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                    content:
-                        Text(ok ? 'SLAM restarted' : 'SLAM restart failed')));
-              }
-            },
-          ),
+          if (isAmcl)
+            ListTile(
+              leading: const Icon(Icons.gps_fixed_rounded,
+                  color: AppColors.warning),
+              title: const Text('Restart AMCL (re-localize)…'),
+              subtitle: const Text(
+                  'Pick where the robot is on the map (park spots shown). '
+                  'Re-seeds AMCL so spots stay put on this symmetric map.'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _enterPickPoseMode();
+              },
+            )
+          else
+            ListTile(
+              leading: const Icon(Icons.restart_alt_rounded,
+                  color: AppColors.warning),
+              title: const Text('Restart mapping'),
+              subtitle: const Text(
+                  'Drops the current SLAM map. Robot pose resets to origin.'),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final confirm = await showDialog<bool>(
+                  context: context,
+                  builder: (c2) => AlertDialog(
+                    title: const Text('Restart mapping?'),
+                    content: const Text(
+                        'The current map will be discarded. Use this when relocating the robot to a new area.'),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.pop(c2, false),
+                          child: const Text('Cancel')),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.warning),
+                        onPressed: () => Navigator.pop(c2, true),
+                        child: const Text('Restart SLAM'),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirm == true) {
+                  final ok = await conn.restartMapping();
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content:
+                          Text(ok ? 'SLAM restarted' : 'SLAM restart failed')));
+                }
+              },
+            ),
         ]),
       ),
     );
@@ -613,6 +763,10 @@ class _MapTabState extends State<MapTab> {
                                   mapInfo: status.mapInfo,
                                   accentColor: colors.accent,
                                   robotConfig: conn.robotConfig,
+                                  pickPose:
+                                      _pickPoseMode && _pickMx != null
+                                          ? [_pickMx!, _pickMy!, _pickYaw ?? 0.0]
+                                          : null,
                                 ),
                                 size: Size(
                                   _decodedMap!.width.toDouble(),
@@ -621,6 +775,25 @@ class _MapTabState extends State<MapTab> {
                               ),
                             ),
                           ),
+                          // AMCL pose-picker overlay: while active, it captures
+                          // taps/drags (position + heading) instead of letting
+                          // them pan the map or dispatch nav goals. Uses the
+                          // same _transformController, so _tapToMapCoords still
+                          // maps the gesture to map meters correctly.
+                          if (_pickPoseMode)
+                            Positioned.fill(
+                              child: GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTapUp: (d) =>
+                                    _setPickPosition(d.localPosition, conn),
+                                onPanStart: (d) =>
+                                    _setPickPosition(d.localPosition, conn),
+                                onPanUpdate: (d) =>
+                                    _updatePickHeading(d.localPosition, conn),
+                              ),
+                            ),
+                          if (_pickPoseMode)
+                            _pickPoseBanner(context, conn, colors),
                           // Cardinal-direction compass: pinned to top-right,
                           // does NOT pan/zoom with the map. Lets the user
                           // verify which world axis the screen is showing as
@@ -807,6 +980,10 @@ class _MapPainter extends CustomPainter {
   final MapInfo? mapInfo;
   final Color accentColor;
   final RobotConfig robotConfig;
+  // AMCL re-localize picker ghost: [mx, my, yaw] in map meters, or null when
+  // not picking. Drawn as an amber ghost robot so the operator can line it up
+  // against the park spots before committing the pose to AMCL.
+  final List<double>? pickPose;
 
   _MapPainter({
     required this.mapImage,
@@ -820,6 +997,7 @@ class _MapPainter extends CustomPainter {
     this.mapInfo,
     required this.accentColor,
     this.robotConfig = RobotConfig.defaults,
+    this.pickPose,
   });
 
   @override
@@ -1090,6 +1268,50 @@ class _MapPainter extends CustomPainter {
 
     drawTip(pXEnd, 'X', AppColors.danger);
     drawTip(pYEnd, 'Y', AppColors.success);
+
+    // 7.5. AMCL re-localize picker ghost (amber footprint + heading arrow at
+    //      the operator-picked start pose). Same footprint math as the live
+    //      robot so the operator can judge clearance against the park spots.
+    if (pickPose != null && pickPose!.length >= 3) {
+      final gx = pickPose![0];
+      final gy = pickPose![1];
+      final gyaw = pickPose![2];
+      final gCos = math.cos(gyaw);
+      final gSin = math.sin(gyaw);
+      final ghostPath = Path();
+      for (var i = 0; i < cornersWorld.length; i++) {
+        final cx = cornersWorld[i][0];
+        final cy = cornersWorld[i][1];
+        final wx = gx + cx * gCos - cy * gSin;
+        final wy = gy + cx * gSin + cy * gCos;
+        final p = toPixel(wx, wy);
+        if (i == 0) {
+          ghostPath.moveTo(p.dx, p.dy);
+        } else {
+          ghostPath.lineTo(p.dx, p.dy);
+        }
+      }
+      ghostPath.close();
+      const amber = Color(0xFFFFB300);
+      canvas.drawPath(
+          ghostPath, Paint()..color = amber.withValues(alpha: 0.22));
+      canvas.drawPath(
+          ghostPath,
+          Paint()
+            ..color = amber
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2.0);
+      final gPix = toPixel(gx, gy);
+      canvas.drawCircle(gPix, 5, Paint()..color = amber);
+      const gArrow = 16.0;
+      canvas.drawLine(
+          gPix,
+          gPix + Offset(gArrow * math.cos(-gyaw), gArrow * math.sin(-gyaw)),
+          Paint()
+            ..color = amber
+            ..strokeWidth = 3.0
+            ..strokeCap = StrokeCap.round);
+    }
 
     // 8. Debug: scale bar (0.5 m horizontal). Drawn in painter coords so it
     //    pans/zooms with the map; its on-screen length always represents

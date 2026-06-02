@@ -46,6 +46,18 @@ import time
 import io
 import uuid
 import hashlib
+import base64
+# POSIX-only modules for the web terminal (PTY). Guarded so the bridge still
+# imports on non-POSIX dev machines; the terminal endpoints check this flag.
+try:
+    import pty
+    import fcntl
+    import termios
+    import struct
+    import select
+    _PTY_AVAILABLE = True
+except ImportError:
+    _PTY_AVAILABLE = False
 from collections import deque
 from math import cos, sin, isinf, isnan, hypot, ceil, pi as MATH_PI
 
@@ -384,6 +396,18 @@ class MobileBridgeNode(Node):
                 self.get_parameter('active_map_yaml').value or '').strip()
         except Exception:
             _active_map_yaml_param = ''
+
+        # Full web-terminal gate. Default ON (LAN-trusted testbed decision), but
+        # kept as a launch flag so the whole PTY surface can be disabled without
+        # a code change. When false, /api/terminals + /ws/terminal all 403.
+        # SECURITY: when on, this is arbitrary shell as the robot user for anyone
+        # who can reach :5000 — only acceptable on an isolated network.
+        self.declare_parameter('enable_web_terminal', True)
+        try:
+            self._web_terminal_enabled = bool(
+                self.get_parameter('enable_web_terminal').value)
+        except Exception:
+            self._web_terminal_enabled = True
 
         # --- Stored data (thread-safe via locks) ---
         self._scan_lock = threading.Lock()
@@ -2566,7 +2590,8 @@ class MobileBridgeNode(Node):
 
     # --- Pose reset / relocalize (Part G1) ---
 
-    def publish_initial_pose(self, x: float, y: float, yaw: float) -> None:
+    def publish_initial_pose(self, x: float, y: float, yaw: float,
+                             tight: bool = False) -> None:
         msg = PoseWithCovarianceStamped()
         msg.header.frame_id = 'map'
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -2575,16 +2600,62 @@ class MobileBridgeNode(Node):
         from math import cos as mcos, sin as msin
         msg.pose.pose.orientation.z = msin(float(yaw) / 2.0)
         msg.pose.pose.orientation.w = mcos(float(yaw) / 2.0)
-        # Loose covariance — don't fight whatever localizer is listening.
-        # x, y: 0.25 m^2; yaw: ~0.07 rad^2 (~15 deg). Order is row-major 6x6.
         cov = [0.0] * 36
-        cov[0] = 0.25
-        cov[7] = 0.25
-        cov[35] = 0.0685
+        if tight:
+            # Deliberate operator pick (AMCL restart on a symmetric map): commit
+            # hard so the filter snaps to this pose instead of diffusing across
+            # the map's symmetry. x, y: 0.05 m^2 (~0.22 m std); yaw: 0.02 rad^2
+            # (~8 deg). Order is row-major 6x6.
+            cov[0] = 0.05
+            cov[7] = 0.05
+            cov[35] = 0.02
+        else:
+            # Loose covariance — don't fight whatever localizer is listening.
+            # x, y: 0.25 m^2; yaw: ~0.07 rad^2 (~15 deg).
+            cov[0] = 0.25
+            cov[7] = 0.25
+            cov[35] = 0.0685
         msg.pose.covariance = cov
         self._initialpose_pub.publish(msg)
         self.get_logger().info(
-            f'initialpose published: ({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
+            f'initialpose published ({"tight" if tight else "loose"}): '
+            f'({x:.2f}, {y:.2f}, yaw={yaw:.2f})')
+
+    def restart_amcl(self, x: float, y: float, yaw: float) -> dict:
+        """Soft AMCL re-localize: seed a deliberate pose with tight covariance,
+        then pump /request_nomotion_update a few times so the particle filter
+        re-converges at that spot without driving. No lifecycle bounce — Nav2
+        stays alive. On a small symmetric map this is what lets the saved park
+        spots resolve to the same physical place every run.
+
+        Called from a Flask request thread (not the ROS executor), so the short
+        sleeps below are safe — same pattern as restart_mapping()."""
+        self.publish_initial_pose(x, y, yaw, tight=True)
+        steps = [{'step': 'initialpose', 'ok': True}]
+        cli = self._amcl_nomotion_client
+        amcl_present = cli is not None and cli.service_is_ready()
+        if not amcl_present:
+            # live-SLAM (or AMCL not up yet): the initialpose still snaps SLAM
+            # Toolbox's pose graph, but there's no particle filter to re-settle.
+            steps.append({'step': 'nomotion', 'ok': False,
+                          'reason': '/request_nomotion_update not advertised'})
+            self.get_logger().info(
+                'restart_amcl: AMCL absent — initialpose only')
+            return {'ok': True, 'amcl': False, 'steps': steps}
+        # Give AMCL a moment to ingest the initialpose, then re-settle 3x.
+        settled = 0
+        for _ in range(3):
+            time.sleep(0.3)
+            if not cli.service_is_ready():
+                break
+            self._relocalize_fut = cli.call_async(Empty.Request())
+            settled += 1
+        self._relocalize_last_t = time.time()
+        steps.append({'step': 'nomotion', 'ok': settled > 0, 'count': settled})
+        self.get_logger().info(
+            f'restart_amcl: re-seeded ({x:.2f},{y:.2f},{yaw:.2f}), '
+            f'{settled} nomotion update(s)')
+        return {'ok': True, 'amcl': True, 'steps': steps}
 
     # ---- Helpers ----
 
@@ -3056,6 +3127,197 @@ sock = Sock(flask_app)
 bridge_node: MobileBridgeNode = None  # Set after node init
 
 
+# =============================================================================
+#  Web terminal (PTY) — full shell over WebSocket. Gated by the bridge's
+#  enable_web_terminal launch flag. SECURITY: arbitrary shell as the robot user
+#  for anyone reaching :5000 — LAN-trusted testbed use only (no auth, per the
+#  deployment decision). See the param doc in MobileBridgeNode.__init__.
+# =============================================================================
+
+def _set_winsize(fd: int, rows: int, cols: int) -> None:
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ,
+                    struct.pack('HHHH', rows, cols, 0, 0))
+    except (OSError, ValueError):
+        pass
+
+
+class _TerminalSession:
+    __slots__ = ('id', 'pid', 'master_fd', 'title', 'started_at', 'rows',
+                 'cols', 'clients', 'clients_lock', 'alive', 'exit_code',
+                 'reader_thread')
+
+    def __init__(self, sid, pid, master_fd, title, rows, cols):
+        self.id = sid
+        self.pid = pid
+        self.master_fd = master_fd
+        self.title = title
+        self.started_at = time.time()
+        self.rows = rows
+        self.cols = cols
+        self.clients = set()
+        self.clients_lock = threading.Lock()
+        self.alive = True
+        self.exit_code = None
+        self.reader_thread = None
+
+    def info(self) -> dict:
+        return {'id': self.id, 'pid': self.pid, 'title': self.title,
+                'started_at': self.started_at, 'rows': self.rows,
+                'cols': self.cols, 'clients': len(self.clients),
+                'alive': self.alive}
+
+
+class _TerminalManager:
+    """Owns PTY-backed shell sessions. Each session is a forked `bash` whose
+    master fd is read by a daemon thread and fanned out (base64) to every
+    attached WebSocket — so multiple browsers can watch/drive the same shell
+    ("see/control all active terminals"). Mirrors the telemetry fan-out + the
+    command runner's killpg teardown patterns elsewhere in this file."""
+
+    def __init__(self):
+        self._sessions = {}
+        self._lock = threading.Lock()
+
+    def spawn(self, title=None, rows=24, cols=80, cwd=None):
+        rows = max(1, min(300, int(rows)))
+        cols = max(1, min(500, int(cols)))
+        # Build the child env + cwd BEFORE forking: the child of a multithreaded
+        # process must avoid malloc-heavy work between fork and exec (another
+        # thread may hold the allocator lock at fork time → deadlock).
+        child_env = dict(os.environ)
+        child_env['TERM'] = 'xterm-256color'
+        child_cwd = cwd or os.path.expanduser('~')
+        pid, master_fd = pty.fork()
+        if pid == 0:
+            # CHILD: only syscalls before execvpe — no allocation.
+            try:
+                os.chdir(child_cwd)
+            except OSError:
+                pass
+            try:
+                os.execvpe('/bin/bash', ['/bin/bash', '-il'], child_env)
+            except OSError:
+                os._exit(127)
+        # PARENT
+        _set_winsize(master_fd, rows, cols)
+        sid = uuid.uuid4().hex[:12]
+        sess = _TerminalSession(sid, pid, master_fd,
+                                title or f'shell {sid[:6]}', rows, cols)
+        with self._lock:
+            self._sessions[sid] = sess
+        sess.reader_thread = threading.Thread(
+            target=self._reader, args=(sess,), daemon=True)
+        sess.reader_thread.start()
+        return sess
+
+    def _reader(self, sess):
+        while True:
+            try:
+                r, _, _ = select.select([sess.master_fd], [], [], 0.5)
+            except (OSError, ValueError):
+                break
+            if r:
+                try:
+                    chunk = os.read(sess.master_fd, 8192)
+                except OSError:
+                    chunk = b''
+                if not chunk:
+                    break  # EOF: shell exited / pty closed
+                self._broadcast(sess, {
+                    'type': 'output', 'session_id': sess.id,
+                    'data': base64.b64encode(chunk).decode('ascii')})
+        sess.alive = False
+        try:
+            _, status = os.waitpid(sess.pid, 0)
+            sess.exit_code = os.waitstatus_to_exitcode(status)
+        except (OSError, ChildProcessError):
+            sess.exit_code = None
+        self._broadcast(sess, {'type': 'exit', 'session_id': sess.id,
+                               'code': sess.exit_code})
+        try:
+            os.close(sess.master_fd)
+        except OSError:
+            pass
+        with self._lock:
+            self._sessions.pop(sess.id, None)
+
+    @staticmethod
+    def _broadcast(sess, msg):
+        payload = json.dumps(msg)
+        with sess.clients_lock:
+            clients = list(sess.clients)
+        for ws in clients:
+            try:
+                ws.send(payload)
+            except Exception:
+                with sess.clients_lock:
+                    sess.clients.discard(ws)
+
+    def get(self, sid):
+        with self._lock:
+            return self._sessions.get(sid)
+
+    def attach(self, sid, ws):
+        sess = self.get(sid)
+        if sess is None:
+            return None
+        with sess.clients_lock:
+            sess.clients.add(ws)
+        return sess
+
+    def detach(self, sess, ws):
+        if sess is None:
+            return
+        with sess.clients_lock:
+            sess.clients.discard(ws)
+
+    def write(self, sess, data: bytes):
+        try:
+            os.write(sess.master_fd, data)
+        except OSError:
+            pass
+
+    def resize(self, sess, rows, cols):
+        sess.rows = max(1, min(300, int(rows)))
+        sess.cols = max(1, min(500, int(cols)))
+        _set_winsize(sess.master_fd, sess.rows, sess.cols)
+
+    def kill(self, sid):
+        sess = self.get(sid)
+        if sess is None:
+            return False
+        # PTY-forked bash is its own session leader (pgid == pid).
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(sess.pid, sig)
+            except (OSError, ProcessLookupError):
+                break
+            time.sleep(0.1)
+            if self.get(sid) is None:  # reader thread reaped it
+                break
+        return True
+
+    def list(self):
+        with self._lock:
+            sessions = list(self._sessions.values())
+        return [s.info() for s in sessions]
+
+    def shutdown_all(self):
+        with self._lock:
+            sids = list(self._sessions.keys())
+        for sid in sids:
+            self.kill(sid)
+
+
+terminal_manager = _TerminalManager()
+
+
+def _web_terminal_ready() -> bool:
+    return bool(_PTY_AVAILABLE and bridge_node is not None
+                and getattr(bridge_node, '_web_terminal_enabled', False))
+
+
 @flask_app.route('/api/scan')
 def api_scan():
     points, stamp = bridge_node.get_scan()
@@ -3134,6 +3396,8 @@ def api_status():
         # /cmd_vel_smoothed (collision_monitor bypassed). Diagnostic-only;
         # the bridge's own SetParameters response is the source of truth.
         'nav_bypass_active': bridge_node._nav_bypass_active,
+        # Lets the app show/hide the Terminals tab without probing /api/terminals.
+        'web_terminal': _web_terminal_ready(),
     })
 
 
@@ -3632,6 +3896,18 @@ def api_relocalize():
     return jsonify({'status': 'ok'})
 
 
+@flask_app.route('/api/restart_amcl', methods=['POST'])
+def api_restart_amcl():
+    """Soft AMCL re-localize at an operator-picked pose. The app opens a map
+    picker (park spots shown as reference) and POSTs the chosen x/y/yaw here."""
+    data = request.get_json(silent=True) or {}
+    if 'x' not in data or 'y' not in data:
+        return jsonify({'error': 'x, y required'}), 400
+    yaw = data.get('yaw', 0.0)
+    return jsonify(bridge_node.restart_amcl(
+        float(data['x']), float(data['y']), float(yaw)))
+
+
 # ---------------------------------------------------------------------------
 #  Part G2 — Live param tuner
 # ---------------------------------------------------------------------------
@@ -4028,6 +4304,106 @@ def ws_command(ws):
         bridge_node.get_logger().info(f'WS /ws/command closed: {exc}')
 
 
+@flask_app.route('/api/terminals', methods=['GET', 'POST'])
+def api_terminals():
+    """List active PTY sessions, or spawn a new one. Gated by the launch flag.
+
+    GET  -> {terminals: [{id, pid, title, started_at, rows, cols, clients,
+             alive}], enabled: bool}
+    POST {title?, rows?, cols?} -> {id, pid, title, rows, cols}"""
+    if not _web_terminal_ready():
+        return jsonify({'error': 'web terminal disabled', 'enabled': False}), 403
+    if request.method == 'GET':
+        return jsonify({'terminals': terminal_manager.list(), 'enabled': True})
+    data = request.get_json(silent=True) or {}
+    sess = terminal_manager.spawn(
+        title=data.get('title'),
+        rows=int(data.get('rows', 24)),
+        cols=int(data.get('cols', 80)))
+    return jsonify({'id': sess.id, 'pid': sess.pid, 'title': sess.title,
+                    'rows': sess.rows, 'cols': sess.cols})
+
+
+@flask_app.route('/api/terminals/<sid>', methods=['DELETE'])
+def api_terminal_delete(sid):
+    if not _web_terminal_ready():
+        return jsonify({'error': 'web terminal disabled'}), 403
+    if terminal_manager.kill(sid):
+        return jsonify({'status': 'killed', 'id': sid})
+    return jsonify({'error': 'not found'}), 404
+
+
+@sock.route('/ws/terminal')
+def ws_terminal(ws):
+    """Attach to (or spawn) a PTY shell and stream it both ways.
+
+    Client → server JSON ops:
+      {op:'spawn', rows, cols, title?}   start a new shell and attach
+      {op:'attach', session_id}          attach to an existing shell
+      {op:'input', data}                 raw UTF-8 keystrokes to the shell
+      {op:'resize', rows, cols}          window resize (TIOCSWINSZ)
+      {op:'kill', session_id?}           terminate the shell
+    Server → client JSON:
+      {type:'attached', session_id, rows, cols}
+      {type:'output', session_id, data}  base64 of raw PTY bytes
+      {type:'exit', session_id, code}
+      {type:'error', text}"""
+    if not _web_terminal_ready():
+        _ws_send_json(ws, {'type': 'error', 'text': 'web terminal disabled'})
+        return
+    bridge_node.get_logger().info('WS /ws/terminal connected')
+    sess = None
+    try:
+        while True:
+            raw = ws.receive(timeout=30)
+            if raw is None:
+                continue
+            try:
+                data = json.loads(raw)
+            except (TypeError, ValueError):
+                _ws_send_json(ws, {'type': 'error', 'text': 'invalid JSON'})
+                continue
+            op = str(data.get('op', '')).lower()
+            if op == 'spawn':
+                sess = terminal_manager.spawn(
+                    title=data.get('title'),
+                    rows=int(data.get('rows', 24)),
+                    cols=int(data.get('cols', 80)))
+                terminal_manager.attach(sess.id, ws)
+                _ws_send_json(ws, {'type': 'attached', 'session_id': sess.id,
+                                   'rows': sess.rows, 'cols': sess.cols})
+            elif op == 'attach':
+                sid = str(data.get('session_id', ''))
+                sess = terminal_manager.attach(sid, ws)
+                if sess is None:
+                    _ws_send_json(ws, {'type': 'error',
+                                       'text': f'no such session {sid}'})
+                else:
+                    _ws_send_json(ws, {'type': 'attached',
+                                       'session_id': sess.id,
+                                       'rows': sess.rows, 'cols': sess.cols})
+            elif op == 'input':
+                if sess is not None:
+                    terminal_manager.write(
+                        sess, str(data.get('data', '')).encode('utf-8'))
+            elif op == 'resize':
+                if sess is not None:
+                    terminal_manager.resize(sess, data.get('rows', 24),
+                                            data.get('cols', 80))
+            elif op == 'kill':
+                sid = str(data.get('session_id', '')) or \
+                    (sess.id if sess is not None else '')
+                if sid:
+                    terminal_manager.kill(sid)
+            else:
+                _ws_send_json(ws, {'type': 'error',
+                                   'text': f'unknown op {op!r}'})
+    except Exception as exc:
+        bridge_node.get_logger().info(f'WS /ws/terminal closed: {exc}')
+    finally:
+        terminal_manager.detach(sess, ws)
+
+
 @sock.route('/ws/control')
 def ws_control(ws):
     """Bidirectional joystick stream. Each inbound JSON message
@@ -4240,7 +4616,11 @@ def main():
     # GNOME Shell. Desktop tab is non-essential. Re-enable behind a flag if needed.
 
     bridge_node.get_logger().info('Starting Flask server on http://0.0.0.0:5000')
-    flask_app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    try:
+        flask_app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    finally:
+        # Reap any live PTY shells so they don't linger as orphans.
+        terminal_manager.shutdown_all()
 
     bridge_node.destroy_node()
     rclpy.shutdown()

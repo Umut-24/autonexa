@@ -19,8 +19,12 @@ angular.z = left turn = front wheels rotate counter-clockwise (top
 view). The firmware's bench-GUI calibration empirically gives
 "servo µs < center = wheels turn left", so the mapping negates steer
 before mapping to µs. Set `servo_polarity:=-1` to flip if your hardware
-is mounted opposite. Set `reverse_steer_polarity:=-1` when forward
-turns are correct but reverse-left/reverse-right are swapped.
+is mounted opposite. `reverse_steer_polarity` defaults to +1 (no flip)
+and should stay there: atan(L*wz/vx) already handles reverse correctly
+because vx's sign is in the denominator, so a reverse-only flip is an
+invalid second correction that collapses a reversing cusp to the same
+steering hand on both legs (see the param's declaration for the full
+analysis).
 
 Lifecycle:
     on launch: open serial → send `ENABLE` (if auto_enable=true)
@@ -198,9 +202,30 @@ class Nav2PicoBridge(Node):
         # joystick and Nav2 (same code path). Override to -1 only if a linkage
         # rebuild later inverts the forward steering direction.
         self.declare_parameter('servo_polarity', +1)
-        # -1 matches this chassis' reverse maneuvering; live-SLAM, AMCL, and
-        # standalone bridge launch files all pass the same default.
-        self.declare_parameter('reverse_steer_polarity', -1)
+        # Reverse-only steering sign flip. DEFAULT +1 (i.e. NO flip), and that
+        # should be correct on any normal Ackermann chassis — leave it at +1.
+        #
+        # Why: the inverse delta = atan(L*wz/vx) is already geometrically
+        # complete for BOTH travel directions. vx carries its sign into the
+        # denominator, so the front-wheel angle it returns is physically right
+        # whether driving forward or reverse (a steered front axle has no
+        # travel-direction steering asymmetry). An extra reverse-only ×(-1) is
+        # therefore a SECOND, invalid correction.
+        #
+        # The bug it caused: at a reversing cusp the body keeps yawing the same
+        # way, so Nav2 commands the SAME-sign wz on both legs. Because atan is
+        # odd, reverse leg atan(L*wz/-V) ×(-1) == forward leg atan(L*wz/+V) when
+        # this is -1 → both legs steer the SAME hand ("reverse-right then
+        # forward-right"), making the realignment impossible so Nav2 retried
+        # forever. With +1 the two legs come out with OPPOSITE hands (correct).
+        # This holds regardless of servo_polarity / chassis wiring.
+        #
+        # Kept as a parameter only as an escape hatch; flip to -1 ONLY if a
+        # linkage rebuild ever genuinely inverts reverse steering relative to
+        # forward (it shouldn't). NOTE: persisted in runtime_overrides.yaml
+        # (RUNTIME_CALIBRATION) — a stale -1 there overrides this default until
+        # /api/reset_overrides is called.
+        self.declare_parameter('reverse_steer_polarity', +1)
         # +1 = ROS-positive vx drives the chassis forward (standard).
         # -1 = forward/back swapped (use when motor wiring is reversed or the
         # LiDAR-defined map frame is yaw-flipped). Calibration wizard in the
