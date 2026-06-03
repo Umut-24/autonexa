@@ -449,6 +449,114 @@ ros2 launch parking_system nav2_live_slam.launch.py use_pico_bridge:=true use_rv
 
 ---
 
+## Stage 11 — Stop & reroute around NEW obstacles (AMCL mode)
+
+Verifies the map/goal-aware obstacle discriminator: the car still parks precisely
+against the intended wall/slot, but a NEW (unaccumulated) obstacle placed in its
+path makes it STOP and reroute instead of driving through it.
+
+```bash
+# Saved-map / AMCL mode (the mode the precise park is tuned for).
+# collision_monitor stop polygons are now ENABLED in this launch.
+ros2 launch parking_system nav2_amcl_navigation.launch.py \
+  map_yaml:=$HOME/.autonexa/maps/garage_<ts>.yaml \
+  initial_pose_x:=0.0 initial_pose_y:=0.0 initial_pose_yaw:=0.0
+```
+
+Setup: open floor, one wall/parking target, one ~20 cm box (tall enough for the C1
+to see — above the costmap `min_height: 0.0`). Useful watchers:
+
+```bash
+ros2 topic echo /collision_monitor_state          # shows stop events
+ros2 param get /global_costmap/global_costmap inflation_layer.inflation_radius
+# (~0.22 normal; 0.015 means the near-wall BYPASS is engaged)
+# Bridge log lines to watch for: "novel obstacle at <d> m — releasing bypass"
+```
+
+**11a — Regression gate (RUN FIRST, must pass before 11b):**
+Park against the wall/slot with NO box in the path.
+**Pass:** final position error **< 3 cm** (the EXPECTED wall/target still engages
+the bypass, so the polygons never freeze the park).
+**If it regresses:** raise `_goal_vicinity_m` (0.40 → 0.50) in `ros2_mobile_bridge.py`
+and retry; if still short, fall back to the discriminator-commanded-stop variant and
+leave the AMCL polygons disabled. **Do not proceed to 11b until 11a passes.**
+
+**11b — New obstacle in the path:**
+Send a cross-room goal; while the car is driving in open space, place the box
+0.6–1.0 m ahead of it. **Pass, in order:**
+1. Car **STOPS** > 0.12 m from the box (`/collision_monitor_state` shows a stop).
+2. Bridge log shows the bypass released / never engaged as the box entered range.
+3. A fresh `/plan` that routes AROUND the box appears within ~0.3–0.5 s — the active
+   re-plan (bridge log `novel obstacle re-plan: re-issuing goal …`), not only at the
+   next 2 Hz BT tick. A lethal cell is marked at the box in the global costmap.
+4. Car reaches the goal **without contact**.
+**Fail check:** if it drives through the box, confirm `inflation_radius` ≈ 0.22 (NOT
+0.015 — 0.015 means the bypass is still wrongly engaged).
+
+**11c — Obstacle between robot and the target wall:**
+Place the box between the chassis and the parking slot. **Pass:** car stops + reroutes,
+then completes the **< 3 cm** park once the direct path is clear (NOVEL dominates the
+nearby EXPECTED wall).
+
+**11d — Spurious-point immunity:**
+Wave a thin object briefly across the LiDAR in open space. **Pass:** no force-release
+and no spurious full stop (a momentary FootprintApproach slow-down is acceptable).
+
+**11e — SLAM accretion (optional, live-SLAM only):**
+Leave the box in place several seconds. **Pass:** it enters `/map`; later plans treat
+it as a permanent wall; no oscillation in the bypass log.
+
+**11f — Dead-ahead escape (reverse + curve):**
+Place the box directly in front, blocking the straight path to the goal but with room
+to the sides. **Pass:** car stops, then the new `/plan` includes a **reverse** segment
+(Reeds-Shepp) — the car backs up to gain room, curves around, and reaches the goal.
+collision_monitor's direction-aware reverse polygon permits the back-up (free space
+behind). No forced BackUp nudge is used — this relies on the planner.
+
+**11g — Fully blocked (multipoint decompose):**
+Box + walls leave no path around. **Pass:** after the recovery ladder the goal ABORTs
+and the bridge logs `ABORT after novel obstacle — decomposing via waypoint` →
+`multipoint … staging via waypoint`; the car attempts an alternative approach via an
+intermediate open-space waypoint. If no path exists it gives up cleanly at the decompose
+cap **without driving into the box**. (Decompose needs an app-issued goal so `_mp_final_goal`
+is set; RViz `/goal_pose` goals don't trigger it.)
+
+**11h — Park staging fallback (two-leg strategy):**
+Issue a **park** goal whose staging pose (0.55 m back from the slot) is hard to reach
+(e.g. start the car so the far staging pose is boxed, but a closer one is open).
+**Pass, in order:**
+1. Bridge logs `staging candidate 0 … d=0.55`. If that leg ABORTs, it logs
+   `staging candidate 0 unreachable; re-staging to candidate 1 d=0.40`, then `… d=0.28`.
+2. The car re-stages **closer** to the slot rather than abandoning straight-in immediately.
+3. Only after **all** candidates are exhausted does it log `staging exhausted … falling
+   back to standard goal` and drive directly to the slot.
+4. Park substate (`/api/status` → park stage) shows `approach` across retries, then
+   briefly `blocked`, then the normal park completes (or the direct goal does).
+A staging candidate is **valid** only if BOTH (i) its approach→slot corridor is clear in
+the static map (`_corridor_clear`) AND (ii) **no unaccumulated obstacle** sits within
+`park_staging_clear_diam_m` (default 0.60 m diameter / 0.30 m radius, ≥`_novel_min_points`
+returns on free map cells) of the staging point (`_staging_blocked_by_novel`). So the car
+will not stage onto a freshly-placed obstacle that isn't in the map yet — it skips to the
+next (closer) candidate, or falls back to a plain slot goal if none is valid.
+
+**Fallback-from-leg-strategy contract** — it abandons the two-leg strategy and issues a
+plain slot goal when ANY of: (a) no staging candidate is valid at issue (corridor blocked
+OR novel obstacle within the staging clearance — Check #1), (b) every staging candidate's
+leg-1 plan ABORTed, (c) the push-in leg (leg 2) aborts or Check #2 finds the corridor
+blocked before push-in, (d) it can't enter AUTO. The fallback never does worse than the
+pre-existing single-goal behavior.
+
+**11i — Obstacle on the staging point:** place a box right where the 0.55 m staging pose
+would be (but leave a closer staging spot open). **Pass:** bridge logs that candidate 0 is
+skipped (novel within staging clearance) and stages to candidate 1/2 instead, or falls back
+to a plain slot goal if all staging spots are fouled — it never drives onto the box.
+
+**Pass:** 11a + 11b + 11c all green — precise parking preserved AND new obstacles
+trigger stop + reroute. 11f/11g green — escape + blocked-route recovery work.
+11h green — staging retries then clean fallback.
+
+---
+
 ## Full system diagnostics (run any time)
 
 ```bash
@@ -492,6 +600,7 @@ Stage 7  →  App joystick drives robot
 Stage 8  →  Autonomous navigation to RViz goal
 Stage 9  →  App tap-to-navigate + E-STOP cancel
 Stage 10 →  ArUco marker detection + parking approach
+Stage 11 →  Stop & reroute around NEW obstacles (AMCL); precise park preserved
 ```
 
 Each stage gate-keeps the next. If Stage 3 fails there is no point testing Stage 7.

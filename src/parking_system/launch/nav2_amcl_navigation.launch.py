@@ -207,14 +207,19 @@ def generate_launch_description():
             'global_costmap.global_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan',
             'local_costmap.local_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan',
             'collision_monitor.ros__parameters.scan.topic': '/scan',
-            # "Unsafe navigation" (operator choice): disable collision_monitor's
-            # stop/approach polygons so AUTO nav drives to the goal without
-            # halting near walls (behaves like the manual OFF/bypass chain).
-            # collision_monitor still republishes cmd_vel_smoothed -> cmd_vel_safe
-            # unchanged. Bridge clamps + 200 ms watchdog + E-STOP remain. Flip
-            # these back to 'true' to restore wall-stop safety.
-            'collision_monitor.ros__parameters.DirectionalStop.enabled': 'false',
-            'collision_monitor.ros__parameters.FootprintApproach.enabled': 'false',
+            # collision_monitor stop/approach polygons ENABLED. Previously
+            # force-disabled ("unsafe navigation") because the blanket near-wall
+            # bypass couldn't tell the parking wall from an intruder, so the
+            # polygons would freeze the chassis short of the slot and lose the
+            # precise park. The mobile bridge now runs a map/goal-aware
+            # discriminator (_classify_near_obstacles): it keeps the bypass
+            # ENGAGED at the park target (EXPECTED) so the polygons never act
+            # during the actual park (precise <3 cm preserved), but RELEASES the
+            # bypass for a NOVEL obstacle so these polygons hard-stop the
+            # intruder and SMAC reroutes. Re-enabling them is what gives that
+            # stop authority in AMCL mode (live-SLAM already has them enabled).
+            'collision_monitor.ros__parameters.DirectionalStop.enabled': 'true',
+            'collision_monitor.ros__parameters.FootprintApproach.enabled': 'true',
             'bt_navigator.ros__parameters.default_nav_to_pose_bt_xml': _bt_xml_path,
             'amcl.ros__parameters.scan_topic': '/scan',
             'amcl.ros__parameters.set_initial_pose': 'true',

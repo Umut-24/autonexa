@@ -447,6 +447,34 @@ class MobileBridgeNode(Node):
         self._near_wall_enter_m = 0.35       # engage when an obstacle is closer
         self._near_wall_exit_m = 0.55        # release when all obstacles farther
 
+        # --- New-obstacle discriminator (stop + reroute around intruders) -
+        # The bare near-wall monitor above engaged the bypass for ANY close
+        # LiDAR point, so it could not tell the wall/slot the robot is
+        # intentionally parking against (EXPECTED) from an unaccumulated
+        # obstacle that appeared in the path (NOVEL). _classify_near_obstacles
+        # splits the two using the cached /map grid + the active goal:
+        #   EXPECTED = point on an occupied/unknown map cell (a known wall) OR
+        #              within _goal_vicinity_m of the goal (the park target)
+        #   NOVEL    = point on a FREE map cell AND outside the goal vicinity
+        # The monitor engages the bypass only on EXPECTED proximity and
+        # force-releases it whenever a NOVEL obstacle is within _novel_danger_m,
+        # so collision_monitor stays authoritative and hard-stops the intruder;
+        # the global obstacle_layer + 2 Hz BT replan then route SMAC around it.
+        self._goal_vicinity_m = 0.40         # within this of goal => park target => EXPECTED
+        self._obstacle_cell_tol = 1          # occupied-neighborhood tol (cells); absorbs ~2 cm jitter
+        self._novel_danger_m = 0.60          # NOVEL inside this => force-release bypass (>= exit_m, no flap)
+        self._novel_min_points = 3           # de-noise; mirrors collision_monitor min_points
+        # Recovery from a novel-obstacle stop. On detection the monitor forces
+        # one immediate re-plan (re-issues the goal so SMAC routes around the
+        # freshly-marked lethal cell instead of waiting for the next 2 Hz BT
+        # tick), then re-tries on a cooldown while still blocked. A recent
+        # novel sighting also biases the ABORTED handler toward multipoint
+        # decompose (stage via a waypoint) instead of a same-goal retry.
+        self._novel_replan_cooldown_s = 4.0  # min seconds between active re-plans
+        self._novel_replan_last_t = 0.0
+        self._novel_last_seen_t = 0.0        # last time a NOVEL obstacle was in danger range
+        self._novel_block_window_s = 6.0     # ABORT within this of a sighting => decompose
+
         # --- Planner mode + multi-point decompose-on-failure (item 2) ----
         # 'standard'  — single SMAC goal; on ABORT, one same-goal auto-retry.
         # 'multipoint'— on ABORT, stage the goal: drive to an intermediate
@@ -477,6 +505,15 @@ class MobileBridgeNode(Node):
         self.declare_parameter('park_approach_clearance_m', 0.06)
         self.declare_parameter('park_staging_yaw_tol', 0.20)
         self.declare_parameter('park_final_yaw_tol', 0.06)
+        # A staging candidate is only valid if no unaccumulated (NOVEL) obstacle
+        # sits within this DIAMETER of the staging point — i.e. the spot the
+        # chassis would stage onto is clear of new obstacles not in the static
+        # map. _corridor_clear only sees the static map, so this is the live
+        # check that stops the car staging on top of a freshly-placed obstacle.
+        # 0.60 m diameter (0.30 m radius) leaves a clearance margin BEYOND the
+        # ~0.15 m chassis half-length so the car doesn't stage right up against
+        # a new obstacle.
+        self.declare_parameter('park_staging_clear_diam_m', 0.60)
         try:
             self._park_approach_enabled = bool(
                 self.get_parameter('park_approach_enabled').value)
@@ -488,16 +525,39 @@ class MobileBridgeNode(Node):
                 self.get_parameter('park_staging_yaw_tol').value)
             self._park_final_yaw_tol = float(
                 self.get_parameter('park_final_yaw_tol').value)
+            self._park_staging_clear_r = float(
+                self.get_parameter('park_staging_clear_diam_m').value) / 2.0
         except Exception:
             self._park_approach_enabled = True
             self._park_approach_dist = 0.55
             self._park_approach_clearance = 0.06
             self._park_staging_yaw_tol = 0.20
             self._park_final_yaw_tol = 0.06
+            self._park_staging_clear_r = 0.30
         self._park_lock = threading.Lock()
         self._park_stage = 'off'             # 'off' | 'approach' | 'pushing_in'
         self._park_final = None              # {'x','y','yaw'} exact slot pose
         self._park_blocked_t = 0.0           # wall-clock of last corridor block
+        # Alternate staging distances tried (in order) before giving up the
+        # two-leg strategy. Same slot-axis heading (so the final push stays
+        # straight-in), just closer to the slot: a nearer staging pose has a
+        # shorter corridor and is easier for SMAC to reach when the full
+        # approach is blocked/unreachable. Each is attempted only if its
+        # corridor is clear; on a leg-1 ABORT we advance to the next, and only
+        # after all are exhausted do we fall back to a plain slot goal.
+        # Built from the configured approach distance + two shorter retries,
+        # de-duplicated and clamped above the chassis half-length so staging
+        # never lands inside the slot.
+        _d0 = self._park_approach_dist
+        _cands = [_d0, min(_d0, 0.40), 0.28]
+        seen = set()
+        self._park_approach_dists = []
+        for _d in _cands:
+            _dr = round(float(_d), 3)
+            if _dr >= 0.20 and _dr not in seen:
+                seen.add(_dr)
+                self._park_approach_dists.append(_dr)
+        self._park_cand_idx = 0              # which staging candidate is active
 
         # --- AMCL periodic relocalize (localization mode) ----------------
         # Periodically forces an AMCL filter update against the latest scan
@@ -959,11 +1019,20 @@ class MobileBridgeNode(Node):
             # the generic retry/decompose doesn't fight the two-leg fallback.
             # Only act on the transition edge — a repeated ABORTED array would
             # otherwise re-enter the fallback after park state is cleared.
+            # If the abort follows a recent NOVEL sighting the route is blocked
+            # by an obstacle (not a costly start pose) — a same-goal retry would
+            # just re-abort into the same wall, so prefer multipoint decompose
+            # (stage via an open-space waypoint) to find an alternative approach.
+            novel_recent = (time.time() - self._novel_last_seen_t
+                            < self._novel_block_window_s)
             if self._park_stage_active():
                 if prev != 'ABORTED':
                     self._on_park_leg_aborted()
                 # else: duplicate while park is handling it -> swallow
-            elif self.get_planner_mode() == 'multipoint':
+            elif novel_recent or self.get_planner_mode() == 'multipoint':
+                if novel_recent:
+                    self.get_logger().warning(
+                        'ABORT after novel obstacle — decomposing via waypoint')
                 self._maybe_decompose_goal()
             else:
                 self._maybe_auto_retry_goal()
@@ -1079,11 +1148,25 @@ class MobileBridgeNode(Node):
                 self.get_logger().info(
                     f'auto-retry {attempt}/{self._retry_max}: re-escaping '
                     f'and re-publishing ({goal["x"]:.2f},{goal["y"]:.2f})')
-                try:
-                    self._relax_inflation()
-                except Exception as exc:
+                # Skip the escape (clear costmaps + relax inflation) when a
+                # NOVEL obstacle is present: relaxing would erase the freshly
+                # marked lethal cell and route SMAC straight through the
+                # intruder. Re-publish the same goal so the BT keeps replanning
+                # AROUND it with normal inflation instead.
+                _exp, _nov, _nov_n = self._classify_near_obstacles()
+                _novel_present = (_nov is not None
+                                  and _nov_n >= self._novel_min_points
+                                  and _nov < self._novel_danger_m)
+                if _novel_present:
                     self.get_logger().warning(
-                        f'auto-retry escape failed: {exc}')
+                        f'auto-retry: novel obstacle at {_nov:.2f} m — '
+                        'skipping escape/clear, replanning around it')
+                else:
+                    try:
+                        self._relax_inflation()
+                    except Exception as exc:
+                        self.get_logger().warning(
+                            f'auto-retry escape failed: {exc}')
                 time.sleep(0.3)  # let cleared costmaps refresh
 
                 from math import cos as mcos, sin as msin
@@ -2366,6 +2449,91 @@ class MobileBridgeNode(Node):
                 best = d
         return best
 
+    def _classify_near_obstacles(self):
+        """Split the cached map-frame LiDAR returns into EXPECTED vs NOVEL and
+        report the nearest of each (base_link distance, m) plus the NOVEL count.
+
+        EXPECTED = a return that lands on an occupied/unknown map cell (within
+                   _obstacle_cell_tol cells -> a known wall) OR within
+                   _goal_vicinity_m of the active goal (the parking target the
+                   robot is intentionally approaching).
+        NOVEL    = a return on a FREE map cell AND outside the goal vicinity ->
+                   an unaccumulated obstacle the planner has not routed around.
+
+        Returns (expected_dist | None, novel_dist | None, novel_count).
+
+        Fail-safe: when pose/scan/map are unavailable or stale, every point is
+        treated as NOVEL so the caller biases toward keeping collision_monitor
+        authoritative (stop) and never toward engaging the no-safety bypass.
+        Out-of-bounds returns (just past the mapped border) are EXPECTED so a
+        wall beyond the map edge doesn't read as an intruder."""
+        with self._pose_lock:
+            px = self._pose['x_m']
+            py = self._pose['y_m']
+            pose_stamp = self._pose['stamp']
+        with self._scan_lock:
+            pts = list(self._scan_points)
+            scan_stamp = self._scan_stamp
+        if not pts or pose_stamp <= 0.0 or (time.time() - scan_stamp) > 1.5:
+            return (None, None, 0)
+
+        with self._goal_lock:
+            goal_active = self._current_goal['active']
+            gx_goal = self._current_goal['x']
+            gy_goal = self._current_goal['y']
+        with self._map_lock:
+            grid = None if self._map_grid is None else self._map_grid
+            info = dict(self._map_info)
+            if grid is not None:
+                grid = grid  # numpy read-only access below; no copy needed
+
+        res = float(info.get('resolution', 0.0)) if info else 0.0
+        ox = float(info.get('origin_x', 0.0)) if info else 0.0
+        oy = float(info.get('origin_y', 0.0)) if info else 0.0
+        have_map = grid is not None and res > 0.0
+        if have_map:
+            h, w = grid.shape
+        tol = self._obstacle_cell_tol
+        goal_r = self._goal_vicinity_m
+
+        expected_min = None
+        novel_min = None
+        novel_count = 0
+        for x, y in pts:
+            d = hypot(x - px, y - py)
+            # Park target: anything near the active goal is EXPECTED. This is
+            # what preserves the precise wall-park (the bypass still engages at
+            # the slot) even with collision_monitor enabled.
+            if goal_active and hypot(x - gx_goal, y - gy_goal) <= goal_r:
+                if expected_min is None or d < expected_min:
+                    expected_min = d
+                continue
+            if not have_map:
+                # No map to judge against -> fail safe: treat as NOVEL.
+                novel_count += 1
+                if novel_min is None or d < novel_min:
+                    novel_min = d
+                continue
+            cx = int(round((x - ox) / res))
+            cy = int(round((y - oy) / res))
+            if not (0 <= cx < w and 0 <= cy < h):
+                # Past the mapped border -> assume it's a real (mapped) wall.
+                if expected_min is None or d < expected_min:
+                    expected_min = d
+                continue
+            # Occupied-neighborhood test: any cell != 0 (occupied>0 or
+            # unknown -1) within +/-tol marks this as a known wall.
+            x0, x1 = max(0, cx - tol), min(w, cx + tol + 1)
+            y0, y1 = max(0, cy - tol), min(h, cy + tol + 1)
+            if bool((grid[y0:y1, x0:x1] != 0).any()):
+                if expected_min is None or d < expected_min:
+                    expected_min = d
+            else:
+                novel_count += 1
+                if novel_min is None or d < novel_min:
+                    novel_min = d
+        return (expected_min, novel_min, novel_count)
+
     def _relax_inflation(self) -> None:
         """Clear both costmaps and drop inflation_radius to the escape value
         so SMAC Hybrid-A* can plan from / through wall inflation. Idempotent —
@@ -2455,18 +2623,45 @@ class MobileBridgeNode(Node):
                     if engaged:
                         self._engage_near_wall_bypass(False)
                     continue
-                dist = self._near_wall_distance()
-                if dist is None:
-                    continue
+                exp, nov, nov_n = self._classify_near_obstacles()
                 with self._near_wall_lock:
                     engaged = self._near_wall_engaged
-                if not engaged and dist < self._near_wall_enter_m:
+                novel_present = (nov is not None
+                                 and nov_n >= self._novel_min_points
+                                 and nov < self._novel_danger_m)
+                if novel_present:
+                    # An unaccumulated obstacle is in danger range. Never run
+                    # the no-safety bypass while it's there: force-release so
+                    # collision_monitor stays authoritative and hard-stops the
+                    # intruder, and inflation is restored so the planner routes
+                    # SMAC AROUND the freshly-marked lethal cell instead of
+                    # through it.
+                    now = time.time()
+                    self._novel_last_seen_t = now
+                    if engaged:
+                        self.get_logger().warning(
+                            f'novel obstacle at {nov:.2f} m ({nov_n} pts) — '
+                            'releasing bypass, collision_monitor authoritative')
+                        self._engage_near_wall_bypass(False)
+                    # Active recovery: force an immediate re-plan around the
+                    # obstacle rather than waiting for the next 2 Hz BT tick.
+                    # Cooldown-gated so it fires once on detection then retries
+                    # periodically while still blocked — no thrash.
+                    if (now - self._novel_replan_last_t
+                            > self._novel_replan_cooldown_s):
+                        self._novel_replan_last_t = now
+                        self._replan_now()
+                    continue
+                # No intruder: engage/release on EXPECTED proximity only (a
+                # known wall or the park target). This preserves the precise
+                # wall-park — the bypass still engages at the slot.
+                if not engaged and exp is not None and exp < self._near_wall_enter_m:
                     # Robot is near a wall (start wall-parked, mid-trip stall,
                     # or final park approach) — drop to no-safety so the
                     # planner can route through the inflation halo and the
                     # car can reach the exact goal point.
                     self._engage_near_wall_bypass(True)
-                elif engaged and dist > self._near_wall_exit_m:
+                elif engaged and (exp is None or exp > self._near_wall_exit_m):
                     self._engage_near_wall_bypass(False)
             except Exception as exc:
                 self.get_logger().warning(f'near-wall monitor error: {exc}')
@@ -2604,6 +2799,33 @@ class MobileBridgeNode(Node):
             }
         self._goal_pub.publish(msg)
 
+    def _replan_now(self) -> None:
+        """Force an immediate re-plan against the current goal after a novel
+        obstacle was detected — re-issues the goal on /goal_pose so SMAC runs a
+        fresh ComputePathToPose AROUND the just-marked lethal cell instead of
+        waiting for the next 2 Hz BT tick. Does NOT clear costmaps or relax
+        inflation (the obstacle must persist). No-op while park staging owns the
+        goal, or with no active goal. Runs on a daemon thread with a short
+        pre-delay so the obstacle_layer has marked the cell first."""
+        if self._park_stage_active():
+            return
+        with self._goal_lock:
+            if not self._current_goal['active']:
+                return
+            g = dict(self._current_goal)
+
+        def _do():
+            try:
+                time.sleep(0.3)  # let the obstacle_layer mark the cell (5 Hz)
+                self.get_logger().info(
+                    f'novel obstacle re-plan: re-issuing goal '
+                    f'({g["x"]:.2f},{g["y"]:.2f}) to route around it')
+                self._publish_raw_goal(g['x'], g['y'], g['yaw'])
+            except Exception as exc:
+                self.get_logger().warning(f'novel re-plan failed: {exc}')
+
+        threading.Thread(target=_do, daemon=True, name='novel-replan').start()
+
     def _maybe_decompose_goal(self) -> None:
         """Multi-point decompose-on-failure: a goal just ABORTed. If a final
         goal is tracked and budget remains, drive to an intermediate open-
@@ -2651,7 +2873,18 @@ class MobileBridgeNode(Node):
                     f'multipoint {attempt}/{self._mp_decompose_max}: staging '
                     f'via waypoint ({wx:.2f},{wy:.2f}) toward final '
                     f'({final["x"]:.2f},{final["y"]:.2f})')
-                self.clear_costmaps()
+                # Don't clear costmaps while a NOVEL obstacle is present — that
+                # would erase the freshly marked lethal cell and let the
+                # waypoint leg route through the intruder. Keep it so SMAC
+                # stages AROUND it.
+                _exp, _nov, _nov_n = self._classify_near_obstacles()
+                if not (_nov is not None and _nov_n >= self._novel_min_points
+                        and _nov < self._novel_danger_m):
+                    self.clear_costmaps()
+                else:
+                    self.get_logger().warning(
+                        f'multipoint: novel obstacle at {_nov:.2f} m — '
+                        'keeping costmaps so the waypoint routes around it')
                 time.sleep(0.3)
                 self._publish_raw_goal(wx, wy, wyaw)
             except Exception as exc:
@@ -2789,37 +3022,108 @@ class MobileBridgeNode(Node):
             return 'blocked'
         return stage
 
+    def _staging_pose(self, final: dict, idx: int):
+        """Staging pose for candidate `idx`: `_park_approach_dists[idx]` metres
+        back from the slot along the slot heading axis. Returns (ax, ay, d)."""
+        from math import cos as mcos, sin as msin
+        d = self._park_approach_dists[idx]
+        ax = final['x'] - d * mcos(final['yaw'])
+        ay = final['y'] - d * msin(final['yaw'])
+        return ax, ay, d
+
+    def _staging_blocked_by_novel(self, ax: float, ay: float) -> bool:
+        """True if >= _novel_min_points unaccumulated (NOVEL) LiDAR returns lie
+        within _park_staging_clear_r of the staging point (ax,ay) — i.e. a new
+        obstacle not in the static map is sitting where the chassis would stage.
+
+        Uses the same map-cell test as _classify_near_obstacles: a /scan return
+        on a FREE map cell (not occupied/unknown, within _obstacle_cell_tol) is
+        novel. Fail-OPEN (returns False) when scan/map are unavailable — the
+        companion _corridor_clear is fail-safe (returns False) in that case, so
+        the candidate is still rejected; this check only ADDS novel-obstacle
+        rejection on top of the static-map corridor check."""
+        with self._scan_lock:
+            pts = list(self._scan_points)
+            scan_stamp = self._scan_stamp
+        if not pts or (time.time() - scan_stamp) > 1.5:
+            return False
+        with self._map_lock:
+            grid = None if self._map_grid is None else self._map_grid
+            info = dict(self._map_info)
+        if grid is None or not info:
+            return False
+        res = float(info.get('resolution', 0.0))
+        ox = float(info.get('origin_x', 0.0))
+        oy = float(info.get('origin_y', 0.0))
+        if res <= 0.0:
+            return False
+        h, w = grid.shape
+        tol = self._obstacle_cell_tol
+        r = self._park_staging_clear_r
+        count = 0
+        for x, y in pts:
+            if hypot(x - ax, y - ay) > r:
+                continue
+            cx = int(round((x - ox) / res))
+            cy = int(round((y - oy) / res))
+            if not (0 <= cx < w and 0 <= cy < h):
+                continue  # past the map edge -> a known boundary, not novel
+            x0, x1 = max(0, cx - tol), min(w, cx + tol + 1)
+            y0, y1 = max(0, cy - tol), min(h, cy + tol + 1)
+            if not bool((grid[y0:y1, x0:x1] != 0).any()):
+                count += 1
+                if count >= self._novel_min_points:
+                    return True
+        return False
+
+    def _next_clear_staging(self, final: dict, start_idx: int):
+        """First staging candidate at/after start_idx that is VALID: its
+        approach->slot corridor is clear of static-map obstacles AND no
+        unaccumulated obstacle sits within the staging clearance radius of the
+        staging point. Returns (idx, ax, ay, d) or None if none remain."""
+        for idx in range(start_idx, len(self._park_approach_dists)):
+            ax, ay, d = self._staging_pose(final, idx)
+            if (self._corridor_clear(ax, ay, final['x'], final['y'])
+                    and not self._staging_blocked_by_novel(ax, ay)):
+                return (idx, ax, ay, d)
+        return None
+
     def start_parking_approach(self, x, y, yaw) -> bool:
         """Two-leg straight-in park. Returns True if a goal (staging or the
         standard fallback) was published. See the constructor note for the
-        full state machine and fallback contract."""
+        full state machine and fallback contract.
+
+        Tries staging candidates (decreasing approach distance) in order; the
+        first with a clear corridor is attempted. If none has a clear corridor
+        it falls back to a plain slot goal."""
         x, y, yaw = float(x), float(y), float(yaw)
         if not self._park_approach_enabled:
             return self.send_nav_goal(x, y, yaw)
-        from math import cos as mcos, sin as msin
-        d = self._park_approach_dist
-        ax = x - d * mcos(yaw)
-        ay = y - d * msin(yaw)
-        # Check #1: corridor approach->slot clear at issue time?
-        if not self._corridor_clear(ax, ay, x, y):
+        final = {'x': x, 'y': y, 'yaw': yaw}
+        # Check #1: pick the first staging candidate with a clear corridor.
+        nxt = self._next_clear_staging(final, 0)
+        if nxt is None:
             self.get_logger().warning(
-                'park-approach: corridor blocked/unverifiable at issue; '
-                'falling back to standard goal')
+                'park-approach: no staging candidate has a clear corridor at '
+                'issue; falling back to standard goal')
             with self._park_lock:
                 self._park_stage = 'off'
                 self._park_final = None
                 self._park_blocked_t = time.time()
             return self.send_nav_goal(x, y, yaw)
+        idx, ax, ay, d = nxt
         with self._park_lock:
-            self._park_final = {'x': x, 'y': y, 'yaw': yaw}
+            self._park_final = final
             self._park_stage = 'approach'
+            self._park_cand_idx = idx
             self._park_blocked_t = 0.0  # clear any stale 'blocked' report
         # Loosen yaw for leg 1 so the chassis doesn't shuffle at the staging
         # pose; the precise tol is restored before the push-in.
         self._apply_goal_yaw_tol(self._park_staging_yaw_tol)
         self.get_logger().info(
-            f'park-approach: staging to ({ax:.2f},{ay:.2f},yaw={yaw:.2f}) '
-            f'd={d:.2f} before slot ({x:.2f},{y:.2f})')
+            f'park-approach: staging candidate {idx} to '
+            f'({ax:.2f},{ay:.2f},yaw={yaw:.2f}) d={d:.2f} before slot '
+            f'({x:.2f},{y:.2f})')
         ok = self.send_nav_goal(ax, ay, yaw)
         if not ok:
             # Couldn't enter AUTO; undo staging state + restore tol.
@@ -2865,17 +3169,54 @@ class MobileBridgeNode(Node):
             self._apply_goal_yaw_tol(self._park_final_yaw_tol)
 
     def _on_park_leg_aborted(self) -> None:
-        """A staging/push-in leg ABORTed. Restore the precise yaw tol and
-        degrade to a standard goal on the exact slot pose (the pre-existing
-        path's auto-retry / decompose then applies as usual)."""
+        """A staging/push-in leg ABORTed.
+
+        Leg 1 (approach) abort: the planner couldn't reach this staging pose.
+        Try the next (closer) staging candidate whose corridor is still clear
+        — the chassis re-stages nearer the slot rather than abandoning the
+        straight-in immediately. Only when every candidate is exhausted (or the
+        push-in leg itself aborts) do we restore the precise yaw tol and degrade
+        to a plain slot goal (the pre-existing auto-retry / decompose then
+        applies as usual)."""
         with self._park_lock:
             final = dict(self._park_final) if self._park_final else None
             stage = self._park_stage
+            cand_idx = self._park_cand_idx
+
+        # Leg 1 failed and a nearer staging candidate remains -> re-stage.
+        if stage == 'approach' and final is not None:
+            nxt = self._next_clear_staging(final, cand_idx + 1)
+            if nxt is not None:
+                idx, ax, ay, d = nxt
+                with self._park_lock:
+                    self._park_cand_idx = idx
+                    # stage stays 'approach'; keep loose staging yaw tol
+                self.get_logger().warning(
+                    f'park-approach: staging candidate {cand_idx} unreachable; '
+                    f're-staging to candidate {idx} d={d:.2f}')
+
+                def _restage():
+                    time.sleep(0.2)
+                    ok = self.send_nav_goal(ax, ay, final['yaw'])
+                    if not ok:
+                        # Couldn't re-issue; collapse to plain slot goal.
+                        with self._park_lock:
+                            self._park_stage = 'off'
+                            self._park_final = None
+                        self._apply_goal_yaw_tol(self._park_final_yaw_tol)
+
+                threading.Thread(target=_restage, daemon=True,
+                                 name='park-restage').start()
+                return
+
+        # Candidates exhausted, or the push-in leg aborted -> plain slot goal.
+        with self._park_lock:
             self._park_stage = 'off'
             self._park_final = None
+            self._park_blocked_t = time.time()
         self.get_logger().warning(
-            f'park-approach: leg aborted (stage={stage}); restoring yaw tol '
-            f'and falling back to standard goal')
+            f'park-approach: leg aborted (stage={stage}); staging exhausted, '
+            f'restoring yaw tol and falling back to standard goal')
 
         def _fb():
             self._apply_goal_yaw_tol(self._park_final_yaw_tol)
@@ -3344,9 +3685,16 @@ class MobileBridgeNode(Node):
         # the near-wall bypass now so SMAC's first plan already sees the
         # relaxed inflation. The near-wall monitor maintains it for the rest
         # of the trip and releases it once the chassis is clear of walls.
+        # Guard: never engage when a NOVEL obstacle is already in danger range
+        # (an intruder in front at send time) — bypassing then would drive
+        # straight into it. Only an EXPECTED wall/target triggers the escape.
         try:
-            d0 = self._near_wall_distance()
-            if d0 is not None and d0 < self._near_wall_enter_m:
+            exp, nov, nov_n = self._classify_near_obstacles()
+            novel_present = (nov is not None
+                             and nov_n >= self._novel_min_points
+                             and nov < self._novel_danger_m)
+            if (not novel_present and exp is not None
+                    and exp < self._near_wall_enter_m):
                 self._engage_near_wall_bypass(True)
         except Exception as exc:
             self.get_logger().warning(f'near-wall pre-goal check failed: {exc}')
