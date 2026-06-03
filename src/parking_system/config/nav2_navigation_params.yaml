@@ -144,6 +144,12 @@ controller_server:
       # choice: keep precision, accept the goal-approach hunting). True ±2°
       # still needs an IMU+EKF / marker dock; this just stops the controller
       # from accepting a sloppier heading.
+      # NOTE: ros2_mobile_bridge.py's park-approach staging mutates this LIVE
+      # via SetParameters — it loosens to `park_staging_yaw_tol` (~0.20) for the
+      # staging leg so the chassis doesn't shuffle in front of the slot, then
+      # restores THIS value (`park_final_yaw_tol`) for the precise straight-in
+      # push. So 0.06 is the authoritative precise/final value; transient larger
+      # readings at runtime are the staging leg, not config drift.
       yaw_goal_tolerance: 0.06
     
     # Regulated Pure Pursuit - Ackermann-friendly path tracking.

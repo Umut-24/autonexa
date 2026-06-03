@@ -15,7 +15,7 @@ REST Endpoints:
   /api/pose        - Robot pose from AMCL/EKF/odom (JSON)
   /api/status      - Combined status (JSON)
   /api/markers     - Currently visible ArUco markers (JSON)
-  /api/nav_goal    - POST a Nav2 goal (JSON {x, y, yaw})
+  /api/nav_goal    - POST a Nav2 goal (JSON {x, y, yaw}; park:true = straight-in approach)
   /api/cancel_nav  - POST to cancel current Nav2 goal (stops autonomous motion)
   /api/control     - POST joystick commands (JSON {x, y, e, speed_limit})
   /api/telemetry   - GET Pico telemetry (motors, encoders, odom)
@@ -458,6 +458,46 @@ class MobileBridgeNode(Node):
         self._mp_stage = 'idle'              # 'idle' | 'waypoint' | 'final'
         self._mp_decompose_count = 0
         self._mp_decompose_max = 2
+
+        # --- Park-approach staging ("straight-in" docking, obstacle-aware) --
+        # Wraps a park goal as two legs so the chassis enters the slot STRAIGHT
+        # instead of arriving misaligned and then shuffling forward/back to hit
+        # the tight yaw tolerance (Ackermann can't rotate in place):
+        #   leg 1 -> an "approach pose" `park_approach_dist_m` in front of the
+        #            slot, on the slot's heading axis, with a LOOSE yaw tol;
+        #   leg 2 -> a short straight push to the exact slot pose, with the
+        #            TIGHT (precise) yaw tol restored.
+        # The straight corridor approach->slot is verified clear of static-map
+        # obstacles BOTH at issue time and again right before the push (an
+        # obstacle may be placed while leg 1 is driving). On any block / abort /
+        # unverifiable map it degrades to a plain send_nav_goal() — staging is
+        # purely additive and never does worse than the pre-existing path.
+        self.declare_parameter('park_approach_enabled', True)
+        self.declare_parameter('park_approach_dist_m', 0.55)
+        self.declare_parameter('park_approach_clearance_m', 0.06)
+        self.declare_parameter('park_staging_yaw_tol', 0.20)
+        self.declare_parameter('park_final_yaw_tol', 0.06)
+        try:
+            self._park_approach_enabled = bool(
+                self.get_parameter('park_approach_enabled').value)
+            self._park_approach_dist = float(
+                self.get_parameter('park_approach_dist_m').value)
+            self._park_approach_clearance = float(
+                self.get_parameter('park_approach_clearance_m').value)
+            self._park_staging_yaw_tol = float(
+                self.get_parameter('park_staging_yaw_tol').value)
+            self._park_final_yaw_tol = float(
+                self.get_parameter('park_final_yaw_tol').value)
+        except Exception:
+            self._park_approach_enabled = True
+            self._park_approach_dist = 0.55
+            self._park_approach_clearance = 0.06
+            self._park_staging_yaw_tol = 0.20
+            self._park_final_yaw_tol = 0.06
+        self._park_lock = threading.Lock()
+        self._park_stage = 'off'             # 'off' | 'approach' | 'pushing_in'
+        self._park_final = None              # {'x','y','yaw'} exact slot pose
+        self._park_blocked_t = 0.0           # wall-clock of last corridor block
 
         # --- AMCL periodic relocalize (localization mode) ----------------
         # Periodically forces an AMCL filter update against the latest scan
@@ -915,10 +955,43 @@ class MobileBridgeNode(Node):
         # stage the goal via an intermediate open-space waypoint and then
         # re-issue the final goal.
         if label == 'ABORTED':
-            if self.get_planner_mode() == 'multipoint':
+            # Park-approach owns the abort path while it's staging/pushing so
+            # the generic retry/decompose doesn't fight the two-leg fallback.
+            # Only act on the transition edge — a repeated ABORTED array would
+            # otherwise re-enter the fallback after park state is cleared.
+            if self._park_stage_active():
+                if prev != 'ABORTED':
+                    self._on_park_leg_aborted()
+                # else: duplicate while park is handling it -> swallow
+            elif self.get_planner_mode() == 'multipoint':
                 self._maybe_decompose_goal()
             else:
                 self._maybe_auto_retry_goal()
+
+        # Park-approach leg transition: staging leg succeeded -> push straight
+        # in (after a fresh corridor re-check); push-in leg succeeded -> done,
+        # restore the precise yaw tol. Edge-gated (prev != SUCCEEDED): leg 1 and
+        # leg 2 are always separated by an EXECUTING phase, so a duplicate
+        # SUCCEEDED for leg 1 can't be mistaken for leg 2 finishing. Handled
+        # before the multipoint resume below (different _mp state machine).
+        if label == 'SUCCEEDED' and prev != 'SUCCEEDED':
+            park_next = None
+            restore_tol = False
+            with self._park_lock:
+                if self._park_stage == 'approach' and self._park_final:
+                    self._park_stage = 'pushing_in'
+                    park_next = dict(self._park_final)
+                elif self._park_stage == 'pushing_in':
+                    self._park_stage = 'off'
+                    self._park_final = None
+                    restore_tol = True
+            if park_next is not None:
+                threading.Thread(target=self._park_push_in, args=(park_next,),
+                                 daemon=True, name='park-push-in').start()
+            elif restore_tol:
+                threading.Thread(target=self._apply_goal_yaw_tol,
+                                 args=(self._park_final_yaw_tol,), daemon=True,
+                                 name='park-restore-tol').start()
 
         # Multi-point staging: an intermediate waypoint just SUCCEEDED ->
         # resume the final goal. When the final goal itself succeeds the
@@ -949,6 +1022,13 @@ class MobileBridgeNode(Node):
             with self._mp_lock:
                 self._mp_stage = 'idle'
                 self._mp_final_goal = None
+            # A cancel mid-stage must release park state and restore the
+            # precise yaw tol so the next ordinary goal isn't left loose.
+            if self._park_stage_active():
+                self._set_park_stage('off')
+                threading.Thread(target=self._apply_goal_yaw_tol,
+                                 args=(self._park_final_yaw_tol,), daemon=True,
+                                 name='park-cancel-tol').start()
 
     def _set_nav_bypass(self, active: bool) -> None:
         """Flip /nav2_pico_bridge:nav_bypass_active to the given value.
@@ -1765,11 +1845,14 @@ class MobileBridgeNode(Node):
                 f'refusing stale waypoint {name!r}: {wp_id} != {active_id}')
             return False
         pose = wp.get('pose') or {}
-        return self.send_nav_goal(
-            pose.get('x', 0.0),
-            pose.get('y', 0.0),
-            pose.get('yaw', 0.0),
-        )
+        x = pose.get('x', 0.0)
+        y = pose.get('y', 0.0)
+        yaw = pose.get('yaw', 0.0)
+        # Park waypoints carry the real slot heading -> drive a straight-in
+        # approach. Everything else (summon/home/custom) goes direct.
+        if wp.get('kind') == 'park':
+            return self.start_parking_approach(x, y, yaw)
+        return self.send_nav_goal(x, y, yaw)
 
     # --- Remote SetParameters / GetParameters / ListParameters ---
 
@@ -2588,6 +2671,221 @@ class MobileBridgeNode(Node):
         time.sleep(0.3)
         self._publish_raw_goal(final['x'], final['y'], final['yaw'])
 
+    # --- Park-approach staging ("straight-in" docking) -------------------
+
+    def _corridor_clear(self, x0: float, y0: float, x1: float, y1: float,
+                        clearance_m: float = None) -> bool:
+        """True if the straight segment (x0,y0)->(x1,y1) in the map frame keeps
+        at least (robot half-width + clearance_m) of free space from any
+        static-map obstacle/unknown cell along its length, EXCLUDING the last
+        ~half-length near the slot (that stretch is the slot-fit, already
+        chosen by the operator, not lane clearance).
+
+        Conservative by design: returns False when the map can't be read, so
+        the caller falls back to a normal single goal rather than committing
+        to a blind straight push. The live obstacle authority during the push
+        is still collision_monitor; this only catches obstacles already in
+        /map at decision time.
+        """
+        try:
+            if clearance_m is None:
+                clearance_m = self._park_approach_clearance
+            with self._map_lock:
+                grid = None if self._map_grid is None else self._map_grid.copy()
+                info = dict(self._map_info)
+            if grid is None or not info:
+                return False
+            res = float(info.get('resolution', 0.0))
+            ox = float(info.get('origin_x', 0.0))
+            oy = float(info.get('origin_y', 0.0))
+            h, w = grid.shape
+            if res <= 0.0 or h == 0 or w == 0:
+                return False
+
+            # Robot half-extents (same source as _nudge_goal_from_walls).
+            hx, hy = 0.135, 0.10
+            try:
+                if _build_urdf is not None and \
+                   hasattr(_build_urdf, 'load_persisted_dimensions'):
+                    dims = _build_urdf.load_persisted_dimensions() or {}
+                    hx = float(dims.get('chassis_length', 2 * hx)) / 2.0
+                    hy = float(dims.get('chassis_width', 2 * hy)) / 2.0
+            except Exception:
+                pass
+
+            # Going straight, the swept clearance that matters is the chassis
+            # half-WIDTH plus the pad (not the diagonal — the robot isn't
+            # rotating in the lane).
+            required_m = hy + max(0.0, clearance_m)
+            required_cells = max(1, int(ceil(required_m / res)))
+
+            obstacle = (grid != 0)  # unknown(-1) + occupied(>0) both block
+            try:
+                from scipy.ndimage import distance_transform_edt
+                dist = distance_transform_edt(~obstacle)
+            except Exception:
+                dist = self._bounded_distance(obstacle, required_cells + 2)
+
+            seg_len = hypot(x1 - x0, y1 - y0)
+            if seg_len <= 1e-6:
+                return False
+            # Don't validate the last half-length: that's the slot-fit zone.
+            usable = max(0.0, seg_len - hx)
+            n = max(1, int(usable / res) + 1)
+            for i in range(n + 1):
+                d_along = min(i * res, usable)
+                t = d_along / seg_len
+                px = x0 + (x1 - x0) * t
+                py = y0 + (y1 - y0) * t
+                gx = int(round((px - ox) / res))
+                gy = int(round((py - oy) / res))
+                if not (0 <= gx < w and 0 <= gy < h):
+                    return False  # corridor leaves the known map -> unsafe
+                if dist[gy, gx] < required_cells:
+                    return False
+                if d_along >= usable:
+                    break
+            return True
+        except Exception as exc:
+            self.get_logger().warning(f'corridor check failed: {exc}')
+            return False
+
+    def _apply_goal_yaw_tol(self, tol: float) -> None:
+        """Set general_goal_checker.yaw_goal_tolerance on /controller_server.
+        SimpleGoalChecker honours this live via its dynamic-parameter callback.
+        Blocking (~2 s); call off the ROS executor thread."""
+        try:
+            res = self.set_remote_params(
+                '/controller_server',
+                {'general_goal_checker.yaw_goal_tolerance': float(tol)},
+                timeout=2.0)
+            r = res.get('general_goal_checker.yaw_goal_tolerance', {})
+            if r.get('ok'):
+                self.get_logger().info(f'goal yaw tol -> {tol:.3f} rad')
+            else:
+                self.get_logger().warning(
+                    f'goal yaw tol set to {tol} rejected: '
+                    f'{r.get("reason", "(no reason)")}')
+        except Exception as exc:
+            self.get_logger().warning(f'_apply_goal_yaw_tol({tol}) failed: {exc}')
+
+    def _park_stage_active(self) -> bool:
+        with self._park_lock:
+            return self._park_stage in ('approach', 'pushing_in')
+
+    def _set_park_stage(self, stage: str) -> None:
+        with self._park_lock:
+            self._park_stage = stage
+            if stage == 'off':
+                self._park_final = None
+
+    def get_park_stage(self) -> str:
+        """Operator-facing substate: 'off'|'approach'|'pushing_in', or a
+        short-lived 'blocked' right after a corridor block + fallback."""
+        with self._park_lock:
+            stage = self._park_stage
+            blocked_t = self._park_blocked_t
+        if time.time() - blocked_t < 5.0:
+            return 'blocked'
+        return stage
+
+    def start_parking_approach(self, x, y, yaw) -> bool:
+        """Two-leg straight-in park. Returns True if a goal (staging or the
+        standard fallback) was published. See the constructor note for the
+        full state machine and fallback contract."""
+        x, y, yaw = float(x), float(y), float(yaw)
+        if not self._park_approach_enabled:
+            return self.send_nav_goal(x, y, yaw)
+        from math import cos as mcos, sin as msin
+        d = self._park_approach_dist
+        ax = x - d * mcos(yaw)
+        ay = y - d * msin(yaw)
+        # Check #1: corridor approach->slot clear at issue time?
+        if not self._corridor_clear(ax, ay, x, y):
+            self.get_logger().warning(
+                'park-approach: corridor blocked/unverifiable at issue; '
+                'falling back to standard goal')
+            with self._park_lock:
+                self._park_stage = 'off'
+                self._park_final = None
+                self._park_blocked_t = time.time()
+            return self.send_nav_goal(x, y, yaw)
+        with self._park_lock:
+            self._park_final = {'x': x, 'y': y, 'yaw': yaw}
+            self._park_stage = 'approach'
+            self._park_blocked_t = 0.0  # clear any stale 'blocked' report
+        # Loosen yaw for leg 1 so the chassis doesn't shuffle at the staging
+        # pose; the precise tol is restored before the push-in.
+        self._apply_goal_yaw_tol(self._park_staging_yaw_tol)
+        self.get_logger().info(
+            f'park-approach: staging to ({ax:.2f},{ay:.2f},yaw={yaw:.2f}) '
+            f'd={d:.2f} before slot ({x:.2f},{y:.2f})')
+        ok = self.send_nav_goal(ax, ay, yaw)
+        if not ok:
+            # Couldn't enter AUTO; undo staging state + restore tol.
+            with self._park_lock:
+                self._park_stage = 'off'
+                self._park_final = None
+            self._apply_goal_yaw_tol(self._park_final_yaw_tol)
+        return ok
+
+    def _park_push_in(self, final: dict) -> None:
+        """Leg 2: re-validate the corridor from the robot's current pose, then
+        push straight into the slot with the tight yaw tol. Runs on a
+        background thread (called from the nav-status callback)."""
+        try:
+            with self._pose_lock:
+                rx = self._pose['x_m']
+                ry = self._pose['y_m']
+            # Check #2: an obstacle may have appeared while leg 1 was driving.
+            if not self._corridor_clear(rx, ry, final['x'], final['y']):
+                self.get_logger().warning(
+                    'park-approach: corridor blocked before push-in; aborting '
+                    'straight park, falling back to standard goal')
+                with self._park_lock:
+                    self._park_stage = 'off'
+                    self._park_final = None
+                    self._park_blocked_t = time.time()
+                self._apply_goal_yaw_tol(self._park_final_yaw_tol)
+                time.sleep(0.2)
+                self.send_nav_goal(final['x'], final['y'], final['yaw'])
+                return
+            self._apply_goal_yaw_tol(self._park_final_yaw_tol)
+            time.sleep(0.2)
+            self.get_logger().info(
+                f'park-approach: pushing straight in to '
+                f'({final["x"]:.2f},{final["y"]:.2f})')
+            # Exact slot pose (no wall-nudge) — corridor is already verified.
+            self._publish_raw_goal(final['x'], final['y'], final['yaw'])
+        except Exception as exc:
+            self.get_logger().warning(f'park push-in failed: {exc}')
+            with self._park_lock:
+                self._park_stage = 'off'
+                self._park_final = None
+            self._apply_goal_yaw_tol(self._park_final_yaw_tol)
+
+    def _on_park_leg_aborted(self) -> None:
+        """A staging/push-in leg ABORTed. Restore the precise yaw tol and
+        degrade to a standard goal on the exact slot pose (the pre-existing
+        path's auto-retry / decompose then applies as usual)."""
+        with self._park_lock:
+            final = dict(self._park_final) if self._park_final else None
+            stage = self._park_stage
+            self._park_stage = 'off'
+            self._park_final = None
+        self.get_logger().warning(
+            f'park-approach: leg aborted (stage={stage}); restoring yaw tol '
+            f'and falling back to standard goal')
+
+        def _fb():
+            self._apply_goal_yaw_tol(self._park_final_yaw_tol)
+            if final is not None:
+                time.sleep(0.2)
+                self.send_nav_goal(final['x'], final['y'], final['yaw'])
+
+        threading.Thread(target=_fb, daemon=True,
+                         name='park-abort-fallback').start()
+
     # --- Pose reset / relocalize (Part G1) ---
 
     def publish_initial_pose(self, x: float, y: float, yaw: float,
@@ -2881,6 +3179,7 @@ class MobileBridgeNode(Node):
             'nav_bypass_active': self._nav_bypass_active,
             'nav_status': nav_status,
             'nav_status_stamp': nav_stamp,
+            'park_approach': self.get_park_stage(),
             'goal': self.get_goal(),
             'estop_latched': self._estop_latched,
             'map_fingerprint': self._current_fingerprint(),
@@ -3443,7 +3742,13 @@ def api_nav_goal():
     if not data or 'x' not in data or 'y' not in data:
         return jsonify({'error': 'JSON body with x, y required'}), 400
     yaw = data.get('yaw', 0.0)
-    if not bridge_node.send_nav_goal(data['x'], data['y'], yaw):
+    # Optional: park=true issues a straight-in approach (staging pose + push)
+    # using the goal yaw as the slot heading; otherwise a plain single goal.
+    if bool(data.get('park', False)):
+        ok = bridge_node.start_parking_approach(data['x'], data['y'], yaw)
+    else:
+        ok = bridge_node.send_nav_goal(data['x'], data['y'], yaw)
+    if not ok:
         return jsonify({'error': 'failed to enter AUTO mode'}), 409
     return jsonify({'status': 'ok', 'mode': bridge_node.get_mode()})
 
