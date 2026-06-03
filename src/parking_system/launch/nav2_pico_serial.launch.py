@@ -53,7 +53,7 @@ def generate_launch_description():
                               description='+1 for this chassis: verified on hardware that ROS-positive wz (left turn) needs servo us < center. Was -1; flipped 2026-06-01 after observing reversed steering in both joystick and Nav2.'),
         DeclareLaunchArgument('reverse_steer_polarity', default_value='+1',
                               description='Reverse-only steering sign flip. +1 (no flip) is correct; -1 collapsed reversing cusps to one steering hand.'),
-        DeclareLaunchArgument('max_steer_rate_radps', default_value='3.0',
+        DeclareLaunchArgument('max_steer_rate_radps', default_value='2.0',
                               description='Servo slew-rate cap (rad/s).'),
         DeclareLaunchArgument('auto_enable',         default_value='true',
                               description='Send ENABLE to Pico on launch.'),

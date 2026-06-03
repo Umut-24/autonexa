@@ -176,7 +176,7 @@ def generate_launch_description():
                     'steering hand (the "forward leg steers wrong way" bug).')
     vx_polarity_arg = DeclareLaunchArgument('vx_polarity', default_value='1')
     max_steer_rate_arg = DeclareLaunchArgument(
-        'max_steer_rate_radps', default_value='3.0',
+        'max_steer_rate_radps', default_value='2.0',
         description='Servo slew-rate cap (rad/s). Smooths Nav2 wz step changes.')
     use_ekf_arg = DeclareLaunchArgument(
         'use_ekf', default_value=_persisted_use_ekf(),
@@ -207,14 +207,24 @@ def generate_launch_description():
             'global_costmap.global_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan',
             'local_costmap.local_costmap.ros__parameters.obstacle_layer.scan.topic': '/scan',
             'collision_monitor.ros__parameters.scan.topic': '/scan',
-            # "Unsafe navigation" (operator choice): disable collision_monitor's
-            # stop/approach polygons so AUTO nav drives to the goal without
-            # halting near walls (behaves like the manual OFF/bypass chain).
+            # collision_monitor stop/approach polygons are now CONTROLLER-GATED.
+            #   controller:=rpp  -> ENABLED. RPP ignores the costmap
+            #     (use_cost_regulated_linear_velocity_scaling + use_collision_
+            #     detection are both false), so collision_monitor is RPP's ONLY
+            #     real-time obstacle reaction. Without it, AUTO nav drove
+            #     straight through obstacles placed after the map was saved
+            #     (nothing stopped the chassis but the 2 Hz global re-route).
+            #   controller:=mppi -> DISABLED. MPPI's CostCritic keeps clearance
+            #     while driving and owns obstacle safety; the polygons stay off
+            #     so it can drive past walls in tight lanes (the original
+            #     "unsafe navigation" intent). EqualsSubstitution yields the
+            #     'true'/'false' string the rewrite needs.
             # collision_monitor still republishes cmd_vel_smoothed -> cmd_vel_safe
-            # unchanged. Bridge clamps + 200 ms watchdog + E-STOP remain. Flip
-            # these back to 'true' to restore wall-stop safety.
-            'collision_monitor.ros__parameters.DirectionalStop.enabled': 'false',
-            'collision_monitor.ros__parameters.FootprintApproach.enabled': 'false',
+            # in both cases; bridge clamps + 200 ms watchdog + E-STOP remain.
+            'collision_monitor.ros__parameters.DirectionalStop.enabled':
+                EqualsSubstitution(LaunchConfiguration('controller'), 'rpp'),
+            'collision_monitor.ros__parameters.FootprintApproach.enabled':
+                EqualsSubstitution(LaunchConfiguration('controller'), 'rpp'),
             'bt_navigator.ros__parameters.default_nav_to_pose_bt_xml': _bt_xml_path,
             'amcl.ros__parameters.scan_topic': '/scan',
             'amcl.ros__parameters.set_initial_pose': 'true',

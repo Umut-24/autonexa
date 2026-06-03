@@ -155,7 +155,7 @@ def generate_launch_description():
     # persists the chosen value to ~/.autonexa/runtime_overrides.yaml.
     vx_polarity_arg = DeclareLaunchArgument('vx_polarity', default_value='1')
     max_steer_rate_arg = DeclareLaunchArgument(
-        'max_steer_rate_radps', default_value='3.0',
+        'max_steer_rate_radps', default_value='2.0',
         description='Servo slew-rate cap (rad/s). Smooths Nav2 wz step changes.')
     use_ekf_arg = DeclareLaunchArgument(
         'use_ekf', default_value=_persisted_use_ekf(),

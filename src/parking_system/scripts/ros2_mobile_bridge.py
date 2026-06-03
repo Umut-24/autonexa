@@ -431,11 +431,22 @@ class MobileBridgeNode(Node):
 
         # --- Near-wall safety state (continuous monitor) -----------------
         # While a goal is active a background monitor watches the robot's
-        # distance to the nearest LiDAR obstacle. Near a wall it engages a
-        # full bypass (collision_monitor skipped + inflation relaxed) so
-        # escape and final-park paths are not blocked; clear of walls it
-        # restores collision_monitor + normal inflation. Hysteresis between
-        # the enter/exit thresholds keeps it from flapping.
+        # distance to the nearest *known static-map wall* (NOT just the nearest
+        # LiDAR point). Near a wall it engages a full bypass (collision_monitor
+        # skipped + inflation/padding relaxed) so escape and final-park paths
+        # are not blocked; clear of walls it restores collision_monitor + normal
+        # inflation. Hysteresis between the enter/exit thresholds keeps it from
+        # flapping.
+        #
+        # CRITICAL (2026-06-03): the distance is computed only over scan points
+        # that coincide with an OCCUPIED cell of the static map. A dynamic
+        # obstacle placed after the map was saved is NOT in the static map, so
+        # it never triggers the bypass — collision_monitor + its inflation halo
+        # stay active and the robot stops / routes around it instead of being
+        # driven straight through (the old "near ANY obstacle -> drop all
+        # safety" behaviour was the main cause of obstacles being pushed). When
+        # no static map is published (live-SLAM bring-up before the first map),
+        # it falls back to nearest-point so mapping-mode behaviour is unchanged.
         self._near_wall_lock = threading.Lock()
         self._near_wall_engaged = False      # full bypass currently engaged?
         self._inflation_relaxed = False      # inflation at the escape value?
@@ -443,9 +454,19 @@ class MobileBridgeNode(Node):
         # (global 0.22 / local 0.18); the live values are captured before
         # each relax so the exact pre-relax halo is put back.
         self._saved_inflation = {'global': 0.22, 'local': 0.18}
+        self._saved_padding = {'global': 0.05, 'local': 0.05}
         self._inflation_escape_radius = 0.015
-        self._near_wall_enter_m = 0.35       # engage when an obstacle is closer
-        self._near_wall_exit_m = 0.55        # release when all obstacles farther
+        # footprint_padding is relaxed alongside inflation_radius: the wall's
+        # inscribed band is sized from footprint+padding, so dropping
+        # inflation_radius alone would NOT let the chassis reach a slot hard
+        # against a wall. Restored on release.
+        self._padding_escape = 0.0
+        self._near_wall_enter_m = 0.35       # engage when a WALL is closer
+        self._near_wall_exit_m = 0.55        # release when all walls farther
+        # A scan point counts as "on a static wall" if a static-map occupied
+        # cell lies within this radius of it (absorbs scan/localization drift
+        # between the live scan and the saved map).
+        self._near_wall_static_tol_m = 0.10
 
         # --- Planner mode + multi-point decompose-on-failure (item 2) ----
         # 'standard'  — single SMAC goal; on ABORT, one same-goal auto-retry.
@@ -474,7 +495,18 @@ class MobileBridgeNode(Node):
         # purely additive and never does worse than the pre-existing path.
         self.declare_parameter('park_approach_enabled', True)
         self.declare_parameter('park_approach_dist_m', 0.55)
+        # Adaptive staging: if the 0.55 m staging pose (or its corridor) is
+        # blocked, retry nearer poses on the slot axis down to this floor, in
+        # these steps, picking the FARTHEST clear one. Only if none fit does it
+        # fall back to a plain direct goal.
+        self.declare_parameter('park_approach_dist_min_m', 0.30)
+        self.declare_parameter('park_approach_dist_step_m', 0.10)
         self.declare_parameter('park_approach_clearance_m', 0.06)
+        # Standoff required at the STAGING pose itself (circumscribed-radius
+        # check). Larger than the corridor clearance so the chosen staging pose
+        # isn't accepted right next to an obstacle behind the slot — that was
+        # letting the chassis creep up to a too-close staging pose and stall.
+        self.declare_parameter('park_staging_clearance_m', 0.12)
         self.declare_parameter('park_staging_yaw_tol', 0.20)
         self.declare_parameter('park_final_yaw_tol', 0.06)
         try:
@@ -482,8 +514,14 @@ class MobileBridgeNode(Node):
                 self.get_parameter('park_approach_enabled').value)
             self._park_approach_dist = float(
                 self.get_parameter('park_approach_dist_m').value)
+            self._park_approach_dist_min = float(
+                self.get_parameter('park_approach_dist_min_m').value)
+            self._park_approach_dist_step = float(
+                self.get_parameter('park_approach_dist_step_m').value)
             self._park_approach_clearance = float(
                 self.get_parameter('park_approach_clearance_m').value)
+            self._park_staging_clearance = float(
+                self.get_parameter('park_staging_clearance_m').value)
             self._park_staging_yaw_tol = float(
                 self.get_parameter('park_staging_yaw_tol').value)
             self._park_final_yaw_tol = float(
@@ -491,7 +529,10 @@ class MobileBridgeNode(Node):
         except Exception:
             self._park_approach_enabled = True
             self._park_approach_dist = 0.55
+            self._park_approach_dist_min = 0.30
+            self._park_approach_dist_step = 0.10
             self._park_approach_clearance = 0.06
+            self._park_staging_clearance = 0.12
             self._park_staging_yaw_tol = 0.20
             self._park_final_yaw_tol = 0.06
         self._park_lock = threading.Lock()
@@ -2347,9 +2388,22 @@ class MobileBridgeNode(Node):
     # is to a wall and engages/releases a full bypass accordingly.
 
     def _near_wall_distance(self):
-        """Distance (m) from base_link to the nearest LiDAR obstacle, or
-        None if there is no fresh scan/pose. Reuses the map-frame scan
-        points the bridge already caches for the app overlay."""
+        """Distance (m) from base_link to the nearest *known static-map wall*.
+
+        Returns:
+          None        — no fresh scan/pose (monitor leaves bypass state alone);
+          float('inf')— fresh scan but NO scan point lies on a static wall
+                        (e.g. only a dynamic obstacle is near) -> treated as
+                        "walls far" so the monitor RELEASES any bypass and lets
+                        collision_monitor + the obstacle's inflation halo do
+                        their job;
+          distance(m) — to the nearest scan point that coincides with a static
+                        occupied cell.
+
+        Only static-map walls trigger the near-wall safety drop; obstacles that
+        are not in the saved map (placed after lock_map) deliberately do not, so
+        they are avoided rather than pushed. Reuses the cached map-frame scan
+        points the bridge keeps for the app overlay."""
         with self._pose_lock:
             px = self._pose['x_m']
             py = self._pose['y_m']
@@ -2359,21 +2413,49 @@ class MobileBridgeNode(Node):
             scan_stamp = self._scan_stamp
         if not pts or pose_stamp <= 0.0 or (time.time() - scan_stamp) > 1.5:
             return None
-        best = None
+        with self._map_lock:
+            grid = None if self._map_grid is None else self._map_grid
+            info = dict(self._map_info)
+        res = float(info.get('resolution', 0.0)) if info else 0.0
+        # No usable static map (live-SLAM before the first /map): fall back to
+        # nearest-point so mapping-mode behaviour is unchanged.
+        if grid is None or res <= 0.0:
+            best = None
+            for x, y in pts:
+                d = hypot(x - px, y - py)
+                if best is None or d < best:
+                    best = d
+            return best if best is not None else float('inf')
+        ox = float(info.get('origin_x', 0.0))
+        oy = float(info.get('origin_y', 0.0))
+        h, w = grid.shape
+        tol_cells = max(1, int(round(self._near_wall_static_tol_m / res)))
+        best = float('inf')
         for x, y in pts:
+            gx = int(round((x - ox) / res))
+            gy = int(round((y - oy) / res))
+            # Is there a static OCCUPIED cell within tol of this scan point?
+            x0 = max(0, gx - tol_cells); x1 = min(w, gx + tol_cells + 1)
+            y0 = max(0, gy - tol_cells); y1 = min(h, gy + tol_cells + 1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            if not (grid[y0:y1, x0:x1] > 0).any():
+                continue  # dynamic obstacle (not on the saved map) -> ignore
             d = hypot(x - px, y - py)
-            if best is None or d < best:
+            if d < best:
                 best = d
-        return best
+        return best  # inf if no scan point fell on a static wall
 
     def _relax_inflation(self) -> None:
-        """Clear both costmaps and drop inflation_radius to the escape value
-        so SMAC Hybrid-A* can plan from / through wall inflation. Idempotent —
-        captures the pre-relax inflation only on the first call so a later
-        _restore_inflation() puts back the exact operating halo."""
+        """Clear both costmaps and drop inflation_radius AND footprint_padding
+        to the escape values so SMAC Hybrid-A* can plan from / through wall
+        inflation and reach a slot hard against a wall. Idempotent — captures
+        the pre-relax values only on the first call so a later
+        _restore_inflation() puts back the exact operating halo + padding."""
         global_key = '/global_costmap/global_costmap'
         local_key = '/local_costmap/local_costmap'
         ir_name = 'inflation_layer.inflation_radius'
+        pad_name = 'footprint_padding'
         with self._near_wall_lock:
             if self._inflation_relaxed:
                 return
@@ -2387,33 +2469,51 @@ class MobileBridgeNode(Node):
             saved_g = self._saved_inflation['global']
         if saved_l is None or float(saved_l) <= self._inflation_escape_radius:
             saved_l = self._saved_inflation['local']
+        # Same capture for footprint_padding (the inscribed-band driver).
+        savpad_g = self.get_remote_params(global_key, [pad_name]).get(pad_name)
+        savpad_l = self.get_remote_params(local_key, [pad_name]).get(pad_name)
+        if savpad_g is None or float(savpad_g) <= self._padding_escape:
+            savpad_g = self._saved_padding['global']
+        if savpad_l is None or float(savpad_l) <= self._padding_escape:
+            savpad_l = self._saved_padding['local']
         with self._near_wall_lock:
             self._saved_inflation = {'global': float(saved_g),
                                      'local': float(saved_l)}
+            self._saved_padding = {'global': float(savpad_g),
+                                   'local': float(savpad_l)}
         self.clear_costmaps()
         esc = self._inflation_escape_radius
-        self.set_remote_params(global_key, {ir_name: esc})
-        self.set_remote_params(local_key, {ir_name: esc})
+        pad = self._padding_escape
+        self.set_remote_params(global_key, {ir_name: esc, pad_name: pad})
+        self.set_remote_params(local_key, {ir_name: esc, pad_name: pad})
         self.get_logger().info(
             f'near-wall: inflation relaxed {saved_g:.3f}/{saved_l:.3f} -> '
-            f'{esc:.3f} (global/local)')
+            f'{esc:.3f}, padding {savpad_g:.3f}/{savpad_l:.3f} -> {pad:.3f} '
+            f'(global/local)')
 
     def _restore_inflation(self) -> None:
-        """Restore inflation_radius to the values captured before the last
-        relax. Idempotent."""
+        """Restore inflation_radius + footprint_padding to the values captured
+        before the last relax. Idempotent."""
         with self._near_wall_lock:
             if not self._inflation_relaxed:
                 return
             self._inflation_relaxed = False
             saved = dict(self._saved_inflation)
+            savpad = dict(self._saved_padding)
         global_key = '/global_costmap/global_costmap'
         local_key = '/local_costmap/local_costmap'
         ir_name = 'inflation_layer.inflation_radius'
-        self.set_remote_params(global_key, {ir_name: float(saved['global'])})
-        self.set_remote_params(local_key, {ir_name: float(saved['local'])})
+        pad_name = 'footprint_padding'
+        self.set_remote_params(
+            global_key, {ir_name: float(saved['global']),
+                         pad_name: float(savpad['global'])})
+        self.set_remote_params(
+            local_key, {ir_name: float(saved['local']),
+                        pad_name: float(savpad['local'])})
         self.get_logger().info(
             f'near-wall: inflation restored {saved["global"]:.3f}/'
-            f'{saved["local"]:.3f} (global/local)')
+            f'{saved["local"]:.3f}, padding {savpad["global"]:.3f}/'
+            f'{savpad["local"]:.3f} (global/local)')
 
     def _engage_near_wall_bypass(self, engage: bool) -> None:
         """Engage/release the full near-wall bypass. Engaged = collision_monitor
@@ -2439,10 +2539,13 @@ class MobileBridgeNode(Node):
 
     def _near_wall_monitor_loop(self) -> None:
         """Background daemon: while a Nav2 goal is active, engage the
-        near-wall bypass when the robot is close to an obstacle and release
-        it when clear. Covers every goal source (app /api/nav_goal and RViz
-        /goal_pose both set _current_goal['active']). Replaces the old
-        EXECUTING-phase unconditional bypass and the fixed-timer restorer."""
+        near-wall bypass when the robot is close to a KNOWN static-map wall
+        and release it when clear. Dynamic obstacles (not in the saved map)
+        deliberately never engage it — see _near_wall_distance — so they keep
+        collision_monitor + their inflation halo and are avoided, not pushed.
+        Covers every goal source (app /api/nav_goal and RViz /goal_pose both
+        set _current_goal['active']). Replaces the old EXECUTING-phase
+        unconditional bypass and the fixed-timer restorer."""
         while True:
             time.sleep(0.3)
             try:
@@ -2673,6 +2776,55 @@ class MobileBridgeNode(Node):
 
     # --- Park-approach staging ("straight-in" docking) -------------------
 
+    def _pose_footprint_clear(self, px: float, py: float,
+                              clearance_m: float = None) -> bool:
+        """True if a robot footprint centred at (px,py) in the map frame keeps
+        at least (circumscribed radius + clearance_m) of free space from any
+        static-map obstacle/unknown cell — i.e. the chassis fits there at any
+        heading. Used to reject a blocked staging pose. Conservative
+        (circumscribed, yaw-independent) and returns False when the map can't
+        be read, matching _corridor_clear's fail-safe stance."""
+        try:
+            if clearance_m is None:
+                clearance_m = self._park_approach_clearance
+            with self._map_lock:
+                grid = None if self._map_grid is None else self._map_grid.copy()
+                info = dict(self._map_info)
+            if grid is None or not info:
+                return False
+            res = float(info.get('resolution', 0.0))
+            ox = float(info.get('origin_x', 0.0))
+            oy = float(info.get('origin_y', 0.0))
+            h, w = grid.shape
+            if res <= 0.0 or h == 0 or w == 0:
+                return False
+            # Robot half-extents (same source as _corridor_clear).
+            hx, hy = 0.135, 0.10
+            try:
+                if _build_urdf is not None and \
+                   hasattr(_build_urdf, 'load_persisted_dimensions'):
+                    dims = _build_urdf.load_persisted_dimensions() or {}
+                    hx = float(dims.get('chassis_length', 2 * hx)) / 2.0
+                    hy = float(dims.get('chassis_width', 2 * hy)) / 2.0
+            except Exception:
+                pass
+            required_m = hypot(hx, hy) + max(0.0, clearance_m)  # circumscribed
+            required_cells = max(1, int(ceil(required_m / res)))
+            gx = int(round((px - ox) / res))
+            gy = int(round((py - oy) / res))
+            if not (0 <= gx < w and 0 <= gy < h):
+                return False
+            obstacle = (grid != 0)  # unknown(-1) + occupied(>0) both block
+            try:
+                from scipy.ndimage import distance_transform_edt
+                dist = distance_transform_edt(~obstacle)
+            except Exception:
+                dist = self._bounded_distance(obstacle, required_cells + 2)
+            return dist[gy, gx] >= required_cells
+        except Exception as exc:
+            self.get_logger().warning(f'pose footprint check failed: {exc}')
+            return False
+
     def _corridor_clear(self, x0: float, y0: float, x1: float, y1: float,
                         clearance_m: float = None) -> bool:
         """True if the straight segment (x0,y0)->(x1,y1) in the map frame keeps
@@ -2789,6 +2941,35 @@ class MobileBridgeNode(Node):
             return 'blocked'
         return stage
 
+    def _first_clear_staging_pose(self, x, y, yaw):
+        """Adaptive staging: search candidate approach poses on the slot heading
+        axis from `park_approach_dist_m` down to `park_approach_dist_min_m` in
+        `park_approach_dist_step_m` steps, and return the FARTHEST (ax, ay, d)
+        whose (i) pose footprint and (ii) approach->slot corridor are both clear
+        of static-map obstacles. Returns None if none fit. This keeps the
+        straight-in alignment while routing the staging pose around an obstacle
+        sitting on the default 0.55 m spot."""
+        from math import cos as mcos, sin as msin
+        d = self._park_approach_dist
+        d_min = max(0.05, self._park_approach_dist_min)
+        step = max(0.01, self._park_approach_dist_step)
+        clr = self._park_staging_clearance
+        while d >= d_min - 1e-6:
+            ax = x - d * mcos(yaw)
+            ay = y - d * msin(yaw)
+            pose_ok = self._pose_footprint_clear(ax, ay, clr)
+            corr_ok = pose_ok and self._corridor_clear(ax, ay, x, y)
+            if pose_ok and corr_ok:
+                self.get_logger().info(
+                    f'park-approach: staging d={d:.2f} m OK '
+                    f'({ax:.2f},{ay:.2f}) clr={clr:.2f}')
+                return (ax, ay, d)
+            self.get_logger().info(
+                f'park-approach: staging d={d:.2f} m rejected '
+                f'(pose_clear={pose_ok}, corridor_clear={corr_ok})')
+            d -= step
+        return None
+
     def start_parking_approach(self, x, y, yaw) -> bool:
         """Two-leg straight-in park. Returns True if a goal (staging or the
         standard fallback) was published. See the constructor note for the
@@ -2796,20 +2977,20 @@ class MobileBridgeNode(Node):
         x, y, yaw = float(x), float(y), float(yaw)
         if not self._park_approach_enabled:
             return self.send_nav_goal(x, y, yaw)
-        from math import cos as mcos, sin as msin
-        d = self._park_approach_dist
-        ax = x - d * mcos(yaw)
-        ay = y - d * msin(yaw)
-        # Check #1: corridor approach->slot clear at issue time?
-        if not self._corridor_clear(ax, ay, x, y):
+        # Check #1: find the farthest clear staging pose on the slot axis.
+        staging = self._first_clear_staging_pose(x, y, yaw)
+        if staging is None:
             self.get_logger().warning(
-                'park-approach: corridor blocked/unverifiable at issue; '
-                'falling back to standard goal')
+                'park-approach: no clear staging pose on the slot axis '
+                f'[{self._park_approach_dist_min:.2f}..'
+                f'{self._park_approach_dist:.2f}] m; falling back to '
+                'standard goal')
             with self._park_lock:
                 self._park_stage = 'off'
                 self._park_final = None
                 self._park_blocked_t = time.time()
             return self.send_nav_goal(x, y, yaw)
+        ax, ay, d = staging
         with self._park_lock:
             self._park_final = {'x': x, 'y': y, 'yaw': yaw}
             self._park_stage = 'approach'

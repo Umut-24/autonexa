@@ -311,7 +311,11 @@ local_costmap:
         # 0.18 -> 0.14 (2026-05-20): tighter halo so the planner can route
         # through the small room and closer to walls. Still > inscribed
         # (~0.13 for the 0.27x0.20 footprint + 0.03 pad).
-        inflation_radius: 0.14
+        # 0.14 -> 0.16 (2026-06-03, "balanced"): a bit more standoff so the
+        # controller's view of a dropped obstacle keeps margin. Wall parking is
+        # unaffected — the bridge's near-wall bypass relaxes inflation to the
+        # escape value near a KNOWN wall.
+        inflation_radius: 0.16
 
       always_send_full_costmap: true
 
@@ -337,15 +341,24 @@ global_costmap:
       footprint_padding: 0.05
       resolution: 0.05  # Coarser global grid for faster Hybrid-A* planning
       track_unknown_space: true
-      # static_layer + keepout_filter own the long-term map; inflation runs
-      # next and inflates ONLY those (the wall halo). obstacle_layer runs
-      # LAST, writing lethal cells for live LIDAR returns without an
-      # inflation halo. This is deliberate: it lets the planner avoid
-      # newly-placed / dynamic obstacles, while avoiding the wall-halo
-      # compounding bug that motivated removing the global live-scan
-      # layer originally (chassis parked near a wall ended up inside an
-      # inflated cell and the planner couldn't draw a leave-park path).
-      plugins: ["static_layer", "keepout_filter", "inflation_layer", "obstacle_layer"]
+      # Layer order (2026-06-03): obstacle_layer now runs BEFORE inflation so
+      # newly-observed LIDAR returns get a FULL inflation halo (cost gradient +
+      # inscribed band), not a bare lethal cell. This is what lets SMAC route
+      # AROUND obstacles placed after the map was saved with real clearance,
+      # instead of grazing them at the old ~footprint_padding (5 cm) margin.
+      #
+      # The reason the obstacle_layer used to be LAST was the "leave-park" bug:
+      # a chassis parked hard against a wall would see the wall re-detected as a
+      # live obstacle, get inflated, and sit inside the inscribed band -> the
+      # planner couldn't draw a path out (and couldn't draw a path IN to a
+      # wall-adjacent slot). That is now handled dynamically instead of by layer
+      # order: ros2_mobile_bridge.py::_apply_tight_maneuver() temporarily shrinks
+      # BOTH inflation_radius AND footprint_padding (the inscribed band is sized
+      # from footprint+padding, so inflation_radius alone is not enough) via
+      # SetParameters during the corridor-verified park push and the first leg of
+      # a goal issued from a wall-adjacent start, then restores them. So walls
+      # stay parkable while dynamic obstacles keep their go-around halo.
+      plugins: ["static_layer", "keepout_filter", "obstacle_layer", "inflation_layer"]
 
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
@@ -375,17 +388,20 @@ global_costmap:
         # planner's minimum_turning_radius assumption.
         # 0.22 -> 0.16 (2026-05-20): tighter halo to draw paths near walls in
         # the small room; still > local (0.14) and > inscribed (~0.13).
-        inflation_radius: 0.16
+        # 0.16 -> 0.20 (2026-06-03, "balanced"): wider berth so the planned
+        # detour around a dropped obstacle keeps clearance and the chassis goes
+        # AROUND it instead of grazing/sweeping. Kept > local (0.16). Wall-
+        # adjacent parking still works via the near-wall bypass (relaxes
+        # inflation+padding only near a KNOWN static wall, never the obstacle).
+        inflation_radius: 0.20
 
-      # New-obstacle layer for the planner. Placed AFTER inflation on
-      # purpose: walls keep their fat halo (from static + inflation), and
-      # newly-observed LIDAR returns are written as bare lethal cells
-      # with NO inflation. This avoids the wall-halo-compounding bug
-      # that motivated removing the global obstacle layer originally
-      # (chassis parked near a wall would otherwise sit inside an
-      # inflated halo and the planner couldn't draw a leave-park path).
-      # Margin around new obstacles comes from footprint_padding (0.04 m)
-      # instead of inflation.
+      # New-obstacle layer for the planner. Runs BEFORE inflation (see the
+      # plugins note above) so newly-observed LIDAR returns get a full
+      # inflation halo and SMAC routes around them with real clearance. The
+      # wall-adjacent park/leave cases that this ordering would otherwise
+      # block are handled dynamically by the bridge's _apply_tight_maneuver()
+      # (shrinks inflation_radius + footprint_padding during the verified push
+      # / leave-park leg), not by demoting this layer below inflation.
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -473,7 +489,9 @@ planner_server:
       # kept only as a last resort for genuinely tight geometry (Reeds-Shepp
       # still permits it). Pull back toward 1.5–2.0 if real 3-point park
       # goals start failing because reverse got too expensive.
-      reverse_penalty: 3.0
+      # 3.0 -> 2.0 (2026-06-03, operator choice): re-allow reverse arcs a bit
+      # more freely (real 3-point parks were getting too expensive at 3.0).
+      reverse_penalty: 2.0
       # 0.4 → 0.6 (2026-05-13), then 0.6 → 1.0 (2026-06-01): each direction
       # change (cusp) now costs more, so the planner prefers fewer-cusp
       # solutions — a forward arc wins over a cusp-heavy K-turn even when the
@@ -486,7 +504,11 @@ planner_server:
       # signal, which translates to faster planning and fewer empty
       # /plan emissions. Tight enough that real curve solutions still win.
       non_straight_penalty: 1.05
-      cost_penalty: 1.5
+      # 1.5 -> 1.8 (2026-06-03): weight costmap cost a little harder so the
+      # SMAC path leans off inflated obstacle cells and keeps more clearance
+      # when routing around a dropped obstacle (pairs with the larger global
+      # inflation_radius 0.20). Still modest so tight goals stay plannable.
+      cost_penalty: 1.8
       retrospective_penalty: 0.015
       lookup_table_size: 20.0
       cache_obstacle_heuristic: true

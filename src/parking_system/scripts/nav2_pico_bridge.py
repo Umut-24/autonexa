@@ -268,6 +268,17 @@ class Nav2PicoBridge(Node):
         self.steer_ref_speed = float(self.get_parameter('steer_ref_speed_mps').value)
         # Committed drive direction for the steering inverse (hysteresis state).
         self._steer_dir = 1
+        # Intent-based direction commit (decoupled from the speed gate). The old
+        # rule only committed _steer_dir when |vx| > steer_ref_speed, so a slow
+        # forward leg at a reverse->forward cusp (vx hovering <=ref) kept the
+        # reverse direction and steered the WRONG hand on the forward leg. We now
+        # commit from sign(desired.vx) with a small epsilon + a short debounce:
+        # a sustained slow-forward command flips direction within ~debounce ticks
+        # (~150 ms at 30 Hz), while a 1-tick transient dip toward zero does not.
+        self._steer_dir_cand = 0          # candidate direction awaiting debounce
+        self._steer_dir_cand_count = 0    # consecutive ticks the candidate held
+        self.steer_dir_eps = 0.005        # |vx| below this = no directional intent
+        self.steer_dir_debounce = 4       # ticks of consistent sign before commit
 
         self.wheelbase = float(self.get_parameter('wheelbase_m').value)
         self.track_width = float(self.get_parameter('track_width_m').value)
@@ -722,20 +733,42 @@ class Nav2PicoBridge(Node):
           1) Reference-speed floor: clamp the denominator magnitude to
              steer_ref_speed so steer = atan(L*wz/v_eff) stays continuous and
              proportional to wz at all speeds — no snap-to-max.
-          2) Direction hysteresis: the drive direction used for the floor sign
-             and for the reverse_steer_polarity flip only commits past
-             +-steer_ref_speed and is HELD inside the band. So a transient vx
-             dip toward/below zero during a forward manoeuvre no longer triggers
-             a spurious reverse flip. reverse_steer_polarity (value -1) still
-             applies, but only for a genuinely committed reverse.
+          2) Intent-based direction commit with debounce: the drive direction
+             used for the floor sign (and the reverse_steer_polarity flip)
+             commits from the SIGN of the commanded vx (intent), debounced over
+             steer_dir_debounce ticks — it is NOT gated on |vx| > steer_ref_speed.
+             A 1-tick transient dip toward zero is rejected by the debounce, but
+             a sustained slow-forward leg commits forward within ~debounce ticks.
+             This fixes the rare forward-leg wrong-steer at a reverse->forward
+             cusp during slow final approach, where the old ref-band gate held
+             the reverse direction (vx hovering <= ref) and steered the wrong
+             hand. reverse_steer_polarity (value -1) still applies, but only for
+             a genuinely committed reverse.
         """
         ref = self.steer_ref_speed
-        # Commit drive direction only past +-ref; hold within the dead band.
-        if vx > ref:
-            self._steer_dir = 1
-        elif vx < -ref:
-            self._steer_dir = -1
-        # else: keep self._steer_dir (last committed direction)
+        # Commit drive direction from the controller's INTENT (sign of the
+        # commanded vx), debounced — NOT gated on |vx| > ref. This is the cusp
+        # fix: a sustained slow forward leg (vx <= ref) still commits forward
+        # within steer_dir_debounce ticks instead of sticking at the reverse
+        # direction and steering the wrong hand. A 1-tick transient dip toward
+        # zero (|vx| <= eps or a lone opposite sample) is rejected by the
+        # debounce, preserving the original anti-flicker behaviour.
+        intent = 1 if vx > self.steer_dir_eps else (
+            -1 if vx < -self.steer_dir_eps else 0)
+        if intent != 0 and intent != self._steer_dir:
+            if intent == self._steer_dir_cand:
+                self._steer_dir_cand_count += 1
+            else:
+                self._steer_dir_cand = intent
+                self._steer_dir_cand_count = 1
+            if self._steer_dir_cand_count >= self.steer_dir_debounce:
+                self._steer_dir = intent
+                self._steer_dir_cand_count = 0
+        else:
+            # Intent matches the committed direction (or is in the dead band):
+            # nothing pending. Hold _steer_dir.
+            self._steer_dir_cand = 0
+            self._steer_dir_cand_count = 0
         v_eff = self._steer_dir * max(abs(vx), ref)
         steer = math.atan(self.wheelbase * wz / v_eff)
         if self._steer_dir < 0:
