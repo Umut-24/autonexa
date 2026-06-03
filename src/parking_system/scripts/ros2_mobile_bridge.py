@@ -4069,6 +4069,7 @@ def _run_external_command(ws, request_id: str, profile_id: str,
         return
 
     out_q = queue.Queue()
+    reader_threads = []
 
     def _reader(pipe, stream_name):
         try:
@@ -4098,10 +4099,14 @@ def _run_external_command(ws, request_id: str, profile_id: str,
             start_new_session=(os.name == 'posix'),
             env=dict(os.environ),
         )
-        threading.Thread(
-            target=_reader, args=(proc.stdout, 'stdout'), daemon=True).start()
-        threading.Thread(
-            target=_reader, args=(proc.stderr, 'stderr'), daemon=True).start()
+        reader_threads = [
+            threading.Thread(
+                target=_reader, args=(proc.stdout, 'stdout'), daemon=True),
+            threading.Thread(
+                target=_reader, args=(proc.stderr, 'stderr'), daemon=True),
+        ]
+        for thread in reader_threads:
+            thread.start()
 
         deadline = time.time() + max(1.0, runtime_s)
         while proc.poll() is None:
@@ -4162,6 +4167,8 @@ def _run_external_command(ws, request_id: str, profile_id: str,
             return_code = proc.wait(timeout=1.0)
         except subprocess.TimeoutExpired:
             return_code = -9
+        for thread in reader_threads:
+            thread.join(timeout=0.3)
         _drain_command_queue(ws, out_q, run_id)
     except FileNotFoundError as exc:
         reason = 'not_found'

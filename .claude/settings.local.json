@@ -36,7 +36,16 @@
       "Bash(python generate_cdrr_pdf.py)",
       "Bash(python \"C:\\\\GitHub\\\\autonexa\\\\docs\\\\generate_cdrr_pdf.py\")",
       "Bash(cat /home/autonexa/.autonexa/runtime_overrides.yaml 2>/dev/null || echo \"File not found\")",
-      "Read(//home/autonexa/.autonexa/**)"
+      "Read(//home/autonexa/.autonexa/**)",
+      "Bash(cp pico_firmware/build/autonexa_pico.uf2 /media/autonexa/RPI-RP2/)",
+      "Bash(sync)",
+      "Read(//media/autonexa/RPI-RP2/**)",
+      "Bash(grep -nA1 \"use_mobile_bridge'\" src/parking_system/launch/nav2_live_slam.launch.py)",
+      "Bash(awk '/^controller_server:/,/^smoother_server:/' src/parking_system/config/nav2_navigation_params.yaml)",
+      "Bash(grep -vE \"^\\\\s*$\")",
+      "Read(//tmp/**)",
+      "Bash(awk -F, 'NR>1 && $3>0.05' /tmp/steer3.csv)",
+      "Bash(awk -F, 'NR>1 && $3<-0.05' /tmp/steer3.csv)"
     ]
   }
 }
