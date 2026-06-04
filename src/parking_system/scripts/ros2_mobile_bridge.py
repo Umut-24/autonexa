@@ -47,6 +47,8 @@ import io
 import uuid
 import hashlib
 import base64
+import urllib.request
+import urllib.error
 # POSIX-only modules for the web terminal (PTY). Guarded so the bridge still
 # imports on non-POSIX dev machines; the terminal endpoints check this flag.
 try:
@@ -129,6 +131,14 @@ RELOCALIZE_AUTO_PATH = os.path.join(AUTONEXA_DATA_DIR, 'relocalize_auto.json')
 # Launch-time flag for encoder->EKF odometry fusion. Read by the launch files
 # (use_ekf arg default); written here. Toggling requires a relaunch.
 USE_EKF_PATH = os.path.join(AUTONEXA_DATA_DIR, 'use_ekf.txt')
+# Opt-in: choose the two-leg park staging pose via an LLM call instead of the
+# deterministic chooser. Default off. The LLM pick is only used if it passes
+# the same hard validation gate; on any failure it falls back to deterministic.
+PARK_AI_MODE_PATH = os.path.join(AUTONEXA_DATA_DIR, 'park_ai_mode.txt')
+# LLM credentials/config for AI staging (json: provider/model/api_key/...).
+# Lives outside the repo so the API key is never committed. The key may also
+# come from the ANTHROPIC_API_KEY env var (takes precedence if set).
+LLM_CONFIG_PATH = os.path.join(AUTONEXA_DATA_DIR, 'llm_config.json')
 
 
 def _resolve_desktop_web_dir() -> str:
@@ -538,6 +548,8 @@ class MobileBridgeNode(Node):
         self._park_stage = 'off'             # 'off' | 'approach' | 'pushing_in'
         self._park_final = None              # {'x','y','yaw'} exact slot pose
         self._park_blocked_t = 0.0           # wall-clock of last corridor block
+        self._park_ai_notice = ''            # last AI-staging outcome ('ai'|'fallback')
+        self._park_ai_notice_t = 0.0         # wall-clock of that outcome
         # Alternate staging distances tried (in order) before giving up the
         # two-leg strategy. Same slot-axis heading (so the final push stays
         # straight-in), just closer to the slot: a nearer staging pose has a
@@ -2782,6 +2794,66 @@ class MobileBridgeNode(Node):
             self.get_logger().warning(f'cannot persist use_ekf: {exc}')
             return False
 
+    def get_park_ai_mode(self) -> bool:
+        """Read the persisted AI-staging flag (~/.autonexa/park_ai_mode.txt).
+        When true, the two-leg park leg-1 staging pose is chosen by an LLM call
+        (validated, with deterministic fallback). Default false."""
+        try:
+            with open(PARK_AI_MODE_PATH, 'r', encoding='utf-8') as fh:
+                return fh.read().strip().lower() in ('1', 'true', 'yes', 'on')
+        except OSError:
+            return False
+
+    def set_park_ai_mode(self, enabled: bool) -> bool:
+        """Persist the AI-staging flag. Takes effect on the next park goal."""
+        try:
+            os.makedirs(AUTONEXA_DATA_DIR, exist_ok=True)
+            with open(PARK_AI_MODE_PATH, 'w', encoding='utf-8') as fh:
+                fh.write('true' if enabled else 'false')
+            self.get_logger().info(f'park_ai_mode -> {enabled}')
+            return True
+        except OSError as exc:
+            self.get_logger().warning(f'cannot persist park_ai_mode: {exc}')
+            return False
+
+    def _load_llm_config(self) -> dict:
+        """Load LLM config for AI staging from ~/.autonexa/llm_config.json.
+        Returns a dict with at least 'api_key' + 'model', or None if no key is
+        available (so the caller falls back to deterministic staging). The
+        ANTHROPIC_API_KEY env var overrides the file's api_key when set."""
+        cfg = {'provider': 'anthropic', 'model': 'claude-haiku-4-5',
+               'api_key': '', 'max_tokens': 256, 'timeout_s': 8.0}
+        try:
+            with open(LLM_CONFIG_PATH, 'r', encoding='utf-8') as fh:
+                doc = json.load(fh) or {}
+            for k in ('provider', 'model', 'api_key'):
+                if doc.get(k):
+                    cfg[k] = str(doc[k])
+            if doc.get('max_tokens') is not None:
+                cfg['max_tokens'] = int(doc['max_tokens'])
+            if doc.get('timeout_s') is not None:
+                cfg['timeout_s'] = float(doc['timeout_s'])
+        except (OSError, ValueError, TypeError):
+            pass
+        env_key = os.environ.get('ANTHROPIC_API_KEY')
+        if env_key:
+            cfg['api_key'] = env_key
+        return cfg if cfg.get('api_key') else None
+
+    def _set_park_ai_notice(self, state: str) -> None:
+        """Record a short-lived AI-staging outcome ('ai' | 'fallback') the app
+        polls via /api/status to toast 'AI staging used / fell back'."""
+        with self._park_lock:
+            self._park_ai_notice = state
+            self._park_ai_notice_t = time.time()
+
+    def get_park_ai_notice(self) -> str:
+        """The AI-staging outcome if one occurred in the last 5 s, else ''."""
+        with self._park_lock:
+            state = self._park_ai_notice
+            t = self._park_ai_notice_t
+        return state if (time.time() - t) < 5.0 else ''
+
     def _publish_raw_goal(self, x: float, y: float, yaw: float) -> None:
         """Build + publish a /goal_pose and refresh the cached goal overlay."""
         from math import cos as mcos, sin as msin
@@ -3093,13 +3165,36 @@ class MobileBridgeNode(Node):
         standard fallback) was published. See the constructor note for the
         full state machine and fallback contract.
 
-        Tries staging candidates (decreasing approach distance) in order; the
-        first with a clear corridor is attempted. If none has a clear corridor
-        it falls back to a plain slot goal."""
+        AI mode (park_ai_mode on): the leg-1 staging pose is chosen by an LLM
+        on a background worker (so this returns immediately and the app's HTTP
+        timeout isn't blocked by the network call); the worker validates the
+        pick and falls back to deterministic staging on any failure.
+
+        Otherwise: tries staging candidates (decreasing approach distance) in
+        order; the first valid one is attempted, else a plain slot goal."""
         x, y, yaw = float(x), float(y), float(yaw)
         if not self._park_approach_enabled:
             return self.send_nav_goal(x, y, yaw)
         final = {'x': x, 'y': y, 'yaw': yaw}
+        if self.get_park_ai_mode():
+            # Provisional park state so substate reads 'approach' immediately;
+            # the worker issues the actual staging goal (or the fallback).
+            with self._park_lock:
+                self._park_final = final
+                self._park_stage = 'approach'
+                self._park_cand_idx = -1     # -1 = AI-chosen (not a list idx)
+                self._park_blocked_t = 0.0
+            threading.Thread(target=self._ai_staging_worker, args=(final,),
+                             daemon=True, name='ai-staging').start()
+            return True
+        return self._deterministic_staging(final)
+
+    def _deterministic_staging(self, final: dict) -> bool:
+        """Pick the first valid staging candidate (corridor-clear + no novel
+        obstacle within the staging clearance) and issue it as the leg-1 goal;
+        fall back to a plain slot goal if none is valid. Returns True if a goal
+        was published. Shared by the non-AI path and the AI fallback."""
+        x, y, yaw = final['x'], final['y'], final['yaw']
         # Check #1: pick the first staging candidate with a clear corridor.
         nxt = self._next_clear_staging(final, 0)
         if nxt is None:
@@ -3132,6 +3227,208 @@ class MobileBridgeNode(Node):
                 self._park_final = None
             self._apply_goal_yaw_tol(self._park_final_yaw_tol)
         return ok
+
+    # --- AI staging (LLM-chosen leg-1 pose, validated, fallback-protected) ---
+
+    def _ai_staging_worker(self, final: dict) -> None:
+        """Background worker: ask the LLM for a leg-1 staging pose, validate it,
+        and issue it; on any failure fall back to deterministic staging and
+        post a 'fallback' notice the app toasts. Never blocks the HTTP caller."""
+        try:
+            pick = self._ai_choose_staging(final)
+            if pick is not None:
+                ax, ay, ayaw = pick
+                with self._park_lock:
+                    self._park_final = final
+                    self._park_stage = 'approach'
+                    self._park_cand_idx = -1
+                    self._park_blocked_t = 0.0
+                self._apply_goal_yaw_tol(self._park_staging_yaw_tol)
+                self.get_logger().info(
+                    f'park-approach[AI]: staging to ({ax:.2f},{ay:.2f},'
+                    f'yaw={ayaw:.2f}) before slot '
+                    f'({final["x"]:.2f},{final["y"]:.2f})')
+                if self.send_nav_goal(ax, ay, ayaw):
+                    self._set_park_ai_notice('ai')
+                    return
+                self.get_logger().warning(
+                    'park-approach[AI]: send_nav_goal failed; deterministic')
+            else:
+                self.get_logger().warning(
+                    'park-approach[AI]: no valid LLM staging pose; '
+                    'using deterministic staging')
+        except Exception as exc:
+            self.get_logger().warning(f'AI staging worker error: {exc}')
+        # Fallback path (LLM unavailable / invalid / send failed / exception).
+        self._set_park_ai_notice('fallback')
+        self._deterministic_staging(final)
+
+    def _scan_summary_for_llm(self, max_pts: int = 40) -> list:
+        """A downsampled list of map-frame obstacle points [[x,y],...] for the
+        prompt — stride-sampled from the cached scan to keep tokens low."""
+        with self._scan_lock:
+            pts = list(self._scan_points)
+        if not pts:
+            return []
+        if len(pts) <= max_pts:
+            sample = pts
+        else:
+            step = len(pts) / float(max_pts)
+            sample = [pts[int(i * step)] for i in range(max_pts)]
+        return [[round(float(p[0]), 2), round(float(p[1]), 2)] for p in sample]
+
+    def _point_clear_of_scans(self, px: float, py: float, r: float) -> bool:
+        """True if NO cached scan return lies within r metres of (px,py) — the
+        user's hard staging rule (applies to every return: walls + obstacles)."""
+        with self._scan_lock:
+            pts = list(self._scan_points)
+            scan_stamp = self._scan_stamp
+        if not pts or (time.time() - scan_stamp) > 1.5:
+            # No fresh scan -> cannot assert clearance -> treat as NOT clear so
+            # the AI pick is rejected and we fall back to deterministic staging.
+            return False
+        r2 = r * r
+        for x, y in pts:
+            dx = x - px
+            dy = y - py
+            if dx * dx + dy * dy < r2:
+                return False
+        return True
+
+    def _validate_ai_staging(self, ax: float, ay: float, ayaw: float,
+                             final: dict):
+        """Hard gate for an LLM-proposed staging pose. Returns (ok, reason)."""
+        # 1) In map bounds and on a free cell (not a wall / not unknown).
+        with self._map_lock:
+            grid = None if self._map_grid is None else self._map_grid
+            info = dict(self._map_info)
+        if grid is None or not info:
+            return (False, 'no map')
+        res = float(info.get('resolution', 0.0))
+        ox = float(info.get('origin_x', 0.0))
+        oy = float(info.get('origin_y', 0.0))
+        if res <= 0.0:
+            return (False, 'bad map resolution')
+        h, w = grid.shape
+        cx = int(round((ax - ox) / res))
+        cy = int(round((ay - oy) / res))
+        if not (0 <= cx < w and 0 <= cy < h):
+            return (False, 'staging point out of map bounds')
+        if int(grid[cy, cx]) != 0:
+            return (False, 'staging cell not free (wall/unknown)')
+        # 2) >= 0.30 m from every scan return (the user's hard rule).
+        if not self._point_clear_of_scans(ax, ay, 0.30):
+            return (False, 'within 0.30 m of an obstacle/scan return')
+        # 3) Straight lane to the slot is clear (leg-2 push works).
+        if not self._corridor_clear(ax, ay, final['x'], final['y']):
+            return (False, 'approach->slot corridor blocked')
+        # 4) Sane approach distance to the slot.
+        d = hypot(final['x'] - ax, final['y'] - ay)
+        if not (0.25 <= d <= 1.2):
+            return (False, f'approach distance {d:.2f} m out of [0.25,1.2]')
+        return (True, 'ok')
+
+    def _ai_choose_staging(self, final: dict):
+        """Ask the LLM for a staging (x,y,yaw); validate (up to 2 attempts with
+        a rejection-reason re-prompt). Returns (ax,ay,ayaw) or None."""
+        cfg = self._load_llm_config()
+        if cfg is None:
+            self.get_logger().warning(
+                'AI staging: no LLM api_key (llm_config.json / ANTHROPIC_API_KEY)')
+            return None
+        pose = self._get_pose()
+        obstacles = self._scan_summary_for_llm()
+        with self._map_lock:
+            info = dict(self._map_info)
+        bounds = {
+            'origin_x': round(float(info.get('origin_x', 0.0)), 2),
+            'origin_y': round(float(info.get('origin_y', 0.0)), 2),
+            'width_m': round(float(info.get('width', 0)) *
+                             float(info.get('resolution', 0.0)), 2),
+            'height_m': round(float(info.get('height', 0)) *
+                              float(info.get('resolution', 0.0)), 2),
+            'resolution': float(info.get('resolution', 0.0)),
+        }
+        base_prompt = (
+            "You position a small Ackermann parking robot's STAGING POSE for a "
+            "straight-in park. All coordinates are metres in the map frame.\n"
+            f"Parking slot pose: x={final['x']:.2f}, y={final['y']:.2f}, "
+            f"yaw={final['yaw']:.2f} rad.\n"
+            f"Robot pose: x={pose['x_m']:.2f}, y={pose['y_m']:.2f}, "
+            f"yaw={pose['yaw_rad']:.2f} rad.\n"
+            f"Map bounds (metres): {json.dumps(bounds)}.\n"
+            f"Obstacle points [[x,y],...]: {json.dumps(obstacles)}.\n\n"
+            "Choose a staging pose (x, y, yaw) that:\n"
+            "- is 0.25 to 1.2 m from the slot, roughly on the approach side so a "
+            "straight push reaches the slot;\n"
+            "- yaw points from the staging pose toward the slot;\n"
+            "- is AT LEAST 0.30 m from EVERY obstacle point above;\n"
+            "- is inside the map bounds and in free space.\n"
+            "Respond with ONLY a JSON object, no prose: "
+            '{"x": <m>, "y": <m>, "yaw": <rad>, "reason": "<short>"}')
+        prompt = base_prompt
+        for attempt in range(2):
+            txt = self._call_anthropic(cfg, prompt)
+            if txt is None:
+                return None  # network/api failure -> deterministic fallback
+            cand = self._parse_xyyaw(txt)
+            if cand is None:
+                prompt = (base_prompt + "\n\nYour previous reply was not valid "
+                          "JSON with numeric x, y, yaw. Reply with ONLY that JSON.")
+                continue
+            ax, ay, ayaw = cand
+            ok, reason = self._validate_ai_staging(ax, ay, ayaw, final)
+            if ok:
+                return (ax, ay, ayaw)
+            self.get_logger().info(f'AI staging rejected ({reason}); re-prompting')
+            prompt = (base_prompt + f"\n\nYour previous choice was REJECTED: "
+                      f"{reason}. Choose a different valid pose. ONLY the JSON.")
+        return None
+
+    @staticmethod
+    def _parse_xyyaw(txt: str):
+        """Extract the first JSON object with numeric x,y,yaw from text."""
+        try:
+            start = txt.index('{')
+            end = txt.rindex('}') + 1
+            doc = json.loads(txt[start:end])
+            return (float(doc['x']), float(doc['y']), float(doc['yaw']))
+        except (ValueError, KeyError, TypeError):
+            return None
+
+    def _call_anthropic(self, cfg: dict, prompt: str):
+        """POST a single-message request to the Anthropic Messages API (stdlib
+        urllib, no extra dep). Returns the assistant text, or None on any
+        error/timeout/non-200 so the caller falls back to deterministic."""
+        try:
+            body = json.dumps({
+                'model': cfg['model'],
+                'max_tokens': int(cfg.get('max_tokens', 256)),
+                'messages': [{'role': 'user', 'content': prompt}],
+            }).encode('utf-8')
+            req = urllib.request.Request(
+                'https://api.anthropic.com/v1/messages', data=body,
+                headers={
+                    'x-api-key': cfg['api_key'],
+                    'anthropic-version': '2023-06-01',
+                    'content-type': 'application/json',
+                }, method='POST')
+            with urllib.request.urlopen(
+                    req, timeout=float(cfg.get('timeout_s', 8.0))) as resp:
+                if resp.status != 200:
+                    self.get_logger().warning(
+                        f'LLM HTTP {resp.status}')
+                    return None
+                doc = json.loads(resp.read().decode('utf-8'))
+            parts = doc.get('content') or []
+            for p in parts:
+                if p.get('type') == 'text' and p.get('text'):
+                    return p['text']
+            return None
+        except (urllib.error.URLError, urllib.error.HTTPError,
+                ValueError, KeyError, TypeError, OSError) as exc:
+            self.get_logger().warning(f'LLM call failed: {exc}')
+            return None
 
     def _park_push_in(self, final: dict) -> None:
         """Leg 2: re-validate the corridor from the robot's current pose, then
@@ -3521,6 +3818,8 @@ class MobileBridgeNode(Node):
             'nav_status': nav_status,
             'nav_status_stamp': nav_stamp,
             'park_approach': self.get_park_stage(),
+            'park_ai_mode': self.get_park_ai_mode(),
+            'park_ai_notice': self.get_park_ai_notice(),
             'goal': self.get_goal(),
             'estop_latched': self._estop_latched,
             'map_fingerprint': self._current_fingerprint(),
@@ -4043,6 +4342,10 @@ def api_status():
         # /cmd_vel_smoothed (collision_monitor bypassed). Diagnostic-only;
         # the bridge's own SetParameters response is the source of truth.
         'nav_bypass_active': bridge_node._nav_bypass_active,
+        # AI staging toggle + last outcome (short-lived) so the app can show the
+        # switch state and toast a fallback. Full park substate is on the WS.
+        'park_ai_mode': bridge_node.get_park_ai_mode(),
+        'park_ai_notice': bridge_node.get_park_ai_notice(),
         # Lets the app show/hide the Terminals tab without probing /api/terminals.
         'web_terminal': _web_terminal_ready(),
     })
@@ -4478,6 +4781,25 @@ def api_ekf_mode():
     ok = bridge_node.set_use_ekf(enabled)
     return jsonify({'use_ekf': enabled, 'persisted': ok,
                     'relaunch_required': True}), (200 if ok else 500)
+
+
+@flask_app.route('/api/park_ai_mode', methods=['GET', 'POST'])
+def api_park_ai_mode():
+    """GET: current park_ai_mode flag.
+    POST {enabled: bool} — when on, the two-leg park leg-1 staging pose is
+    chosen by an LLM (Claude Haiku 4.5) instead of the deterministic chooser.
+    The LLM pick is used only if it passes the validation gate (>=0.30 m from
+    every scan, in-bounds free cell, corridor-clear); on any failure it falls
+    back to deterministic staging and posts a 'fallback' notice. Needs an LLM
+    key in ~/.autonexa/llm_config.json or the ANTHROPIC_API_KEY env var."""
+    if request.method == 'GET':
+        return jsonify({'park_ai_mode': bridge_node.get_park_ai_mode()})
+    data = request.get_json(silent=True) or {}
+    if 'enabled' not in data:
+        return jsonify({'error': 'enabled (bool) required'}), 400
+    enabled = bool(data['enabled'])
+    ok = bridge_node.set_park_ai_mode(enabled)
+    return jsonify({'park_ai_mode': enabled, 'persisted': ok}), (200 if ok else 500)
 
 
 # ---------------------------------------------------------------------------
@@ -5239,6 +5561,7 @@ def index():
 <li>GET/POST /api/planner_mode — standard | multipoint path planner</li>
 <li>GET/POST /api/relocalize_auto — periodic AMCL re-settle (localization mode)</li>
 <li>GET/POST /api/ekf_mode — toggle encoder->EKF odom fusion (relaunch to apply)</li>
+<li>GET/POST /api/park_ai_mode — toggle LLM-chosen park staging pose (on/off)</li>
 <li>POST /api/relocalize — set robot pose (x,y,yaw)</li>
 <li>GET/POST /api/params?node=&lt;name&gt; — live param tuner (whitelist only)</li>
 <li><a href="/api/health">/api/health</a> — topic rates / staleness</li>

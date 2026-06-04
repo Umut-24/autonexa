@@ -34,6 +34,8 @@ class _ParkingTabState extends State<ParkingTab>
   bool _manualLoading = false;
   String _lastFingerprint = '';
 
+  ConnectionService? _conn;
+
   @override
   void initState() {
     super.initState();
@@ -43,7 +45,32 @@ class _ParkingTabState extends State<ParkingTab>
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final conn = context.read<ConnectionService>();
+    if (!identical(conn, _conn)) {
+      _conn?.removeListener(_onConnChange);
+      _conn = conn;
+      _conn!.addListener(_onConnChange);
+    }
+  }
+
+  /// Surface the bridge's short-lived AI-staging outcome as a toast (the user
+  /// asked to be notified when AI staging falls back to the deterministic pose).
+  void _onConnChange() {
+    final notice = _conn?.consumeParkAiNotice() ?? '';
+    if (notice == 'fallback' && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('AI staging unavailable — used default staging')));
+      });
+    }
+  }
+
+  @override
   void dispose() {
+    _conn?.removeListener(_onConnChange);
     _tabController.dispose();
     _missionTimer?.cancel();
     super.dispose();
@@ -82,6 +109,9 @@ class _ParkingTabState extends State<ParkingTab>
                       letterSpacing: -0.5)),
             ),
           ),
+
+          // AI staging toggle (applies to the two-leg park staging selection).
+          _buildAiStagingBar(colors),
 
           // Tab bar
           Container(
@@ -123,6 +153,52 @@ class _ParkingTabState extends State<ParkingTab>
           ),
         ],
       ),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  //  AI STAGING TOGGLE
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  Widget _buildAiStagingBar(ResolvedColors colors) {
+    final conn = context.watch<ConnectionService>();
+    final on = conn.parkAiMode;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: colors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+            color: on ? colors.accent.withValues(alpha: 0.6) : colors.border),
+      ),
+      child: Row(children: [
+        Icon(on ? Icons.auto_awesome : Icons.auto_awesome_outlined,
+            size: 18, color: on ? colors.accent : colors.textSecondary),
+        const SizedBox(width: 8),
+        Text('AI STAGING',
+            style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 1.2,
+                color: colors.textSecondary)),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            on
+                ? 'LLM picks the park staging pose (validated, falls back).'
+                : 'Deterministic staging pose (default).',
+            style: TextStyle(fontSize: 11, color: colors.textSecondary),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        Switch.adaptive(
+          value: on,
+          onChanged: conn.isConnected
+              ? (v) => conn.setParkAiMode(v)
+              : null,
+        ),
+      ]),
     );
   }
 

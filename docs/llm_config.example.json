@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to ~/.autonexa/llm_config.json on the robot and put your real key in it. This file is only an example template; the real config lives OUTSIDE the repo so the key is never committed. The ANTHROPIC_API_KEY env var, if set, overrides api_key here.",
+  "provider": "anthropic",
+  "model": "claude-haiku-4-5",
+  "api_key": "sk-ant-REPLACE_ME",
+  "max_tokens": 256,
+  "timeout_s": 8.0
+}

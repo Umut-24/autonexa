@@ -178,6 +178,12 @@ class ConnectionService extends ChangeNotifier {
   String _navStatus = 'IDLE';
   double _navStatusStamp = 0;
   String _mapFingerprint = '';
+  // AI staging mode: when on, the park leg-1 staging pose is chosen by an LLM
+  // (validated, with deterministic fallback). _parkAiNotice carries the last
+  // short-lived outcome ('ai' | 'fallback' | '') from the bridge.
+  bool _parkAiMode = false;
+  String _parkAiNotice = '';      // unconsumed UI event ('ai'|'fallback'|'')
+  String _rawParkAiNotice = '';   // last raw bridge value, for edge dedupe
 
   // Robot physical dimensions, refreshed from /api/robot_config on connect.
   // Used by the map overlay (chassis footprint + LiDAR marker) and the
@@ -213,6 +219,8 @@ class ConnectionService extends ChangeNotifier {
   NavGoal get currentGoal => _currentGoal;
   ControlMode get mode => _mode;
   SafetyMode get safetyMode => _safetyMode;
+  bool get parkAiMode => _parkAiMode;
+  String get parkAiNotice => _parkAiNotice;
   List<NamedWaypoint> get namedWaypoints => List.unmodifiable(_namedWaypoints);
   String get navStatus => _navStatus;
   double get navStatusStamp => _navStatusStamp;
@@ -503,6 +511,18 @@ class ConnectionService extends ChangeNotifier {
       }
       if (json['safety_mode'] is String) {
         _safetyMode = _safetyFromString(json['safety_mode'] as String);
+      }
+      if (json['park_ai_mode'] is bool) {
+        _parkAiMode = json['park_ai_mode'] as bool;
+      }
+      if (json['park_ai_notice'] is String) {
+        // Edge-dedupe: the bridge keeps returning the same notice for ~5 s, so
+        // only raise a UI event when the raw value changes to a non-empty one.
+        final n = json['park_ai_notice'] as String;
+        if (n != _rawParkAiNotice) {
+          _rawParkAiNotice = n;
+          if (n.isNotEmpty) _parkAiNotice = n;
+        }
       }
       if (json['nav_status'] is String) {
         _navStatus = json['nav_status'] as String;
@@ -822,6 +842,36 @@ class ConnectionService extends ChangeNotifier {
       logger.error('safety_mode failed: $e', LogCategory.control);
       return false;
     }
+  }
+
+  /// Toggle AI staging mode (LLM-chosen park leg-1 staging pose). Persists on
+  /// the bridge. Optimistic local update so the switch reacts instantly.
+  Future<bool> setParkAiMode(bool enabled) async {
+    if (_baseUrl == null) return false;
+    _parkAiMode = enabled;
+    notifyListeners();
+    try {
+      final resp = await http.post(
+        Uri.parse('$_baseUrl/api/park_ai_mode'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'enabled': enabled}),
+      ).timeout(const Duration(seconds: 2));
+      final ok = resp.statusCode == 200;
+      if (ok) {
+        logger.info('park_ai_mode -> $enabled', LogCategory.control);
+      }
+      return ok;
+    } catch (e) {
+      logger.error('park_ai_mode failed: $e', LogCategory.control);
+      return false;
+    }
+  }
+
+  /// Read-and-clear the latest AI-staging UI event ('ai'|'fallback'|'').
+  String consumeParkAiNotice() {
+    final n = _parkAiNotice;
+    _parkAiNotice = '';
+    return n;
   }
 
   // --- Direction calibration (Part B) ---

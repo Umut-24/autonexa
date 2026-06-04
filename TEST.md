@@ -557,6 +557,45 @@ trigger stop + reroute. 11f/11g green — escape + blocked-route recovery work.
 
 ---
 
+## Stage 12 — AI staging mode (LLM-chosen park staging pose, AMCL mode)
+
+Optional feature: when **AI staging** is ON (Parking tab switch), the two-leg park's
+leg-1 staging pose is chosen by an LLM (Claude Haiku 4.5) instead of the deterministic
+chooser. The LLM pick is **only used if it passes the validation gate** (≥0.30 m from
+every scan return, in-bounds free cell, corridor-clear, 0.25–1.2 m from slot); on any
+failure it **falls back** to deterministic staging and the app toasts "used default".
+
+**Setup (once):** copy [docs/llm_config.example.json](docs/llm_config.example.json) to
+`~/.autonexa/llm_config.json` on the Pi and put your real Anthropic key in it (or export
+`ANTHROPIC_API_KEY`). The key file lives outside the repo — never commit it. The Pi needs
+internet at park time.
+
+```bash
+# confirm the toggle + endpoint
+curl -s localhost:5000/api/park_ai_mode                       # {"park_ai_mode": false}
+curl -s -XPOST localhost:5000/api/park_ai_mode -H 'Content-Type: application/json' -d '{"enabled":true}'
+```
+
+- **12a Regression (gate):** AI mode **OFF** → park behaves exactly as Stage 11
+  (deterministic staging, <3 cm). Must pass before testing AI.
+- **12b Happy path:** key configured, AI mode ON, issue a **park** goal. PASS: bridge logs
+  an LLM call + `park-approach[AI]: staging to (…)`; the chosen pose is in-bounds, **≥0.30 m
+  from all scan points**, corridor-clear; leg-2 push-in completes the park. App shows no
+  fallback toast.
+- **12c Exclusion respected:** place obstacles around; the accepted staging pose is never
+  within 0.30 m of any scan return. If the LLM proposes a bad one, logs show
+  `AI staging rejected (…); re-prompting`.
+- **12d Offline / bad key:** remove the key (or drop network). PASS: worker falls back to
+  deterministic staging, park still completes, and the **app toasts "AI staging unavailable
+  — used default"** (`park_ai_notice=fallback`).
+- **12e Latency:** the `/api/nav_goal` POST returns immediately (app doesn't time out) while
+  the LLM call runs in the worker thread; park substate reads `approach` during the call.
+
+**Pass:** 12a green (regression) + 12b/12c (AI works and respects the 0.30 m rule) + 12d
+(graceful fallback + toast). 12e confirms no UI stall.
+
+---
+
 ## Full system diagnostics (run any time)
 
 ```bash
@@ -601,6 +640,7 @@ Stage 8  →  Autonomous navigation to RViz goal
 Stage 9  →  App tap-to-navigate + E-STOP cancel
 Stage 10 →  ArUco marker detection + parking approach
 Stage 11 →  Stop & reroute around NEW obstacles (AMCL); precise park preserved
+Stage 12 →  AI staging mode (LLM-chosen park staging, validated + fallback)
 ```
 
 Each stage gate-keeps the next. If Stage 3 fails there is no point testing Stage 7.
